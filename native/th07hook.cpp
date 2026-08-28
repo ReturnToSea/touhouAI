@@ -34,6 +34,20 @@ static HANDLE g_map = nullptr;
 
 constexpr uintptr_t FRAMESKIP_BYTE = 0x00575A8B;
 
+// --- state snapshot for episode reset ---------------------------------------
+// One contiguous span covers every static game-state object: ANM_MANAGER ptr &
+// INPUT (0x4B9E44), PLAYER (0x4BDAD8), GAME_MANAGER (0x626270),
+// BULLET_MANAGER (0x62F958, ~3.6MB), ENEMY_MANAGER (0x9A9B00, ~9.7MB),
+// ECL_MANAGER (0x1347938), STAGE (0x1347B00), STAGE_NUM (0x1347FC8).
+constexpr uintptr_t SNAP_LO = 0x004B0000;
+constexpr uintptr_t SNAP_HI = 0x01350000;
+constexpr size_t    SNAP_SZ = SNAP_HI - SNAP_LO;   // ~15.3 MB
+constexpr size_t    GLOB_SZ = 0x100;               // zGlobals (heap block)
+
+static uint8_t* g_snap_static = nullptr;
+static uint8_t  g_snap_glob[GLOB_SZ];
+static uintptr_t g_snap_glob_ptr = 0;
+
 // limiter skip-branches (see feasibility/README.md) - NOP so do_tick never waits
 static const struct { uintptr_t va; uint8_t want[2]; } LIMITER[] = {
     {0x004348CC, {0x74, 0x56}},
@@ -148,10 +162,30 @@ static int __fastcall hooked_do_tick(void* self, void* edx) {
             return 0;
         }
 
-        case ST_RESET:
+        case ST_SNAPSHOT: {
+            memcpy(g_snap_static, (void*)SNAP_LO, SNAP_SZ);
+            g_snap_glob_ptr = rd<uintptr_t>(GAME_MANAGER + GM_GLOBALS_PTR);
+            if (g_snap_glob_ptr)
+                memcpy(g_snap_glob, (void*)g_snap_glob_ptr, GLOB_SZ);
+            s->have_snapshot = 1;
+            capture_obs();
             s->done = 1;
             s->state = ST_IDLE;
             return 0;
+        }
+
+        case ST_RESET: {
+            if (s->have_snapshot) {
+                memcpy((void*)SNAP_LO, g_snap_static, SNAP_SZ);
+                if (g_snap_glob_ptr)
+                    memcpy((void*)g_snap_glob_ptr, g_snap_glob, GLOB_SZ);
+                s->frame = 0;
+            }
+            capture_obs();
+            s->done = 1;
+            s->state = ST_IDLE;
+            return 0;
+        }
 
         case ST_IDLE:
         default:
@@ -174,6 +208,10 @@ static DWORD WINAPI init_thread(LPVOID) {
     g_shm->version = SHM_VERSION;
     g_shm->state = ST_FREE;
     g_shm->repeat = 1;
+
+    g_snap_static = (uint8_t*)VirtualAlloc(nullptr, SNAP_SZ, MEM_COMMIT | MEM_RESERVE,
+                                           PAGE_READWRITE);
+    if (!g_snap_static) return 1;
 
     if (MH_Initialize() != MH_OK) return 1;
     if (MH_CreateHook((void*)FN_DO_TICK, (void*)&hooked_do_tick,

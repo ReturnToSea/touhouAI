@@ -18,10 +18,11 @@ constexpr int MAX_ENEMIES = 64;
 
 // control.state values
 enum ShmState : uint32_t {
-    ST_IDLE  = 0,  // hook spins, does not advance logic
-    ST_STEP  = 1,  // env wants `repeat` logic ticks with `action` held
-    ST_FREE  = 2,  // hook calls the original do_tick (menus / navigation, rendered)
-    ST_RESET = 3,  // env wants an episode reset (restore snapshot)
+    ST_IDLE     = 0,  // hook spins, does not advance logic
+    ST_STEP     = 1,  // env wants `repeat` logic ticks with `action` held
+    ST_FREE     = 2,  // hook calls the original do_tick (menus, rendered)
+    ST_RESET    = 3,  // restore the snapshot, then obs + done
+    ST_SNAPSHOT = 4,  // capture the current game state as the reset point
 };
 
 #pragma pack(push, 4)
@@ -38,8 +39,9 @@ struct Shm {
     volatile uint32_t frame;      // logic frames elapsed since inject
     uint16_t action;              // Btn bitmask to hold during the step
     uint16_t repeat;              // logic ticks per step (>=1)
-    int32_t  tick_status;         // last run_all_on_tick() return (0 = normal)
+    int32_t  tick_status;         // last do_tick() return (0 = normal)
     uint32_t alive;               // hook -> 1 each pass (heartbeat / crash detect)
+    uint32_t have_snapshot;       // hook -> 1 once ST_SNAPSHOT has run
 
     // --- observation (hook writes) ---
     float    player_x, player_y, player_vx, player_vy;

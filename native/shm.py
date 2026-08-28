@@ -10,7 +10,7 @@ SHM_MAGIC = 0x37304854
 MAX_BULLETS = 2048
 MAX_ENEMIES = 64
 
-ST_IDLE, ST_STEP, ST_FREE, ST_RESET = 0, 1, 2, 3
+ST_IDLE, ST_STEP, ST_FREE, ST_RESET, ST_SNAPSHOT = 0, 1, 2, 3, 4
 
 
 class Bullet(ctypes.Structure):
@@ -37,6 +37,7 @@ class Shm(ctypes.Structure):
         ("repeat", ctypes.c_uint16),
         ("tick_status", ctypes.c_int32),
         ("alive", ctypes.c_uint32),
+        ("have_snapshot", ctypes.c_uint32),
         ("player_x", ctypes.c_float),
         ("player_y", ctypes.c_float),
         ("player_vx", ctypes.c_float),
@@ -91,17 +92,28 @@ class Hook:
     def set_free(self):
         self.s.state = ST_FREE
 
-    def step(self, action: int, repeat: int = 1, timeout: float = 5.0) -> bool:
+    def _cmd(self, state: int, timeout: float) -> bool:
         s = self.s
-        s.action = action & 0xFFFF
-        s.repeat = max(1, repeat)
         s.done = 0
-        s.state = ST_STEP
+        s.state = state
         deadline = time.perf_counter() + timeout
         while not s.done:
             if time.perf_counter() > deadline:
                 return False
         return True
+
+    def step(self, action: int, repeat: int = 1, timeout: float = 5.0) -> bool:
+        self.s.action = action & 0xFFFF
+        self.s.repeat = max(1, repeat)
+        return self._cmd(ST_STEP, timeout)
+
+    def snapshot(self, timeout: float = 5.0) -> bool:
+        """Capture the current game state as the episode-reset point."""
+        return self._cmd(ST_SNAPSHOT, timeout)
+
+    def reset(self, timeout: float = 5.0) -> bool:
+        """Restore the snapshot (must have called snapshot() first)."""
+        return self._cmd(ST_RESET, timeout)
 
     def bullets(self):
         n = min(self.s.bullet_count, MAX_BULLETS)
