@@ -167,23 +167,26 @@ class Hook:
                 return True
         return False
 
-    def eval_policy(self, weights, h1: int, h2: int, frame_skip: int = 3,
-                    max_frames: int = 7200, render: bool = False,
-                    timeout: float = 120.0, on_wait=None):
-        """Run one full episode with the in-DLL MLP `weights`. Returns a dict of
-        episode stats, or None on timeout / game crash."""
+    # --- in-DLL episode eval: blocking + split (for the island orchestrator) ---
+    def eval_start(self, weights, h1: int, h2: int, frame_skip: int = 3,
+                   max_frames: int = 7200, render: bool = False) -> None:
+        """Kick off one full-episode eval with `weights`. Non-blocking."""
         import numpy as np
         w = np.ascontiguousarray(weights, dtype=np.float32)
-        n = w.size
-        ctypes.memmove(self.s.weights, w.ctypes.data, n * 4)
+        ctypes.memmove(self.s.weights, w.ctypes.data, w.size * 4)
         s = self.s
         s.eval_h1, s.eval_h2 = int(h1), int(h2)
         s.eval_frame_skip = int(frame_skip)
         s.eval_max_frames = int(max_frames)
         s.eval_render = 1 if render else 0
-        if not self._cmd(ST_EVAL, timeout,
-                         poll=0.0005 if not render else 0.004, on_wait=on_wait):
-            return None
+        s.done = 0
+        s.state = ST_EVAL
+
+    def eval_done(self) -> bool:
+        return bool(self.s.done)
+
+    def eval_result(self) -> dict:
+        s = self.s
         return {
             "frames": int(s.ep_frames),
             "score": int(s.ep_score),
@@ -191,6 +194,20 @@ class Hook:
             "died": bool(s.ep_died),
             "tick_status": int(s.ep_tick_status),
         }
+
+    def eval_policy(self, weights, h1: int, h2: int, frame_skip: int = 3,
+                    max_frames: int = 7200, render: bool = False,
+                    timeout: float = 120.0, on_wait=None):
+        """Blocking single-episode eval. Returns stats dict, or None on timeout."""
+        self.eval_start(weights, h1, h2, frame_skip, max_frames, render)
+        deadline = time.perf_counter() + timeout
+        while not self.s.done:
+            if time.perf_counter() > deadline:
+                return None
+            if on_wait is not None:
+                on_wait()
+            time.sleep(0.0005 if not render else 0.004)
+        return self.eval_result()
 
     def bullets(self):
         n = min(self.s.bullet_count, MAX_BULLETS)
