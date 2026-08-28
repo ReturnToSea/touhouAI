@@ -152,14 +152,17 @@ def migrate(islands, n_migrants):
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--islands", type=int, default=8)
-    ap.add_argument("--island-pop", type=int, default=24)
-    ap.add_argument("--parents", type=int, default=8, help="truncation cut per island")
+    ap.add_argument("--island-pop", type=int, default=40)
+    ap.add_argument("--parents", type=int, default=15, help="truncation cut per island")
     ap.add_argument("--elite", type=int, default=2)
-    ap.add_argument("--sigma", type=float, default=0.02)
+    ap.add_argument("--sigma", type=float, default=0.05)
     ap.add_argument("--hidden", type=int, nargs="+", default=[64, 64])
     ap.add_argument("--gens", type=int, default=5000)
-    ap.add_argument("--migrate-every", type=int, default=10)
-    ap.add_argument("--n-migrants", type=int, default=2)
+    ap.add_argument("--migrate-every", type=int, default=25)
+    ap.add_argument("--n-migrants", type=int, default=1)
+    ap.add_argument("--restart-every", type=int, default=30,
+                    help="wipe the N worst islands to fresh random pops (0=off)")
+    ap.add_argument("--restart-count", type=int, default=2)
     ap.add_argument("--frame-skip", type=int, default=3)
     ap.add_argument("--max-seconds", type=float, default=120.0)
     ap.add_argument("--w-score", type=float, default=3e-4,
@@ -242,10 +245,10 @@ def main() -> None:
             if hud is not None:
                 hud.gen_end(bframes)
 
-            # island fitness isn't comparable across instances - every
-            # --migrate-every gens, re-score all island champions on ONE
-            # reference instance so best.pt is a fair pick with a real number.
-            if gen % max(1, args.migrate_every) == 0:
+            # island fitness isn't comparable across instances - every 10 gens,
+            # re-score all island champions on ONE reference instance so best.pt
+            # is a fair pick with a real number.
+            if gen % 10 == 0:
                 ref = islands[0].env.h
                 champ_w = []
                 ref_fit = []
@@ -267,6 +270,20 @@ def main() -> None:
                 isl.next_gen(args.parents, args.elite, args.sigma, rng)
             if args.migrate_every and (gen + 1) % args.migrate_every == 0:
                 migrate(islands, args.n_migrants)
+
+            # anti-convergence: periodically wipe the worst islands back to
+            # fresh random populations so the whole archipelago can't settle
+            # into one local optimum. Migration then re-seeds them with one
+            # champion, so they explore fresh with a foothold.
+            if args.restart_every and (gen + 1) % args.restart_every == 0:
+                worst = np.argsort(champs)[:args.restart_count]
+                for wi in worst:
+                    n = len(islands[wi].pop)
+                    islands[wi].pop = [
+                        MLPPolicy(hidden=hidden).get_flat().astype(np.float32)
+                        for _ in range(n)]
+                    print(f"  restart island {wi} (was champ {champs[wi]:.1f})",
+                          flush=True)
 
             gen += 1
             if gen % 5 == 0:
