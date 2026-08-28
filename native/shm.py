@@ -84,6 +84,7 @@ class Shm(ctypes.Structure):
         ("ep_died", ctypes.c_uint32),
         ("ep_tick_status", ctypes.c_int32),
         ("ep_boss_dmg", ctypes.c_float),
+        ("ep_x_dev", ctypes.c_float),
         ("dbg_obs", ctypes.c_float * OBS_DIM),
         ("bullets", Bullet * MAX_BULLETS),
         ("enemies", Enemy * MAX_ENEMIES),
@@ -198,6 +199,7 @@ class Hook:
             "died": bool(s.ep_died),
             "tick_status": int(s.ep_tick_status),
             "boss_dmg": float(s.ep_boss_dmg),
+            "x_dev": float(s.ep_x_dev),
         }
 
     def eval_policy(self, weights, h1: int, h2: int, frame_skip: int = 3,

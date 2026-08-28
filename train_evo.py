@@ -32,7 +32,7 @@ from policy import MLPPolicy  # noqa: E402
 
 
 def make_fitness(w_score: float, w_frame: float, death_pen: float,
-                 w_boss: float = 0.0):
+                 w_boss: float = 0.0, w_center: float = 0.0):
     """fitness = w_score*score + w_frame*frames + w_boss*boss_damage
                  - death_pen if died.
 
@@ -46,6 +46,7 @@ def make_fitness(w_score: float, w_frame: float, death_pen: float,
     def f(st):
         return (w_score * st["score"] + w_frame * st["frames"]
                 + w_boss * st.get("boss_dmg", 0.0)
+                - w_center * st.get("x_dev", 0.0)      # (x/W - 0.5)^2, 0..0.25
                 - (death_pen if st["died"] else 0.0))
     return f
 
@@ -160,7 +161,7 @@ def main() -> None:
     ap.add_argument("--parents", type=int, default=15, help="truncation cut per island")
     ap.add_argument("--elite", type=int, default=2)
     ap.add_argument("--sigma", type=float, default=0.05)
-    ap.add_argument("--hidden", type=int, nargs="+", default=[64, 64])
+    ap.add_argument("--hidden", type=int, nargs="+", default=[128, 128])
     ap.add_argument("--gens", type=int, default=5000)
     ap.add_argument("--migrate-every", type=int, default=25)
     ap.add_argument("--n-migrants", type=int, default=1)
@@ -175,6 +176,9 @@ def main() -> None:
                     help="fitness weight on frames survived")
     ap.add_argument("--w-boss", type=float, default=5.0,
                     help="fitness weight on boss damage (~1.0 per phase cleared)")
+    ap.add_argument("--w-center", type=float, default=10.0,
+                    help="fitness penalty on mean (x/W - 0.5)^2 - a gentle nudge "
+                         "toward centre-x (edge-hug costs ~w_center*0.25)")
     ap.add_argument("--death-penalty", type=float, default=1.0)
     ap.add_argument("--warmup-jitter", type=int, default=90,
                     help="random 0..N uncounted policy frames before each "
@@ -187,7 +191,7 @@ def main() -> None:
     args = ap.parse_args()
 
     fit_fn = make_fitness(args.w_score, args.w_frame, args.death_penalty,
-                          args.w_boss)
+                          args.w_boss, args.w_center)
     rng = np.random.default_rng(args.seed)
     run = Path("runs") / args.name
     run.mkdir(parents=True, exist_ok=True)

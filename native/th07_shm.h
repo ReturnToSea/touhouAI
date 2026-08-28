@@ -92,6 +92,7 @@ struct Shm {
     uint32_t ep_died;            // 1 = lost a life / terminal, 0 = hit the cap
     int32_t  ep_tick_status;     // last do_tick return
     float    ep_boss_dmg;        // sum of per-frame (hp lost / hp_max); ~1 per phase
+    float    ep_x_dev;           // mean (player_x/W - 0.5)^2 over the episode
     float    dbg_obs[OBS_DIM];   // DLL writes the episode's first build_obs() here
 
     Bullet   bullets[MAX_BULLETS];

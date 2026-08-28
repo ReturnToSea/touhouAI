@@ -468,10 +468,12 @@ static int __fastcall hooked_do_tick(void* self, void* edx) {
             reset_bullet_hist();   // fresh velocity baseline for the counted run
 
             uint32_t frames = 0;
+            uint32_t decisions = 0;
             int r = 0;
             bool died = warm_dead;
             bool first = true;
             float boss_dmg = 0.f;
+            float x_dev_sum = 0.f;
             float prev_bhp = 0.f;
             bool prev_boss = false;
             while (!warm_dead && frames < cap) {
@@ -484,6 +486,9 @@ static int __fastcall hooked_do_tick(void* self, void* edx) {
                     s->frame++; frames++;
                     if (r != 0) break;
                 }
+                float pxn = rd<float>(PLAYER + PL_POS_X) / PLAYFIELD_W - 0.5f;
+                x_dev_sum += pxn * pxn;
+                decisions++;
                 // boss damage: sum per-decision HP drops, normalised by hp_max
                 // (spell-card refills -> negative delta, ignored). Only count
                 // when the boss was present on both this and the previous check.
@@ -514,6 +519,7 @@ static int __fastcall hooked_do_tick(void* self, void* edx) {
             s->ep_died = died ? 1 : 0;
             s->ep_tick_status = r;
             s->ep_boss_dmg = boss_dmg;
+            s->ep_x_dev = decisions ? x_dev_sum / (float)decisions : 0.f;
             capture_obs();
             s->done = 1;
             s->state = ST_IDLE;
