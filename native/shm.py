@@ -12,6 +12,10 @@ MAX_ENEMIES = 64
 
 ST_IDLE, ST_STEP, ST_FREE, ST_RESET, ST_SNAPSHOT = 0, 1, 2, 3, 4
 
+# input bits (confirmed against the game)
+SHOOT, BOMB, SLOW, SKIP = 0x01, 0x02, 0x04, 0x08
+UP, DOWN, LEFT, RIGHT = 0x10, 0x20, 0x40, 0x80
+
 
 class Bullet(ctypes.Structure):
     _pack_ = 4

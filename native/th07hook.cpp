@@ -91,20 +91,25 @@ static void capture_obs() {
     s->boss_hp = rd<float>(GUI + GUI_BOSS_HP_CUR);
     s->boss_hp_max = rd<float>(GUI + GUI_BOSS_HP_MAX);
 
-    int bn = 0;
+    // slot-indexed: bullets[i] is pool slot i (inactive -> x = INACTIVE).
+    // Velocity is derived on the Python side by diffing a slot across frames.
+    int active = 0;
     uintptr_t bb = BULLET_MANAGER + BM_BULLETS;
-    for (uintptr_t i = 0; i < BM_BULLET_MAX && bn < MAX_BULLETS; ++i) {
-        uintptr_t b = bb + i * BM_BULLET_STRIDE;
+    const int nslot = (int)BM_BULLET_MAX < MAX_BULLETS ? (int)BM_BULLET_MAX : MAX_BULLETS;
+    for (int i = 0; i < nslot; ++i) {
+        uintptr_t b = bb + (uintptr_t)i * BM_BULLET_STRIDE;
         uint16_t st = rd<uint16_t>(b + BULLET_STATE);
-        if (st == 0 || st == 6) continue;
         float bx = rd<float>(b + BULLET_POS), by = rd<float>(b + BULLET_POS + 4);
-        if (bx < -64 || bx > PLAYFIELD_W + 64 || by < -64 || by > PLAYFIELD_H + 64)
-            continue;
-        s->bullets[bn].x = bx; s->bullets[bn].y = by;
-        s->bullets[bn].vx = 0; s->bullets[bn].vy = 0;
-        ++bn;
+        bool live = (st != 0 && st != 6 &&
+                     bx > -64 && bx < PLAYFIELD_W + 64 &&
+                     by > -64 && by < PLAYFIELD_H + 64);
+        s->bullets[i].x = live ? bx : INACTIVE;
+        s->bullets[i].y = live ? by : INACTIVE;
+        s->bullets[i].vx = (float)st;   // slot state (debug / classification)
+        s->bullets[i].vy = 0;
+        active += live;
     }
-    s->bullet_count = bn;
+    s->bullet_count = active;
 
     int en = 0;
     int32_t ec = rd<int32_t>(ENEMY_MANAGER + EM_ENEMY_COUNT);

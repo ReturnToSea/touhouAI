@@ -13,8 +13,9 @@ namespace th07 {
 constexpr uint32_t SHM_MAGIC   = 0x37304854;  // 'TH07'
 constexpr uint32_t SHM_VERSION = 1;
 
-constexpr int MAX_BULLETS = 2048;
-constexpr int MAX_ENEMIES = 64;
+constexpr int   MAX_BULLETS = 2048;   // >= the 1025 pool slots
+constexpr int   MAX_ENEMIES = 64;
+constexpr float INACTIVE    = -9999.0f;  // sentinel for an empty bullet slot
 
 // control.state values
 enum ShmState : uint32_t {
