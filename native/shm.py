@@ -10,7 +10,7 @@ SHM_MAGIC = 0x37304854
 MAX_BULLETS = 2048
 MAX_ENEMIES = 64
 
-ST_IDLE, ST_STEP, ST_FREE, ST_RESET, ST_SNAPSHOT = 0, 1, 2, 3, 4
+ST_IDLE, ST_STEP, ST_FREE, ST_RESET, ST_SNAPSHOT, ST_AUTONAV = 0, 1, 2, 3, 4, 5
 
 # input bits (confirmed against the game)
 SHOOT, BOMB, SLOW, SKIP = 0x01, 0x02, 0x04, 0x08
@@ -42,6 +42,7 @@ class Shm(ctypes.Structure):
         ("tick_status", ctypes.c_int32),
         ("alive", ctypes.c_uint32),
         ("have_snapshot", ctypes.c_uint32),
+        ("nav_frames", ctypes.c_int32),
         ("player_x", ctypes.c_float),
         ("player_y", ctypes.c_float),
         ("player_vx", ctypes.c_float),
@@ -110,6 +111,12 @@ class Hook:
         self.s.action = action & 0xFFFF
         self.s.repeat = max(1, repeat)
         return self._cmd(ST_STEP, timeout)
+
+    def autonav(self, timeout: float = 20.0) -> bool:
+        """Tap through the menus into Stage 1. Returns False on failure."""
+        if not self._cmd(ST_AUTONAV, timeout):
+            return False
+        return self.s.nav_frames >= 0 and self.s.gamemode == 2
 
     def snapshot(self, timeout: float = 5.0) -> bool:
         """Capture the current game state as the episode-reset point."""

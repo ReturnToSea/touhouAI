@@ -130,16 +130,20 @@ static void capture_obs() {
 }
 
 // ---- hooks ------------------------------------------------------------------
+static inline bool driving() {
+    return g_shm && (g_shm->state == ST_STEP || g_shm->state == ST_AUTONAV);
+}
+
 static uint16_t __cdecl hooked_read_input(void) {
-    if (g_shm && g_shm->state == ST_STEP)
+    if (driving())
         return g_shm->action;
     return orig_read_input();
 }
 
-// Present is DWM-vsync-capped in a window. Skip it while stepping (rendering
-// still runs, just no buffer flip) so logic isn't throttled to 144 Hz.
+// Present is DWM-vsync-capped in a window. Skip it while we drive the game
+// (rendering still runs, just no buffer flip) so logic isn't throttled to 144 Hz.
 static int __cdecl hooked_present(void) {
-    if (g_shm && g_shm->state == ST_STEP)
+    if (driving())
         return 0;
     return orig_present();
 }
@@ -177,6 +181,29 @@ static int __fastcall hooked_do_tick(void* self, void* edx) {
             if (g_snap_glob_ptr)
                 memcpy(g_snap_glob, (void*)g_snap_glob_ptr, GLOB_SZ);
             s->have_snapshot = 1;
+            capture_obs();
+            s->done = 1;
+            s->state = ST_IDLE;
+            return 0;
+        }
+
+        case ST_AUTONAV: {
+            // Tap Shoot through: title -> Start -> difficulty -> character ->
+            // shot type -> Stage 1. Accepts whatever the menu cursors default
+            // to. Runs the whole nav inside this one call.
+            int nav = 0;
+            const int MAXF = 6000;
+            for (; nav < MAXF; ++nav) {
+                int gm  = rd<int32_t>(SUPERVISOR + SV_GAMEMODE);
+                int stg = rd<int32_t>(GAME_MANAGER + GM_STAGE);
+                if (gm == 2 && stg >= 1) break;
+                // ~4 frames pressed, ~10 released -> a clean tap the menus accept
+                s->action = ((nav % 14) < 4) ? (uint16_t)BTN_SHOOT : (uint16_t)0;
+                wr<uint8_t>(FRAMESKIP_BYTE, 0);
+                if (orig_do_tick(self, edx) != 0) break;
+            }
+            s->action = 0;
+            s->nav_frames = (nav >= MAXF) ? -1 : nav;
             capture_obs();
             s->done = 1;
             s->state = ST_IDLE;

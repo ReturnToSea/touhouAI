@@ -63,7 +63,7 @@ class Th07Env(_Base):
     metadata = {"render_modes": []}
 
     def __init__(self, frame_skip: int = 3, max_seconds: float = 90.0,
-                 wait_for_stage: float = 300.0):
+                 warmup: int = 90):
         super().__init__()
         self.frame_skip = frame_skip
         self.max_steps = int(max_seconds * 60 / frame_skip)
@@ -71,17 +71,17 @@ class Th07Env(_Base):
         self.pid = inject()
         self.h = S.Hook(self.pid)
         s = self.h.s
-        print(f"[Th07Env] pid {self.pid} - navigate into a stage...")
-        t0 = time.time()
-        while not (s.gamemode == 2 and s.stage >= 1):
-            if time.time() - t0 > wait_for_stage:
-                raise TimeoutError("never reached a stage")
-            time.sleep(0.4)
-        time.sleep(0.5)
+        if not self.h.autonav():
+            raise RuntimeError(f"auto-nav failed (nav_frames={s.nav_frames}, "
+                               f"mode={s.gamemode}, stage={s.stage})")
+        # a few frames past the stage-intro card, then freeze the reset point
+        for _ in range(warmup):
+            self.h.step(action=0, repeat=1)
         assert self.h.snapshot(), "snapshot failed"
         self.start_lives = s.lives
         self.start_stage = s.stage
-        print(f"[Th07Env] snapshot at stage {s.stage}, lives {s.lives:.0f}")
+        print(f"[Th07Env] pid {self.pid}: nav {s.nav_frames}f -> stage {s.stage}, "
+              f"lives {s.lives:.0f}, {s.bullet_count} bullets")
 
         if gym is not None:
             self.action_space = spaces.Discrete(NUM_ACTIONS)

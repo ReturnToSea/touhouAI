@@ -24,6 +24,7 @@ enum ShmState : uint32_t {
     ST_FREE     = 2,  // hook calls the original do_tick (menus, rendered)
     ST_RESET    = 3,  // restore the snapshot, then obs + done
     ST_SNAPSHOT = 4,  // capture the current game state as the reset point
+    ST_AUTONAV  = 5,  // tap Shoot through the menus until gamemode==2
 };
 
 #pragma pack(push, 4)
@@ -43,6 +44,7 @@ struct Shm {
     int32_t  tick_status;         // last do_tick() return (0 = normal)
     uint32_t alive;               // hook -> 1 each pass (heartbeat / crash detect)
     uint32_t have_snapshot;       // hook -> 1 once ST_SNAPSHOT has run
+    int32_t  nav_frames;          // hook -> frames ST_AUTONAV took (-1 = failed)
 
     // --- observation (hook writes) ---
     float    player_x, player_y, player_vx, player_vy;
