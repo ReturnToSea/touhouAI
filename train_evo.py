@@ -31,8 +31,19 @@ from evohud import EvoHud     # noqa: E402
 from policy import MLPPolicy  # noqa: E402
 
 
-def fitness_of(st) -> float:
-    return 0.02 * st["frames"] + st["score"] * 1e-4 - (5.0 if st["died"] else 0.0)
+def make_fitness(w_score: float, w_frame: float, death_pen: float):
+    """fitness = w_score*score + w_frame*frames_survived - death_pen if died.
+
+    Weighting score heavily (and keeping the death penalty small) pushes the
+    agent to progress deeper - PCB score is back-loaded onto the midboss / boss
+    / spell cards, so chasing points forces it past the sections a spray-and-
+    pray policy stalls at. w_frame is a small floor gradient so early death
+    still hurts.
+    """
+    def f(st):
+        return (w_score * st["score"] + w_frame * st["frames"]
+                - (death_pen if st["died"] else 0.0))
+    return f
 
 
 class Island:
@@ -67,7 +78,7 @@ class Island:
         self.pop = new
 
 
-def evaluate(islands, hidden, hud=None, stall_timeout=90.0):
+def evaluate(islands, hidden, fit_fn, hud=None, stall_timeout=90.0):
     """Work-queue: each island churns through its sub-population on its own
     instance; all N run concurrently. Blocks until every policy is scored.
     Raises RuntimeError if any island makes no progress for stall_timeout s
@@ -99,7 +110,7 @@ def evaluate(islands, hidden, hud=None, stall_timeout=90.0):
             last_ok[i] = now
             r = isl.env.h.eval_result()
             j = running[i]
-            f = fitness_of(r)
+            f = fit_fn(r)
             isl.fit[j] = f
             isl.frames[j] = r["frames"]
             isl.scores[j] = r["score"]
@@ -147,12 +158,18 @@ def main() -> None:
     ap.add_argument("--n-migrants", type=int, default=2)
     ap.add_argument("--frame-skip", type=int, default=3)
     ap.add_argument("--max-seconds", type=float, default=120.0)
+    ap.add_argument("--w-score", type=float, default=3e-4,
+                    help="fitness weight on in-game score")
+    ap.add_argument("--w-frame", type=float, default=0.01,
+                    help="fitness weight on frames survived")
+    ap.add_argument("--death-penalty", type=float, default=1.0)
     ap.add_argument("--name", default="evo")
     ap.add_argument("--resume", type=Path, default=None)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--no-hud", action="store_true")
     args = ap.parse_args()
 
+    fit_fn = make_fitness(args.w_score, args.w_frame, args.death_penalty)
     rng = np.random.default_rng(args.seed)
     run = Path("runs") / args.name
     run.mkdir(parents=True, exist_ok=True)
@@ -192,7 +209,7 @@ def main() -> None:
             if hud is not None:
                 hud.gen_start(gen, [isl.pop for isl in islands])
             try:
-                evaluate(islands, hidden, hud)
+                evaluate(islands, hidden, fit_fn, hud)
             except RuntimeError as e:
                 print(f"gen {gen}: island eval failed ({e}); relaunching all",
                       flush=True)
@@ -230,7 +247,7 @@ def main() -> None:
                     r = ref.eval_policy(w, *hidden, frame_skip=args.frame_skip,
                                         max_frames=islands[0].max_frames)
                     champ_w.append(w)
-                    ref_fit.append(fitness_of(r) if r else -1e18)
+                    ref_fit.append(fit_fn(r) if r else -1e18)
                 k = int(np.argmax(ref_fit))
                 if ref_fit[k] > best_fit:
                     best_fit = ref_fit[k]
