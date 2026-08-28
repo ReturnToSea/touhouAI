@@ -2,7 +2,7 @@
 window visible + sound on.
 
     .venv\\Scripts\\python watch.py runs\\ppo_st1\\final.zip
-    .venv\\Scripts\\python watch.py runs\\ppo_st1\\ppo_2000000_steps.zip --episodes 5
+    .venv\\Scripts\\python watch.py runs\\evo_st1\\best.pt --evo
     .venv\\Scripts\\python watch.py --random          # no model, just look at the env
 
 The game runs headless+muted during training; here it renders and presents so
@@ -25,7 +25,8 @@ from env import Th07Env  # noqa: E402
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("model", nargs="?", type=Path,
-                    help="path to a PPO .zip checkpoint")
+                    help="PPO .zip checkpoint, or an evo .pt with --evo")
+    ap.add_argument("--evo", action="store_true", help="model is an evo policy .pt")
     ap.add_argument("--random", action="store_true", help="ignore model, act randomly")
     ap.add_argument("--episodes", type=int, default=3)
     ap.add_argument("--frame-skip", type=int, default=3)
@@ -33,12 +34,19 @@ def main() -> None:
                     help="sample actions instead of taking the argmax")
     args = ap.parse_args()
 
-    policy = None
+    act_fn = None
     if not args.random:
         if not args.model or not args.model.exists():
             ap.error("give a model path, or pass --random")
-        from stable_baselines3 import PPO
-        policy = PPO.load(args.model, device="cpu")
+        if args.evo:
+            from policy import MLPPolicy
+            pol = MLPPolicy.load(args.model)
+            act_fn = lambda obs: pol.act(obs)  # noqa: E731
+        else:
+            from stable_baselines3 import PPO
+            ppo = PPO.load(args.model, device="cpu")
+            act_fn = lambda obs: int(  # noqa: E731
+                ppo.predict(obs, deterministic=not args.stochastic)[0])
         print(f"loaded {args.model}")
 
     env = Th07Env(frame_skip=args.frame_skip, max_seconds=600, render=True)
@@ -51,10 +59,7 @@ def main() -> None:
             steps = 0
             while not done:
                 t0 = time.perf_counter()
-                if policy is None:
-                    action = env.action_space.sample()
-                else:
-                    action, _ = policy.predict(obs, deterministic=not args.stochastic)
+                action = env.action_space.sample() if act_fn is None else act_fn(obs)
                 obs, r, term, trunc, info = env.step(int(action))
                 ret += r
                 steps += 1
