@@ -455,6 +455,9 @@ static int __fastcall hooked_do_tick(void* self, void* edx) {
             int r = 0;
             bool died = false;
             bool first = true;
+            float boss_dmg = 0.f;
+            float prev_bhp = 0.f;
+            bool prev_boss = false;
             while (frames < cap) {
                 build_obs(obs);
                 if (first) { memcpy(s->dbg_obs, obs, sizeof(obs)); first = false; }
@@ -465,6 +468,17 @@ static int __fastcall hooked_do_tick(void* self, void* edx) {
                     s->frame++; frames++;
                     if (r != 0) break;
                 }
+                // boss damage: sum per-decision HP drops, normalised by hp_max
+                // (spell-card refills -> negative delta, ignored). Only count
+                // when the boss was present on both this and the previous check.
+                bool boss = rd<int32_t>(GUI + GUI_BOSS_PRESENT) != 0;
+                float bhp = rd<float>(GUI + GUI_BOSS_HP_CUR);
+                float bhpm = rd<float>(GUI + GUI_BOSS_HP_MAX);
+                if (boss && prev_boss && bhpm > 1.f && prev_bhp - bhp > 0.f) {
+                    float d = (prev_bhp - bhp) / bhpm;
+                    boss_dmg += d < 0.25f ? d : 0.25f;   // clamp per-decision
+                }
+                prev_bhp = bhp; prev_boss = boss;
                 gp = rd<uintptr_t>(GAME_MANAGER + GM_GLOBALS_PTR);
                 float lives = gp ? rd<float>(gp + G_LIFE_COUNT) : start_lives;
                 if (r != 0 || lives < start_lives - 0.5f) { died = true; break; }
@@ -483,6 +497,7 @@ static int __fastcall hooked_do_tick(void* self, void* edx) {
             s->ep_graze = g ? rd<int32_t>(g + G_GRAZE) : 0;
             s->ep_died = died ? 1 : 0;
             s->ep_tick_status = r;
+            s->ep_boss_dmg = boss_dmg;
             capture_obs();
             s->done = 1;
             s->state = ST_IDLE;

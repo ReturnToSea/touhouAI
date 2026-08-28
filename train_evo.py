@@ -31,17 +31,21 @@ from evohud import EvoHud     # noqa: E402
 from policy import MLPPolicy  # noqa: E402
 
 
-def make_fitness(w_score: float, w_frame: float, death_pen: float):
-    """fitness = w_score*score + w_frame*frames_survived - death_pen if died.
+def make_fitness(w_score: float, w_frame: float, death_pen: float,
+                 w_boss: float = 0.0):
+    """fitness = w_score*score + w_frame*frames + w_boss*boss_damage
+                 - death_pen if died.
 
-    Weighting score heavily (and keeping the death penalty small) pushes the
-    agent to progress deeper - PCB score is back-loaded onto the midboss / boss
-    / spell cards, so chasing points forces it past the sections a spray-and-
-    pray policy stalls at. w_frame is a small floor gradient so early death
-    still hurts.
+    Score is weighted heavily (PCB score is back-loaded onto the midboss/boss/
+    spell cards, so chasing points forces the agent deeper). w_frame is a small
+    floor gradient. w_boss*boss_damage gives a gradient DURING a boss fight -
+    "dealt 40%% of boss hp" beats "dealt 10%%" even if it died both times - and
+    discourages a dodge-but-never-shoot policy. boss_damage is ~1.0 per phase
+    depleted.
     """
     def f(st):
         return (w_score * st["score"] + w_frame * st["frames"]
+                + w_boss * st.get("boss_dmg", 0.0)
                 - (death_pen if st["died"] else 0.0))
     return f
 
@@ -162,6 +166,8 @@ def main() -> None:
                     help="fitness weight on in-game score")
     ap.add_argument("--w-frame", type=float, default=0.01,
                     help="fitness weight on frames survived")
+    ap.add_argument("--w-boss", type=float, default=5.0,
+                    help="fitness weight on boss damage (~1.0 per phase cleared)")
     ap.add_argument("--death-penalty", type=float, default=1.0)
     ap.add_argument("--name", default="evo")
     ap.add_argument("--resume", type=Path, default=None)
@@ -169,7 +175,8 @@ def main() -> None:
     ap.add_argument("--no-hud", action="store_true")
     args = ap.parse_args()
 
-    fit_fn = make_fitness(args.w_score, args.w_frame, args.death_penalty)
+    fit_fn = make_fitness(args.w_score, args.w_frame, args.death_penalty,
+                          args.w_boss)
     rng = np.random.default_rng(args.seed)
     run = Path("runs") / args.name
     run.mkdir(parents=True, exist_ok=True)
