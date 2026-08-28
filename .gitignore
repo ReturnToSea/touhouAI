@@ -1,0 +1,39 @@
+# --- Game files (copyrighted, large, machine-specific) ---
+# The game install is never committed. Point config at it per-machine instead.
+Touhou 7 - Perfect Cherry Blossom/
+
+# --- Local config (paths differ per machine) ---
+config.yaml
+config.local.*
+.env
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.ipynb_checkpoints/
+
+# --- ML artifacts ---
+runs/
+logs/
+checkpoints/
+models/
+wandb/
+*.pt
+*.pth
+*.onnx
+*.ckpt
+replays/
+recordings/
+data/
+
+# --- Editors / OS ---
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

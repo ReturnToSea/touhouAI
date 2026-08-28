@@ -1,0 +1,4 @@
+pymem==1.14.0
+# for feasibility/re/ static analysis tools
+capstone==5.0.7
+pefile==2024.8.26
