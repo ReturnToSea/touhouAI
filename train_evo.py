@@ -31,21 +31,16 @@ from evohud import EvoHud  # noqa: E402
 from policy import MLPPolicy  # noqa: E402
 
 
-def rollout(env, pol, max_steps, hud=None):
-    obs, _ = env.reset()
-    ret = 0.0
-    steps = 0
-    score = 0
-    for _ in range(max_steps):
-        obs, r, term, trunc, info = env.step(pol.act(obs))
-        ret += r
-        steps += 1
-        score = info["score"]
-        if hud is not None and steps % 40 == 0:
-            hud.pump()
-        if term or trunc:
-            break
-    return ret, steps * env.frame_skip, score
+def fitness_of(stats) -> float:
+    # matches the old shaped reward: alive 0.02/frame + score*1e-4 - 5 on death
+    return 0.02 * stats["frames"] + stats["score"] * 1e-4 - (5.0 if stats["died"] else 0.0)
+
+
+def rollout(env, flat, hidden, hud=None):
+    """One whole episode, run inside the DLL (no per-frame Python round trip)."""
+    stats = env.rollout_policy(flat, hidden,
+                               on_wait=(hud.pump if hud is not None else None))
+    return fitness_of(stats), stats["frames"], stats["score"]
 
 
 def main() -> None:
@@ -81,8 +76,7 @@ def main() -> None:
         gen0 = 0
 
     env = Th07Env(frame_skip=args.frame_skip, max_seconds=args.max_seconds)
-    max_steps = env.max_steps
-    pol = MLPPolicy(hidden=hidden)
+    pol = MLPPolicy(hidden=hidden)   # only for saving best.pt
     best_fit = -1e9
     best_score = 0
     sim_frames = 0
@@ -95,8 +89,7 @@ def main() -> None:
             fit = np.empty(len(pop))
             frames = np.empty(len(pop), dtype=np.int64)
             for i, flat in enumerate(pop):
-                pol.set_flat(flat)
-                fit[i], fr, sc = rollout(env, pol, max_steps, hud)
+                fit[i], fr, sc = rollout(env, flat, hidden, hud)
                 frames[i] = fr
                 sim_frames += fr
                 best_score = max(best_score, sc)

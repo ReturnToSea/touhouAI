@@ -11,11 +11,16 @@
 namespace th07 {
 
 constexpr uint32_t SHM_MAGIC   = 0x37304854;  // 'TH07'
-constexpr uint32_t SHM_VERSION = 1;
+constexpr uint32_t SHM_VERSION = 2;
 
 constexpr int   MAX_BULLETS = 2048;   // >= the 1025 pool slots
 constexpr int   MAX_ENEMIES = 64;
 constexpr float INACTIVE    = -9999.0f;  // sentinel for an empty bullet slot
+
+constexpr int   OBS_DIM     = 192;
+constexpr int   N_ACTIONS   = 36;
+constexpr int   MAX_HIDDEN  = 256;   // per-layer hidden cap for the in-DLL MLP
+constexpr int   MAX_WEIGHTS = 1 << 16;  // 64k float32 = 256 KB flat param buffer
 
 // control.state values
 enum ShmState : uint32_t {
@@ -25,6 +30,7 @@ enum ShmState : uint32_t {
     ST_RESET    = 3,  // restore the snapshot, then obs + done
     ST_SNAPSHOT = 4,  // capture the current game state as the reset point
     ST_AUTONAV  = 5,  // tap Shoot through the menus until gamemode==2
+    ST_EVAL     = 6,  // reset + run a whole episode with the in-DLL MLP policy
 };
 
 #pragma pack(push, 4)
@@ -69,8 +75,24 @@ struct Shm {
     uint32_t crash_addr;         // address that was read/written
     uint32_t crash_rw;           // 0 = read, 1 = write
 
+    // --- in-DLL policy evaluation (ST_EVAL) ---
+    // env writes eval_* + weights, sets state=ST_EVAL; DLL runs a full episode
+    // (reset -> obs -> MLP -> action -> tick, until death or the frame cap) and
+    // writes ep_*.
+    uint32_t eval_frame_skip;    // frames the action is held per decision
+    uint32_t eval_max_frames;    // episode cap in game frames
+    uint32_t eval_h1, eval_h2;   // MLP hidden layer sizes
+    uint32_t eval_render;        // 1 = draw + present + pace to 60 Hz (watch)
+    uint32_t ep_frames;          // frames survived
+    int32_t  ep_score;           // final score
+    int32_t  ep_graze;           // final graze
+    uint32_t ep_died;            // 1 = lost a life / terminal, 0 = hit the cap
+    int32_t  ep_tick_status;     // last do_tick return
+    float    dbg_obs[OBS_DIM];   // DLL writes the episode's first build_obs() here
+
     Bullet   bullets[MAX_BULLETS];
     Enemy    enemies[MAX_ENEMIES];
+    float    weights[MAX_WEIGHTS];  // flat MLP params (env writes)
 };
 #pragma pack(pop)
 

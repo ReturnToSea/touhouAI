@@ -14,6 +14,7 @@
 #include <windows.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <math.h>
 #include <mmdeviceapi.h>
 #include <audiopolicy.h>
 
@@ -50,8 +51,10 @@ static int32_t g_difficulty = 3;
 typedef int(__fastcall* drawall_fn)(void* ecx, void* edx);
 static drawall_fn orig_run_all_on_draw = nullptr;
 static int __fastcall hooked_run_all_on_draw(void* ecx, void* edx) {
-    if (g_stub_draw && !g_render && g_shm &&
-        (g_shm->state == ST_STEP || g_shm->state == ST_RESET))
+    if (g_stub_draw && g_shm && !(g_shm->state == ST_EVAL && g_shm->eval_render) &&
+        !g_render &&
+        (g_shm->state == ST_STEP || g_shm->state == ST_RESET ||
+         g_shm->state == ST_EVAL))
         return 0;
     return orig_run_all_on_draw(ecx, edx);
 }
@@ -109,6 +112,171 @@ static void patch(uintptr_t a, const uint8_t* b, size_t n) {
     memcpy((void*)a, b, n);
     VirtualProtect((void*)a, n, old, &old);
     FlushInstructionCache(GetCurrentProcess(), (void*)a, n);
+}
+
+// ---- in-DLL policy: obs builder + MLP (mirror of native/env.py & policy.py) --
+constexpr int K_BULLETS = 32;   // nearest bullets in the obs
+constexpr int M_ENEMIES = 6;
+
+static float g_prev_bx[MAX_BULLETS];
+static float g_prev_by[MAX_BULLETS];
+static void reset_bullet_hist() {
+    for (int i = 0; i < MAX_BULLETS; ++i) { g_prev_bx[i] = -9999.f; g_prev_by[i] = -9999.f; }
+}
+
+// Build the 192-dim observation exactly as env.py `_obs()` does. Bullet
+// velocity is the displacement since the previous build_obs() call (i.e. over
+// one decision = frame_skip frames), matching the Python `_prev_bpos` diff.
+static void build_obs(float* o) {
+    const float W = PLAYFIELD_W, H = PLAYFIELD_H;
+    float px = rd<float>(PLAYER + PL_POS_X), py = rd<float>(PLAYER + PL_POS_Y);
+    uint8_t pst = rd<uint8_t>(PLAYER + PL_STATE);
+    uint8_t focus = rd<uint8_t>(PLAYER + PL_IS_FOCUS);
+    int32_t stage = rd<int32_t>(GAME_MANAGER + GM_STAGE);
+    float lives = 0, bombs = 0, power = 0; int32_t graze = 0;
+    uintptr_t g = rd<uintptr_t>(GAME_MANAGER + GM_GLOBALS_PTR);
+    if (g) {
+        graze = rd<int32_t>(g + G_GRAZE);
+        lives = rd<float>(g + G_LIFE_COUNT);
+        bombs = rd<float>(g + G_BOMB_COUNT);
+        power = rd<float>(g + G_POWER);
+    }
+    int boss_present = rd<int32_t>(GUI + GUI_BOSS_PRESENT);
+    float bhp = rd<float>(GUI + GUI_BOSS_HP_CUR), bhpm = rd<float>(GUI + GUI_BOSS_HP_MAX);
+
+    // head (12)
+    o[0] = px / W; o[1] = py / H; o[2] = 0.f; o[3] = 0.f;   // player_vx/vy unset (== env.py)
+    o[4] = (float)focus;
+    o[5] = lives / 9.f; o[6] = bombs / 9.f; o[7] = power / 128.f;
+    o[8] = tanhf(graze / 100.f);
+    o[9] = stage / 6.f;
+    o[10] = (pst == 0) ? 1.f : 0.f;
+    o[11] = (pst == 2) ? 1.f : 0.f;
+
+    // bullets: gather live, K nearest by distance, [rel/128, vel/10, dist/200]
+    float bd[K_BULLETS];                       // sorted ascending distance
+    float brx[K_BULLETS], bry[K_BULLETS], bvx[K_BULLETS], bvy[K_BULLETS];
+    int nb = 0;
+    uintptr_t bb = BULLET_MANAGER + BM_BULLETS;
+    const int nslot = (int)BM_BULLET_MAX < MAX_BULLETS ? (int)BM_BULLET_MAX : MAX_BULLETS;
+    for (int i = 0; i < nslot; ++i) {
+        uintptr_t b = bb + (uintptr_t)i * BM_BULLET_STRIDE;
+        uint16_t st = rd<uint16_t>(b + BULLET_STATE);
+        float bx = rd<float>(b + BULLET_POS), by = rd<float>(b + BULLET_POS + 4);
+        bool live = (st != 0 && st != 6 &&
+                     bx > -64 && bx < W + 64 && by > -64 && by < H + 64);
+        float vx = 0.f, vy = 0.f;
+        if (live && g_prev_bx[i] > -9000.f) { vx = bx - g_prev_bx[i]; vy = by - g_prev_by[i]; }
+        g_prev_bx[i] = live ? bx : -9999.f;
+        g_prev_by[i] = live ? by : -9999.f;
+        if (!live) continue;
+        float rx = bx - px, ry = by - py;
+        float d = sqrtf(rx * rx + ry * ry);
+        if (nb < K_BULLETS) {                  // insertion sort into the K-buffer
+            int j = nb++;
+            while (j > 0 && bd[j - 1] > d) {
+                bd[j] = bd[j - 1]; brx[j] = brx[j - 1]; bry[j] = bry[j - 1];
+                bvx[j] = bvx[j - 1]; bvy[j] = bvy[j - 1]; --j;
+            }
+            bd[j] = d; brx[j] = rx; bry[j] = ry; bvx[j] = vx; bvy[j] = vy;
+        } else if (d < bd[K_BULLETS - 1]) {
+            int j = K_BULLETS - 1;
+            while (j > 0 && bd[j - 1] > d) {
+                bd[j] = bd[j - 1]; brx[j] = brx[j - 1]; bry[j] = bry[j - 1];
+                bvx[j] = bvx[j - 1]; bvy[j] = bvy[j - 1]; --j;
+            }
+            bd[j] = d; brx[j] = rx; bry[j] = ry; bvx[j] = vx; bvy[j] = vy;
+        }
+    }
+    float* ob = o + 12;
+    for (int i = 0; i < K_BULLETS; ++i) {
+        if (i < nb) {
+            ob[i * 5 + 0] = brx[i] / 128.f; ob[i * 5 + 1] = bry[i] / 128.f;
+            ob[i * 5 + 2] = bvx[i] / 10.f;  ob[i * 5 + 3] = bvy[i] / 10.f;
+            ob[i * 5 + 4] = bd[i] / 200.f;
+        } else {
+            ob[i * 5 + 0] = ob[i * 5 + 1] = ob[i * 5 + 2] = ob[i * 5 + 3] = ob[i * 5 + 4] = 0.f;
+        }
+    }
+
+    // enemies (6 * 3): [rel/128, life/maxlife]
+    float* oe = o + 12 + K_BULLETS * 5;
+    for (int i = 0; i < M_ENEMIES; ++i) { oe[i * 3] = oe[i * 3 + 1] = oe[i * 3 + 2] = 0.f; }
+    int32_t ec = rd<int32_t>(ENEMY_MANAGER + EM_ENEMY_COUNT);
+    if (ec < 0 || ec > 480) ec = 0;
+    for (int i = 0; i < ec && i < M_ENEMIES; ++i) {
+        uintptr_t e = ENEMY_MANAGER + EM_ENEMIES + (uintptr_t)i * EM_ENEMY_STRIDE;
+        float ex = rd<float>(e + ENEMY_POS), ey = rd<float>(e + ENEMY_POS + 4);
+        int32_t life = rd<int32_t>(e + ENEMY_LIFE), ml = rd<int32_t>(e + ENEMY_MAXLIFE);
+        if (ml < 1) ml = 1;
+        oe[i * 3 + 0] = (ex - px) / 128.f;
+        oe[i * 3 + 1] = (ey - py) / 128.f;
+        oe[i * 3 + 2] = (float)life / (float)ml;
+    }
+
+    // boss (2)
+    float* obo = o + 12 + K_BULLETS * 5 + M_ENEMIES * 3;
+    obo[0] = (float)(boss_present != 0);
+    obo[1] = (bhpm > 0.f) ? (bhp / bhpm) : 0.f;
+}
+
+// MLP: Linear(192,h1)-Tanh-Linear(h1,h2)-Tanh-Linear(h2,36) -> argmax.
+// Flat layout matches policy.py get_flat(): W0,b0,W1,b1,W2,b2 (torch Linear
+// weight is [out,in] row-major).
+static int mlp_forward(const float* w, const float* in, int h1, int h2) {
+    float a[MAX_HIDDEN], b[MAX_HIDDEN];
+    const float* p = w;
+    for (int j = 0; j < h1; ++j) {
+        float acc = 0.f; const float* row = p + (size_t)j * OBS_DIM;
+        for (int k = 0; k < OBS_DIM; ++k) acc += row[k] * in[k];
+        a[j] = acc;
+    }
+    p += (size_t)h1 * OBS_DIM;
+    for (int j = 0; j < h1; ++j) a[j] = tanhf(a[j] + p[j]);
+    p += h1;
+    for (int j = 0; j < h2; ++j) {
+        float acc = 0.f; const float* row = p + (size_t)j * h1;
+        for (int k = 0; k < h1; ++k) acc += row[k] * a[k];
+        b[j] = acc;
+    }
+    p += (size_t)h2 * h1;
+    for (int j = 0; j < h2; ++j) b[j] = tanhf(b[j] + p[j]);
+    p += h2;
+    int best = 0; float bestv = -1e30f;
+    const float* bias = p + (size_t)N_ACTIONS * h2;
+    for (int j = 0; j < N_ACTIONS; ++j) {
+        float acc = 0.f; const float* row = p + (size_t)j * h2;
+        for (int k = 0; k < h2; ++k) acc += row[k] * b[k];
+        acc += bias[j];
+        if (acc > bestv) { bestv = acc; best = j; }
+    }
+    return best;
+}
+
+// action index -> button bitmask (mirror of env.py _decode_action + _DIRS)
+static const int8_t A_DIRS[9][2] = {
+    {0,0},{0,-1},{1,-1},{1,0},{1,1},{0,1},{-1,1},{-1,0},{-1,-1}
+};
+static uint16_t decode_action(int a) {
+    int d = a % 9, focus = (a / 9) % 2, shoot = (a / 18) % 2;
+    int dx = A_DIRS[d][0], dy = A_DIRS[d][1];
+    uint16_t bits = 0;
+    if (dx < 0) bits |= BTN_LEFT;
+    if (dx > 0) bits |= BTN_RIGHT;
+    if (dy < 0) bits |= BTN_UP;
+    if (dy > 0) bits |= BTN_DOWN;
+    if (focus) bits |= BTN_SLOW;
+    if (shoot) bits |= BTN_SHOOT;
+    return bits;
+}
+
+static void restore_snapshot() {
+    memcpy((void*)SNAP_LO, g_snap_static, SNAP_SZ);
+    if (g_snap_glob_ptr)
+        memcpy((void*)g_snap_glob_ptr, g_snap_glob, GLOB_SZ);
+    if (g_recorder)
+        memcpy(g_recorder, g_snap_rec, REC_SZ);
+    g_shm->frame = 0;
 }
 
 // ---- observation --------------------------------------------------------------
@@ -173,7 +341,8 @@ static void capture_obs() {
 
 // ---- hooks ------------------------------------------------------------------
 static inline bool driving() {
-    return g_shm && (g_shm->state == ST_STEP || g_shm->state == ST_AUTONAV);
+    return g_shm && (g_shm->state == ST_STEP || g_shm->state == ST_AUTONAV ||
+                     g_shm->state == ST_EVAL);
 }
 
 static uint16_t __cdecl hooked_read_input(void) {
@@ -185,7 +354,8 @@ static uint16_t __cdecl hooked_read_input(void) {
 // Present is DWM-vsync-capped in a window. Skip it while we drive the game
 // (rendering still runs, just no buffer flip) so logic isn't throttled to 144 Hz.
 static int __cdecl hooked_present(void) {
-    if (driving() && !g_render)
+    bool want = g_render || (g_shm && g_shm->state == ST_EVAL && g_shm->eval_render);
+    if (driving() && !want)
         return 0;
     return orig_present();
 }
@@ -257,14 +427,62 @@ static int __fastcall hooked_do_tick(void* self, void* edx) {
         }
 
         case ST_RESET: {
-            if (s->have_snapshot) {
-                memcpy((void*)SNAP_LO, g_snap_static, SNAP_SZ);
-                if (g_snap_glob_ptr)
-                    memcpy((void*)g_snap_glob_ptr, g_snap_glob, GLOB_SZ);
-                if (g_recorder)
-                    memcpy(g_recorder, g_snap_rec, REC_SZ);
-                s->frame = 0;
+            if (s->have_snapshot) restore_snapshot();
+            capture_obs();
+            s->done = 1;
+            s->state = ST_IDLE;
+            return 0;
+        }
+
+        case ST_EVAL: {
+            // one whole episode with the in-DLL MLP policy - no per-frame
+            // Python round trip. reset -> (obs -> mlp -> action -> tick)* .
+            if (!s->have_snapshot) { s->done = 1; s->state = ST_IDLE; return 0; }
+            restore_snapshot();
+            reset_bullet_hist();
+            const int h1 = (int)s->eval_h1, h2 = (int)s->eval_h2;
+            const uint32_t fs = s->eval_frame_skip ? s->eval_frame_skip : 3;
+            const uint32_t cap = s->eval_max_frames ? s->eval_max_frames : 7200;
+            const bool paced = s->eval_render != 0;
+
+            uintptr_t gp = rd<uintptr_t>(GAME_MANAGER + GM_GLOBALS_PTR);
+            float start_lives = gp ? rd<float>(gp + G_LIFE_COUNT) : 0.f;
+            LARGE_INTEGER qpf, t_last; QueryPerformanceFrequency(&qpf);
+            QueryPerformanceCounter(&t_last);
+
+            float obs[OBS_DIM];
+            uint32_t frames = 0;
+            int r = 0;
+            bool died = false;
+            bool first = true;
+            while (frames < cap) {
+                build_obs(obs);
+                if (first) { memcpy(s->dbg_obs, obs, sizeof(obs)); first = false; }
+                s->action = decode_action(mlp_forward(s->weights, obs, h1, h2));
+                for (uint32_t k = 0; k < fs && frames < cap; ++k) {
+                    wr<uint8_t>(FRAMESKIP_BYTE, 0);
+                    r = orig_do_tick(self, edx);
+                    s->frame++; frames++;
+                    if (r != 0) break;
+                }
+                gp = rd<uintptr_t>(GAME_MANAGER + GM_GLOBALS_PTR);
+                float lives = gp ? rd<float>(gp + G_LIFE_COUNT) : start_lives;
+                if (r != 0 || lives < start_lives - 0.5f) { died = true; break; }
+                if (paced) {
+                    LARGE_INTEGER now; QueryPerformanceCounter(&now);
+                    double want = (double)fs / 60.0;
+                    double el = (double)(now.QuadPart - t_last.QuadPart) / qpf.QuadPart;
+                    if (want - el > 0.001) Sleep((DWORD)((want - el) * 1000.0));
+                    QueryPerformanceCounter(&t_last);
+                }
             }
+
+            uintptr_t g = rd<uintptr_t>(GAME_MANAGER + GM_GLOBALS_PTR);
+            s->ep_frames = frames;
+            s->ep_score = g ? rd<int32_t>(g + G_SCORE) : 0;
+            s->ep_graze = g ? rd<int32_t>(g + G_GRAZE) : 0;
+            s->ep_died = died ? 1 : 0;
+            s->ep_tick_status = r;
             capture_obs();
             s->done = 1;
             s->state = ST_IDLE;
@@ -351,6 +569,12 @@ static DWORD WINAPI init_thread(LPVOID) {
     g_shm->version = SHM_VERSION;
     g_shm->state = ST_FREE;
     g_shm->repeat = 1;
+    // capture_obs only fills bullets[0..BM_BULLET_MAX); mark the rest inactive so
+    // the Python side doesn't read the memset-0 tail as live bullets at (0,0).
+    for (int i = 0; i < MAX_BULLETS; ++i) {
+        g_shm->bullets[i].x = INACTIVE;
+        g_shm->bullets[i].y = INACTIVE;
+    }
 
     g_snap_static = (uint8_t*)VirtualAlloc(nullptr, SNAP_SZ, MEM_COMMIT | MEM_RESERVE,
                                            PAGE_READWRITE);

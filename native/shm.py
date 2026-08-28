@@ -9,8 +9,11 @@ import time
 SHM_MAGIC = 0x37304854
 MAX_BULLETS = 2048
 MAX_ENEMIES = 64
+OBS_DIM = 192
+N_ACTIONS = 36
+MAX_WEIGHTS = 1 << 16
 
-ST_IDLE, ST_STEP, ST_FREE, ST_RESET, ST_SNAPSHOT, ST_AUTONAV = 0, 1, 2, 3, 4, 5
+ST_IDLE, ST_STEP, ST_FREE, ST_RESET, ST_SNAPSHOT, ST_AUTONAV, ST_EVAL = range(7)
 
 # input bits (confirmed against the game)
 SHOOT, BOMB, SLOW, SKIP = 0x01, 0x02, 0x04, 0x08
@@ -69,8 +72,20 @@ class Shm(ctypes.Structure):
         ("crash_eip", ctypes.c_uint32),
         ("crash_addr", ctypes.c_uint32),
         ("crash_rw", ctypes.c_uint32),
+        ("eval_frame_skip", ctypes.c_uint32),
+        ("eval_max_frames", ctypes.c_uint32),
+        ("eval_h1", ctypes.c_uint32),
+        ("eval_h2", ctypes.c_uint32),
+        ("eval_render", ctypes.c_uint32),
+        ("ep_frames", ctypes.c_uint32),
+        ("ep_score", ctypes.c_int32),
+        ("ep_graze", ctypes.c_int32),
+        ("ep_died", ctypes.c_uint32),
+        ("ep_tick_status", ctypes.c_int32),
+        ("dbg_obs", ctypes.c_float * OBS_DIM),
         ("bullets", Bullet * MAX_BULLETS),
         ("enemies", Enemy * MAX_ENEMIES),
+        ("weights", ctypes.c_float * MAX_WEIGHTS),
     ]
 
 
@@ -101,12 +116,14 @@ class Hook:
     def set_free(self):
         self.s.state = ST_FREE
 
-    def _cmd(self, state: int, timeout: float, poll: float = 0.0) -> bool:
+    def _cmd(self, state: int, timeout: float, poll: float = 0.0,
+             on_wait=None) -> bool:
         # step() passes poll=0: spin hot for the first ~1ms (the common case
         # finishes in well under that), then yield the core so that N envs
         # waiting at once don't starve the game do_tick threads of CPU - that
         # was crashing long runs at ST_RESET. reset/snapshot pass poll>0 (a
-        # real sleep) since their latency doesn't matter.
+        # real sleep) since their latency doesn't matter. on_wait (if given) is
+        # called each poll iteration - used to pump the HUD during long evals.
         s = self.s
         s.done = 0
         s.state = state
@@ -116,6 +133,8 @@ class Hook:
             now = time.perf_counter()
             if now > deadline:
                 return False
+            if on_wait is not None:
+                on_wait()
             if poll:
                 time.sleep(poll)
             elif now - t_start > 0.001:
@@ -147,6 +166,31 @@ class Hook:
             if self._cmd(ST_RESET, timeout, poll=0.001):
                 return True
         return False
+
+    def eval_policy(self, weights, h1: int, h2: int, frame_skip: int = 3,
+                    max_frames: int = 7200, render: bool = False,
+                    timeout: float = 120.0, on_wait=None):
+        """Run one full episode with the in-DLL MLP `weights`. Returns a dict of
+        episode stats, or None on timeout / game crash."""
+        import numpy as np
+        w = np.ascontiguousarray(weights, dtype=np.float32)
+        n = w.size
+        ctypes.memmove(self.s.weights, w.ctypes.data, n * 4)
+        s = self.s
+        s.eval_h1, s.eval_h2 = int(h1), int(h2)
+        s.eval_frame_skip = int(frame_skip)
+        s.eval_max_frames = int(max_frames)
+        s.eval_render = 1 if render else 0
+        if not self._cmd(ST_EVAL, timeout,
+                         poll=0.0005 if not render else 0.004, on_wait=on_wait):
+            return None
+        return {
+            "frames": int(s.ep_frames),
+            "score": int(s.ep_score),
+            "graze": int(s.ep_graze),
+            "died": bool(s.ep_died),
+            "tick_status": int(s.ep_tick_status),
+        }
 
     def bullets(self):
         n = min(self.s.bullet_count, MAX_BULLETS)

@@ -246,6 +246,23 @@ class Th07Env(_Base):
         return np.concatenate([head, b.ravel(), en.ravel(), boss]).astype(np.float32)
 
     # ------------------------------------------------------------------
+    def rollout_policy(self, weights, hidden, render: bool = False,
+                       on_wait=None) -> dict:
+        """Evaluate a flat MLP weight vector for one whole episode inside the
+        DLL (no per-frame Python round trip). Returns {frames, score, graze,
+        died, tick_status}. `hidden` is (h1, h2)."""
+        h1, h2 = hidden
+        r = self.h.eval_policy(weights, h1, h2, frame_skip=self.frame_skip,
+                               max_frames=self.max_steps * self.frame_skip,
+                               render=render, on_wait=on_wait)
+        if r is None:
+            s = self.h.s
+            if s.crash_code:
+                raise RuntimeError(
+                    f"game crashed: exc {s.crash_code:#x} at eip {s.crash_eip:#x}")
+            raise RuntimeError("eval_policy timed out (game not responding)")
+        return r
+
     def reset(self, *, seed=None, options=None):
         super().reset(seed=seed)
         if not self.h.reset():
