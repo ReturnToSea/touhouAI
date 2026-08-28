@@ -42,10 +42,19 @@ CALC_COUNT = D.SUPERVISOR + 0x150
 FRAMESKIP  = 0x00575A8B
 
 # (virtual address, expected original bytes, replacement)
+# always applied: kill the 60fps frame limiter on both timing paths
 PATCHES = [
     (0x004348CC, b"\x74\x56", b"\x90\x90"),  # limiter, QPC path
     (0x00434997, b"\x74\x49", b"\x90\x90"),  # limiter, timeGetTime path
     (0x00434C8A, b"\x74\x0A", b"\x90\x90"),  # force no-vsync (IMMEDIATE present)
+]
+
+# --headless: also skip all per-frame D3D so logic is pure-CPU (no DWM cap,
+# no BeginScene/EndScene, no Present). The window shows a frozen frame.
+HEADLESS_PATCHES = [
+    (0x00434718, b"\x7F\x74", b"\xEB\x74"),              # jg -> jmp: always skip render block
+    (0x00434A0E, b"\xE8\xAD\xFB\xFF\xFF", b"\x90" * 5),  # skip Present (loop path)
+    (0x00434A18, b"\xE8\xA3\xFB\xFF\xFF", b"\x90" * 5),  # skip Present (return path)
 ]
 
 DEFAULT_EXE = Path(
@@ -104,10 +113,17 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--exe", type=Path, default=DEFAULT_EXE)
     ap.add_argument("--frameskip", type=int, default=0)
+    ap.add_argument("--headless", action="store_true",
+                    help="also skip render + Present: pure-CPU logic, frozen window")
     ap.add_argument("--seconds", type=float, default=0.0)
     ap.add_argument("--no-patch", action="store_true",
                     help="launch normally (control run)")
+    ap.add_argument("--auto", action="store_true",
+                    help="launch visible, wait until you're in a stage, then apply "
+                         "headless+keepalive and measure real sim throughput")
     args = ap.parse_args()
+    if args.auto and args.seconds <= 0:
+        args.seconds = 90
 
     if not args.exe.exists():
         print(f"exe not found: {args.exe}")
@@ -125,7 +141,8 @@ def main() -> None:
 
     try:
         if not args.no_patch:
-            for va, want, new in PATCHES:
+            plist = PATCHES + (HEADLESS_PATCHES if args.headless else [])
+            for va, want, new in plist:
                 cur = rpm(pi.hProcess, va, len(want))
                 if cur != want:
                     print(f"  {va:#x}: expected {want.hex()} got {cur.hex()} - "
@@ -135,6 +152,8 @@ def main() -> None:
                 back = rpm(pi.hProcess, va, len(new))
                 print(f"  {va:#x}: {want.hex()} -> {back.hex()} "
                       f"{'OK' if back == new else 'FAILED'}")
+            if args.headless:
+                print("  headless: no render, no Present (window will freeze)")
             if args.frameskip:
                 wpm(pi.hProcess, FRAMESKIP, bytes([args.frameskip]))
                 print(f"  frameskip 0x575A8B = {args.frameskip}")
@@ -158,22 +177,94 @@ def main() -> None:
         print("could not attach")
         return
 
-    def calc():
-        return struct.unpack("<i", pm.read_bytes(CALC_COUNT, 4))[0]
+    SV = D.SUPERVISOR
+    GM = D.GAME_MANAGER
 
-    print(f"attached pid {pm.process_id}. START A STAGE and keep it focused. "
-          f"measuring ~{args.seconds:.0f}s:")
-    lc, lt = calc(), time.perf_counter()
-    end = time.perf_counter() + args.seconds
-    while time.perf_counter() < end:
-        time.sleep(2.0)
+    def u32(a):
+        return struct.unpack("<I", pm.read_bytes(a, 4))[0]
+
+    def i32(a):
+        return struct.unpack("<i", pm.read_bytes(a, 4))[0]
+
+    def calc():
+        return i32(SV + 0x150)
+
+    def in_stage():
         try:
-            c, t = calc(), time.perf_counter()
+            gp = u32(GM + D.GM_GLOBALS_PTR)
+            return u32(SV + 0x154) == 2 and gp != 0 and i32(GM + D.GM_STAGE) >= 1
         except pymem.exception.MemoryReadError:
-            print("  game exited")
+            return False
+
+    HEADLESS = [
+        (0x00434718, b"\x7F\x74", b"\xEB\x74"),
+        (0x00434A0E, b"\xE8\xAD\xFB\xFF\xFF", b"\x90" * 5),
+        (0x00434A18, b"\xE8\xA3\xFB\xFF\xFF", b"\x90" * 5),
+    ]
+
+    if not args.auto:
+        print(f"attached pid {pm.process_id}. START A STAGE and keep it focused. "
+              f"measuring ~{args.seconds:.0f}s:")
+        lc, lt = calc(), time.perf_counter()
+        end = time.perf_counter() + args.seconds
+        while time.perf_counter() < end:
+            time.sleep(2.0)
+            try:
+                c, t = calc(), time.perf_counter()
+            except pymem.exception.MemoryReadError:
+                print("  game exited")
+                return
+            print(f"  logic rate: {(c - lc) / (t - lt):8.1f} ticks/sec")
+            lc, lt = c, t
+        return
+
+    # --auto: wait for a stage, then just READ for --seconds. One frameskip
+    # write at the start (set via --frameskip, default keeps whatever the game
+    # has). Track calc_count rate, score, and process liveness. No other writes.
+    print(f"attached pid {pm.process_id}. Navigate into a stage now...")
+    for _ in range(240):
+        if in_stage():
+            break
+        time.sleep(0.5)
+    else:
+        print("never detected an in-stage state; aborting")
+        return
+    time.sleep(1.0)
+    if args.frameskip:
+        pm.write_bytes(FRAMESKIP, bytes([args.frameskip]), 1)
+    fs = pm.read_bytes(FRAMESKIP, 1)[0]
+    print(f"in stage, frameskip={fs}. read-only monitoring ~{args.seconds:.0f}s "
+          f"(play or just leave it; a death/Continue freeze is not a crash):")
+
+    def score():
+        gp = u32(GM + D.GM_GLOBALS_PTR)
+        return i32(gp + D.G_DISPLAYED_SCORE) if gp else -1
+
+    print("  (keeping lives topped up so it never hits the Continue screen)")
+    lc, lt, sc0 = calc(), time.perf_counter(), score()
+    t_start = lt
+    end = lt + args.seconds
+    while time.perf_counter() < end:
+        for _ in range(3):
+            time.sleep(1.0)
+            try:
+                gp = u32(GM + D.GM_GLOBALS_PTR)
+                if gp:
+                    pm.write_bytes(gp + D.G_LIFE_COUNT, struct.pack("<f", 6.0), 4)
+            except pymem.exception.MemoryReadError:
+                pass
+        try:
+            c, t, sc = calc(), time.perf_counter(), score()
+            st = D.PLAYER_STATE_NAMES.get(pm.read_bytes(D.PLAYER + D.PLAYER_STATE, 1)[0], "?")
+        except pymem.exception.MemoryReadError:
+            el = time.perf_counter() - t_start
+            print(f"  *** PROCESS EXITED after {el:.0f}s ***")
             return
-        print(f"  logic rate: {(c - lc) / (t - lt):8.1f} ticks/sec")
+        print(f"  t+{t - t_start:5.0f}s  {(c - lc) / (t - lt):8.0f} ticks/sec   "
+              f"score={sc} {st}")
         lc, lt = c, t
+    print(f"\nSURVIVED {args.seconds:.0f}s at frameskip {fs}. "
+          f"score {sc0} -> {sc} (+{sc - sc0}).")
 
 
 if __name__ == "__main__":

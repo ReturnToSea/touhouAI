@@ -119,12 +119,21 @@ Static analysis (`scratchpad/disasm.py`, `xref.py` against `th07.exe`) found:
 | 3 | 576 | 9.6x |
 | 9 | 1440 | **24x** |
 
-Since the agent reads/writes **memory**, not pixels, `run_all_on_tick` running
-every logic tick is all that matters — render frameskip costs the agent nothing.
-CPU ceiling (higher frameskip / true headless) not yet measured; needs a stable
-harness. The game crashed twice during hands-off high-speed poking — expected to
-be a non-issue once an agent is actually playing headless with clean resets, but
-the harness must relaunch crashed instances.
+**Stability caveat (important):** the crude "NOP the limiter `je`s" approach is
+too fragile for a training harness. Findings from repeated tests:
+- limiter-off during *uninterrupted gameplay*: ~288 t/s, looked OK for short windows
+- the **Continue screen running unthrottled self-corrupts** (`score` went to
+  garbage) and crashes in ~30-40 s, with zero external writes
+- **external memory writes** (frameskip, lives) during fast gameplay crash it
+  in ~3 s
+- headless patches (skip render block + Present) crash instantly on a live stage
+  (only survived on the near-empty Continue screen)
+
+`Window::do_tick`'s internal loop / counter / timer logic was not built to run
+detached from 60 Hz. Reliable high-speed + parallel + frame-accurate input needs
+an **in-process DLL hook** (see `../native/`), which the static analysis here
+fully scoped: `do_tick` 0x4346E0, `run_all_on_tick` 0x42FD60, `Present` wrapper
+0x4345C0, input read at 0x437D74-0x437D85 (`[0x4B9E4C]` / `[0x4B9E54]`).
 
 ### Remaining for the training harness (not feasibility)
 
