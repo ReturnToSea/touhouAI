@@ -30,11 +30,22 @@ enum Btn : uint16_t {
     BTN_UP = 0x10, BTN_DOWN = 0x20, BTN_LEFT = 0x40, BTN_RIGHT = 0x80,
 };
 
+// --- single-instance guard (WinMain) ---
+// 0x435BE9 call CreateMutexA ; 0x435BEF mov [0x135E1F4],eax ; 0x435BF4 call
+// GetLastError ; 0x435BFA cmp eax,0xB7 (ERROR_ALREADY_EXISTS) ; 0x435BFF jnz
+// 0x435C1B (normal path). A 2nd concurrent th07.exe hits the else branch: a
+// modal error MessageBox, then return -1 -> abort. Patch the jnz (75) to an
+// unconditional jmp (EB) so extra instances are allowed (needed for SubprocVecEnv).
+constexpr uintptr_t INSTANCE_GUARD_JNZ = 0x00435BFF; // expect 0x75, patch -> 0xEB
+
 // --- static objects ---
 constexpr uintptr_t GUI            = 0x0049FBF0;
 constexpr uintptr_t PLAYER         = 0x004BDAD8;
 constexpr uintptr_t SUPERVISOR     = 0x00575950;
 constexpr uintptr_t GAME_MANAGER   = 0x00626270;
+// difficulty index, read by the menu AND by gameplay/scoring code directly
+// (not via the GameManager ptr). 0 Easy 1 Normal 2 Hard 3 Lunatic 4 Extra.
+constexpr uintptr_t DIFFICULTY_SEL = 0x00626280;
 constexpr uintptr_t BULLET_MANAGER = 0x0062F958;
 constexpr uintptr_t ENEMY_MANAGER  = 0x009A9B00;
 constexpr uintptr_t STAGE_NUM      = 0x01347FC8;

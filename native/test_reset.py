@@ -35,10 +35,10 @@ def main() -> None:
     h = S.Hook(pid)
     s = h.s
 
-    print("navigate into a stage...")
-    while not (s.gamemode == 2 and s.stage >= 1):
-        time.sleep(0.5)
-    time.sleep(0.5)
+    print("auto-navigating into a stage...")
+    assert h.autonav(), f"autonav failed (nav_frames={s.nav_frames})"
+    for _ in range(90):            # past the stage-intro card, like Th07Env
+        h.step(action=0, repeat=1)
     print(f"in stage st{s.stage} pl=({s.player_x:.0f},{s.player_y:.0f}). snapshotting.")
     assert h.snapshot(), "snapshot timed out"
     assert s.have_snapshot

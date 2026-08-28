@@ -3,11 +3,50 @@
 //
 //   inject32.exe <th07.exe path> <th07hook.dll path>
 //
-// Launches suspended, resumes, then injects during the window before the game
-// reaches its first do_tick. Prints the pid on stdout on success.
+// Launches suspended, patches out the single-instance guard, resumes, then
+// injects during the window before the game reaches its first do_tick. Prints
+// the pid on stdout on success.
 
 #include <windows.h>
 #include <stdio.h>
+
+// th07.exe v1.00b WinMain single-instance guard: a 2nd concurrent instance gets
+// a modal error box + abort. Flip the jnz (75) after `cmp eax,ERROR_ALREADY_EXISTS`
+// to an unconditional jmp (EB) so N instances can run under SubprocVecEnv.
+// Must be applied while suspended, before the main thread reaches it.
+// (mirrors th07::INSTANCE_GUARD_JNZ in th07_addrs.h)
+#define GUARD_JNZ_VA 0x00435BFF
+
+static int patch_instance_guard(HANDLE proc) {
+    void* addr = (void*)GUARD_JNZ_VA;
+    unsigned char cur = 0;
+    SIZE_T n = 0;
+    if (!ReadProcessMemory(proc, addr, &cur, 1, &n) || n != 1) {
+        fprintf(stderr, "guard: ReadProcessMemory failed: %lu\n", GetLastError());
+        return 1;
+    }
+    if (cur == 0xEB) return 0;              // already patched
+    if (cur != 0x75) {
+        fprintf(stderr, "guard: unexpected byte 0x%02x at %p (wrong th07.exe "
+                        "version?) - not patching\n", cur, addr);
+        return 1;
+    }
+    DWORD oldprot = 0;
+    if (!VirtualProtectEx(proc, addr, 1, PAGE_EXECUTE_READWRITE, &oldprot)) {
+        fprintf(stderr, "guard: VirtualProtectEx failed: %lu\n", GetLastError());
+        return 1;
+    }
+    unsigned char jmp = 0xEB;
+    int ok = WriteProcessMemory(proc, addr, &jmp, 1, &n) && n == 1;
+    DWORD tmp;
+    VirtualProtectEx(proc, addr, 1, oldprot, &tmp);
+    if (!ok) {
+        fprintf(stderr, "guard: WriteProcessMemory failed: %lu\n", GetLastError());
+        return 1;
+    }
+    FlushInstructionCache(proc, addr, 1);
+    return 0;
+}
 
 int main(int argc, char** argv) {
     if (argc < 3) { fprintf(stderr, "usage: inject32 <exe> <dll>\n"); return 2; }
@@ -27,6 +66,13 @@ int main(int argc, char** argv) {
     if (!CreateProcessA(exe, NULL, NULL, NULL, FALSE, CREATE_SUSPENDED, NULL,
                         dir, &si, &pi)) {
         fprintf(stderr, "CreateProcessA failed: %lu\n", GetLastError());
+        return 1;
+    }
+
+    // defeat the single-instance guard while the main thread is still parked
+    if (getenv("TH07_NO_GUARD_PATCH") == NULL &&
+        patch_instance_guard(pi.hProcess) != 0) {
+        TerminateProcess(pi.hProcess, 1);
         return 1;
     }
 

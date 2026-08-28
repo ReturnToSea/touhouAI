@@ -1,20 +1,83 @@
 """Gymnasium environment wrapping one hooked th07.exe instance.
 
-v0 limitations:
-  * one game process per env; you must navigate into a stage by hand the first
-    time (auto menu-nav is a TODO), after which snapshot/reset handles episodes.
+The game process is launched + hooked on construction, auto-navigates into
+Stage 1, then snapshot/reset drives episodes. Headless and silent by default
+(render skipped, audio session muted); pass render=True to watch it.
+
   * bomb is not in the action space yet.
 
     from native.env import Th07Env
-    env = Th07Env(frame_skip=3)          # opens the game, asks you to navigate in
+    env = Th07Env(frame_skip=3)
     obs, info = env.reset()
     obs, r, term, trunc, info = env.step(env.action_space.sample())
 """
 from __future__ import annotations
 
+import atexit
+import ctypes
+import os
 import time
 
 import numpy as np
+
+
+def _mute_pid(pid: int, tries: int = 25, delay: float = 0.1) -> bool:
+    """Mute the game process's Windows audio session (best-effort).
+
+    8 instances each blasting the stage BGM is unusable. The session only
+    exists once the game has started a sound buffer, so retry briefly.
+    """
+    try:
+        from pycaw.pycaw import AudioUtilities
+    except Exception:
+        return False
+    for _ in range(tries):
+        try:
+            for sess in AudioUtilities.GetAllSessions():
+                if sess.Process and sess.Process.pid == pid:
+                    sess.SimpleAudioVolume.SetMute(1, None)
+                    return True
+        except Exception:
+            pass
+        time.sleep(delay)
+    return False
+
+
+class _BuildLock:
+    """Cross-process mutex: serialise env construction (inject + menu nav).
+
+    Concurrent D3D init + menu navigation across instances is racy - one game's
+    menu stops advancing while another is bringing its device up (autonav then
+    hits its frame cap). Building one env at a time avoids it entirely; once
+    constructed they step concurrently without issue.
+    """
+
+    _NAME = b"th07env_build_lock"
+
+    def __enter__(self):
+        k32 = ctypes.windll.kernel32
+        self._h = k32.CreateMutexA(None, False, self._NAME)
+        k32.WaitForSingleObject(self._h, 120_000)  # 2 min: N * ~15s worst case
+        return self
+
+    def __exit__(self, *exc):
+        k32 = ctypes.windll.kernel32
+        if self._h:
+            k32.ReleaseMutex(self._h)
+            k32.CloseHandle(self._h)
+            self._h = None
+
+
+def _kill_pid(pid: int) -> None:
+    """TerminateProcess(pid). No-op if it's already gone."""
+    if not pid:
+        return
+    k32 = ctypes.windll.kernel32
+    PROCESS_TERMINATE = 0x0001
+    h = k32.OpenProcess(PROCESS_TERMINATE, False, int(pid))
+    if h:
+        k32.TerminateProcess(h, 1)
+        k32.CloseHandle(h)
 
 try:
     import gymnasium as gym
@@ -63,21 +126,44 @@ class Th07Env(_Base):
     metadata = {"render_modes": []}
 
     def __init__(self, frame_skip: int = 3, max_seconds: float = 90.0,
-                 warmup: int = 90):
+                 warmup: int = 90, render: bool = False, mute: bool = True):
         super().__init__()
         self.frame_skip = frame_skip
         self.max_steps = int(max_seconds * 60 / frame_skip)
+        self.render_mode = "human" if render else None
 
-        self.pid = inject()
-        self.h = S.Hook(self.pid)
-        s = self.h.s
-        if not self.h.autonav():
-            raise RuntimeError(f"auto-nav failed (nav_frames={s.nav_frames}, "
-                               f"mode={s.gamemode}, stage={s.stage})")
-        # a few frames past the stage-intro card, then freeze the reset point
-        for _ in range(warmup):
-            self.h.step(action=0, repeat=1)
-        assert self.h.snapshot(), "snapshot failed"
+        # the DLL reads these at load time from the child's environment
+        if render:
+            os.environ["TH07_RENDER"] = "1"      # actually draw + present
+        else:
+            os.environ.pop("TH07_RENDER", None)
+
+        self.pid = 0
+        try:
+            with _BuildLock():
+                self.pid = inject()
+                atexit.register(_kill_pid, self.pid)
+                self.h = S.Hook(self.pid)
+                s = self.h.s
+                if mute and not render:
+                    _mute_pid(self.pid)
+                if not self.h.autonav():
+                    raise RuntimeError(
+                        f"auto-nav failed (nav_frames={s.nav_frames}, "
+                        f"mode={s.gamemode}, stage={s.stage})")
+                # a few frames past the stage-intro card, freeze the reset point
+                for _ in range(warmup):
+                    self.h.step(action=0, repeat=1)
+                assert self.h.snapshot(), "snapshot failed"
+        except BaseException:
+            # never leak a game process on a failed construction - a leaked
+            # instance holds a window and poisons later launches
+            try:
+                self.h.close()
+            except Exception:
+                pass
+            _kill_pid(self.pid)
+            raise
         self.start_lives = s.lives
         self.start_stage = s.stage
         print(f"[Th07Env] pid {self.pid}: nav {s.nav_frames}f -> stage {s.stage}, "
@@ -193,5 +279,10 @@ class Th07Env(_Base):
         try:
             self.h.set_free()
             self.h.close()
+        except Exception:
+            pass
+        _kill_pid(getattr(self, "pid", 0))
+        try:
+            atexit.unregister(_kill_pid)
         except Exception:
             pass

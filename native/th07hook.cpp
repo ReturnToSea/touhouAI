@@ -14,6 +14,8 @@
 #include <windows.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <mmdeviceapi.h>
+#include <audiopolicy.h>
 
 #include "th07_addrs.h"
 #include "th07_shm.h"
@@ -33,6 +35,26 @@ static Shm*   g_shm = nullptr;
 static HANDLE g_map = nullptr;
 
 constexpr uintptr_t FRAMESKIP_BYTE = 0x00575A8B;
+
+// do_tick's render block (0x43471A..0x43478D) can't be skipped wholesale - it
+// also runs a Supervisor update that run_all_on_tick needs. But run_all_on_draw
+// (0x42FE20, the sprite-draw chain walk) is separable: stubbing it while driving
+// gives bit-identical game state (pos/score/deaths frame-for-frame) at ~3x the
+// throughput - it's pure rendering. env var TH07_NO_DRAW=0 disables the stub.
+static bool g_stub_draw = true;
+// watch mode (env var TH07_RENDER=1): actually draw the sprites and flip the
+// buffer so a human can see the policy play. Off for training.
+static bool g_render = false;
+// difficulty to force during menu nav (env var TH07_DIFFICULTY, default Lunatic)
+static int32_t g_difficulty = 3;
+typedef int(__fastcall* drawall_fn)(void* ecx, void* edx);
+static drawall_fn orig_run_all_on_draw = nullptr;
+static int __fastcall hooked_run_all_on_draw(void* ecx, void* edx) {
+    if (g_stub_draw && !g_render && g_shm &&
+        (g_shm->state == ST_STEP || g_shm->state == ST_RESET))
+        return 0;
+    return orig_run_all_on_draw(ecx, edx);
+}
 
 // --- state snapshot for episode reset ---------------------------------------
 // One contiguous span covers every static game-state object: ANM_MANAGER ptr &
@@ -143,7 +165,7 @@ static uint16_t __cdecl hooked_read_input(void) {
 // Present is DWM-vsync-capped in a window. Skip it while we drive the game
 // (rendering still runs, just no buffer flip) so logic isn't throttled to 144 Hz.
 static int __cdecl hooked_present(void) {
-    if (driving())
+    if (driving() && !g_render)
         return 0;
     return orig_present();
 }
@@ -189,14 +211,16 @@ static int __fastcall hooked_do_tick(void* self, void* edx) {
 
         case ST_AUTONAV: {
             // Tap Shoot through: title -> Start -> difficulty -> character ->
-            // shot type -> Stage 1. Accepts whatever the menu cursors default
-            // to. Runs the whole nav inside this one call.
+            // shot type -> Stage 1. The difficulty screen inits its cursor from
+            // [DIFFICULTY_SEL] and gameplay reads the same global, so pinning it
+            // each frame makes the Shoot-mash confirm our chosen difficulty.
             int nav = 0;
             const int MAXF = 6000;
             for (; nav < MAXF; ++nav) {
                 int gm  = rd<int32_t>(SUPERVISOR + SV_GAMEMODE);
                 int stg = rd<int32_t>(GAME_MANAGER + GM_STAGE);
                 if (gm == 2 && stg >= 1) break;
+                wr<int32_t>(DIFFICULTY_SEL, g_difficulty);
                 // ~4 frames pressed, ~10 released -> a clean tap the menus accept
                 s->action = ((nav % 14) < 4) ? (uint16_t)BTN_SHOOT : (uint16_t)0;
                 wr<uint8_t>(FRAMESKIP_BYTE, 0);
@@ -231,9 +255,51 @@ static int __fastcall hooked_do_tick(void* self, void* edx) {
     }
 }
 
+// Mute this whole process at the OS mixer (WASAPI session volume). Sticks even
+// if called before the game creates a sound buffer, so 8 training instances
+// don't blast 8x stage BGM. Skipped in watch mode.
+// (mingw's import libs don't carry these GUIDs - define them here.)
+static const GUID kCLSID_MMDeviceEnumerator =
+    {0xBCDE0395,0xE52F,0x467C,{0x8E,0x3D,0xC4,0x57,0x92,0x91,0x69,0x2E}};
+static const GUID kIID_IMMDeviceEnumerator =
+    {0xA95664D2,0x9614,0x4F35,{0xA7,0x46,0xDE,0x8D,0xB6,0x36,0x17,0xE6}};
+static const GUID kIID_IAudioSessionManager2 =
+    {0x77AA99A0,0x1BD6,0x484F,{0x8B,0xC7,0x2C,0x65,0x4C,0x9A,0x9B,0x6F}};
+
+static void mute_self() {
+    if (FAILED(CoInitializeEx(nullptr, COINIT_MULTITHREADED))) return;
+    IMMDeviceEnumerator* en = nullptr;
+    if (SUCCEEDED(CoCreateInstance(kCLSID_MMDeviceEnumerator, nullptr, CLSCTX_ALL,
+                                   kIID_IMMDeviceEnumerator, (void**)&en))) {
+        IMMDevice* dev = nullptr;
+        if (SUCCEEDED(en->GetDefaultAudioEndpoint(eRender, eConsole, &dev))) {
+            IAudioSessionManager2* mgr = nullptr;
+            if (SUCCEEDED(dev->Activate(kIID_IAudioSessionManager2, CLSCTX_ALL,
+                                        nullptr, (void**)&mgr))) {
+                ISimpleAudioVolume* vol = nullptr;
+                if (SUCCEEDED(mgr->GetSimpleAudioVolume(nullptr, FALSE, &vol))) {
+                    vol->SetMute(TRUE, nullptr);
+                    vol->Release();
+                }
+                mgr->Release();
+            }
+            dev->Release();
+        }
+        en->Release();
+    }
+}
+
 // ---- setup ----------------------------------------------------------------
 static DWORD WINAPI init_thread(LPVOID) {
     char name[64];
+    if (char* e = getenv("TH07_NO_DRAW"))
+        g_stub_draw = atoi(e) != 0;
+    if (char* e = getenv("TH07_RENDER"))
+        g_render = atoi(e) != 0;
+    if (char* e = getenv("TH07_DIFFICULTY"))
+        g_difficulty = atoi(e);
+    if (!g_render && !getenv("TH07_NO_MUTE"))
+        mute_self();
     sprintf(name, "th07hook_%lu", GetCurrentProcessId());
     g_map = CreateFileMappingA(INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE,
                                0, sizeof(Shm), name);
@@ -257,6 +323,8 @@ static DWORD WINAPI init_thread(LPVOID) {
                       (void**)&orig_read_input) != MH_OK) return 1;
     if (MH_CreateHook((void*)0x004345C0, (void*)&hooked_present,
                       (void**)&orig_present) != MH_OK) return 1;
+    if (MH_CreateHook((void*)FN_RUN_ALL_ON_DRAW, (void*)&hooked_run_all_on_draw,
+                      (void**)&orig_run_all_on_draw) != MH_OK) return 1;
     if (MH_EnableHook(MH_ALL_HOOKS) != MH_OK) return 1;
 
     static const uint8_t nop2[2] = {0x90, 0x90};

@@ -1,6 +1,8 @@
 # --- Game files (copyrighted, large, machine-specific) ---
 # The game install is never committed. Point config at it per-machine instead.
 Touhou 7 - Perfect Cherry Blossom/
+# stray config the game writes into the repo root when cwd is wrong
+/th07.cfg
 
 # --- Local config (paths differ per machine) ---
 config.yaml

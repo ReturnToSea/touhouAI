@@ -28,7 +28,7 @@ $cxxArgs = @(
     "-I$mh\include",
     "th07hook.cpp", "build\buffer.o", "build\hook.o", "build\trampoline.o", "build\hde32.o",
     "-o", "build\th07hook.dll",
-    "-lkernel32", "-luser32", "-lwinmm"
+    "-lkernel32", "-luser32", "-lwinmm", "-lole32", "-luuid"
 )
 & $cxx @cxxArgs
 if ($LASTEXITCODE) { throw "link failed" }

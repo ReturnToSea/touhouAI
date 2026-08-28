@@ -2,3 +2,7 @@ gymnasium
 numpy
 stable-baselines3
 torch
+pycaw            # mute the game's audio session during training
+tqdm             # SB3 progress bar
+rich             # SB3 progress bar
+tensorboard      # training curves
