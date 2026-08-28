@@ -68,10 +68,26 @@ constexpr uintptr_t SNAP_LO = 0x0049C000;   // .data section start
 constexpr uintptr_t SNAP_HI = 0x01366000;   // .data end (0x1365258), page-rounded
 constexpr size_t    SNAP_SZ = SNAP_HI - SNAP_LO;   // ~15.5 MB
 constexpr size_t    GLOB_SZ = 0x100;               // zGlobals (heap block)
+constexpr size_t    REC_SZ  = 0xE0;   // recorder head: fields seen up to 0xD6
 
 static uint8_t* g_snap_static = nullptr;
 static uint8_t  g_snap_glob[GLOB_SZ];
 static uintptr_t g_snap_glob_ptr = 0;
+
+// The replay input recorder (0x442CD0, a per-frame update-registry callback)
+// also processes live input, so we can't NOP it. But its buffer write pointer
+// (this+0x84) advances every frame and never wraps -> after ~233k frames it
+// runs off the end and the game AVs. The object is heap-allocated. Hook the fn
+// to grab `this`, then snapshot/restore its head each episode like zGlobals so
+// the write pointer resets and the buffer never overruns.
+static uint8_t  g_snap_rec[REC_SZ];
+static void*    g_recorder = nullptr;
+typedef int(__fastcall* rec_fn)(void* ecx, void* edx);
+static rec_fn   orig_rec = nullptr;
+static int __fastcall hooked_rec(void* ecx, void* edx) {
+    g_recorder = ecx;
+    return orig_rec(ecx, edx);
+}
 
 
 // limiter skip-branches (see feasibility/README.md) - NOP so do_tick never waits
@@ -206,6 +222,8 @@ static int __fastcall hooked_do_tick(void* self, void* edx) {
             g_snap_glob_ptr = rd<uintptr_t>(GAME_MANAGER + GM_GLOBALS_PTR);
             if (g_snap_glob_ptr)
                 memcpy(g_snap_glob, (void*)g_snap_glob_ptr, GLOB_SZ);
+            if (g_recorder)
+                memcpy(g_snap_rec, g_recorder, REC_SZ);
             s->have_snapshot = 1;
             capture_obs();
             s->done = 1;
@@ -243,6 +261,8 @@ static int __fastcall hooked_do_tick(void* self, void* edx) {
                 memcpy((void*)SNAP_LO, g_snap_static, SNAP_SZ);
                 if (g_snap_glob_ptr)
                     memcpy((void*)g_snap_glob_ptr, g_snap_glob, GLOB_SZ);
+                if (g_recorder)
+                    memcpy(g_recorder, g_snap_rec, REC_SZ);
                 s->frame = 0;
             }
             capture_obs();
@@ -345,17 +365,13 @@ static DWORD WINAPI init_thread(LPVOID) {
                       (void**)&orig_present) != MH_OK) return 1;
     if (MH_CreateHook((void*)FN_RUN_ALL_ON_DRAW, (void*)&hooked_run_all_on_draw,
                       (void**)&orig_run_all_on_draw) != MH_OK) return 1;
+    if (MH_CreateHook((void*)FN_REPLAY_RECORD, (void*)&hooked_rec,
+                      (void**)&orig_rec) != MH_OK) return 1;
     if (MH_EnableHook(MH_ALL_HOOKS) != MH_OK) return 1;
 
     static const uint8_t nop2[2] = {0x90, 0x90};
     for (auto& L : LIMITER)
         if (memcmp((void*)L.va, L.want, 2) == 0) patch(L.va, nop2, 2);
-
-    // neuter the replay input recorder: mov eax,1 ; ret  (its per-frame buffer
-    // overruns after ~233k frames -> AV at 0x442DA8). Callers get the same 1.
-    static const uint8_t ret1[6] = {0xB8, 0x01, 0x00, 0x00, 0x00, 0xC3};
-    if (*(uint8_t*)FN_REPLAY_RECORD == 0x55)   // push ebp - unpatched
-        patch(FN_REPLAY_RECORD, ret1, sizeof(ret1));
 
     return 0;
 }

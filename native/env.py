@@ -266,12 +266,12 @@ class Th07Env(_Base):
 
         reward = 0.02 * self.frame_skip  # alive
         reward += (s.score - self._prev_score) * 1e-4
-        reward += (s.graze - self._prev_graze) * 0.01
+        # no graze reward - on Lunatic it just trains flying at bullets
         if s.boss_present and s.boss_hp_max > 0:
             reward += max(0.0, self._prev_boss - s.boss_hp) / s.boss_hp_max * 3.0
         died = s.lives < self._prev_lives - 0.5
         if died:
-            reward -= 1.0
+            reward -= 5.0
 
         self._prev_score, self._prev_graze = s.score, s.graze
         self._prev_boss, self._prev_lives = s.boss_hp, s.lives
