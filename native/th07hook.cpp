@@ -54,6 +54,10 @@ static const struct { uintptr_t va; uint8_t want[2]; } LIMITER[] = {
     {0x00434997, {0x74, 0x49}},
 };
 
+// NOTE: skipping do_tick's render block entirely (0x434718 jg -> jmp) breaks the
+// game after ~150 frames - the block also runs run_all_on_draw + ANM updates
+// that the tick logic depends on. Present-skip (below) is the safe win.
+
 template <typename T> static inline T    rd(uintptr_t a)      { return *(T*)a; }
 template <typename T> static inline void wr(uintptr_t a, T v) { *(T*)a = v; }
 
@@ -155,10 +159,10 @@ static int __fastcall hooked_do_tick(void* self, void* edx) {
             uint16_t rep = s->repeat ? s->repeat : 1;
             int r = 0;
             for (uint16_t k = 0; k < rep; ++k) {
-                wr<uint8_t>(FRAMESKIP_BYTE, 0);       // 1 logic frame per do_tick call
+                wr<uint8_t>(FRAMESKIP_BYTE, 0);   // 1 logic tick per do_tick call
                 r = orig_do_tick(self, edx);
                 s->frame++;
-                if (r != 0) break;                   // stage clear / quit / restart
+                if (r != 0) break;               // stage clear / quit
             }
             s->tick_status = r;
             capture_obs();
@@ -194,7 +198,8 @@ static int __fastcall hooked_do_tick(void* self, void* edx) {
 
         case ST_IDLE:
         default:
-            Sleep(1);
+            // no Sleep: WinMain re-calls us immediately, so a STEP command from
+            // Python is picked up within microseconds (Sleep(1) is 1-15ms).
             return 0;
     }
 }
@@ -237,6 +242,7 @@ static DWORD WINAPI init_thread(LPVOID) {
 BOOL WINAPI DllMain(HINSTANCE h, DWORD reason, LPVOID) {
     if (reason == DLL_PROCESS_ATTACH) {
         DisableThreadLibraryCalls(h);
+        timeBeginPeriod(1);   // 1ms scheduler tick (any residual Sleep(1))
         CreateThread(nullptr, 0, init_thread, nullptr, 0, nullptr);
     }
     return TRUE;
