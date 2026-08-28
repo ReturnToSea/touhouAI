@@ -27,18 +27,25 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parent / "native"))
 
 from env import Th07Env  # noqa: E402
+from evohud import EvoHud  # noqa: E402
 from policy import MLPPolicy  # noqa: E402
 
 
-def rollout(env, pol, max_steps) -> float:
+def rollout(env, pol, max_steps, hud=None):
     obs, _ = env.reset()
     ret = 0.0
+    steps = 0
+    score = 0
     for _ in range(max_steps):
-        obs, r, term, trunc, _ = env.step(pol.act(obs))
+        obs, r, term, trunc, info = env.step(pol.act(obs))
         ret += r
+        steps += 1
+        score = info["score"]
+        if hud is not None and steps % 40 == 0:
+            hud.pump()
         if term or trunc:
             break
-    return ret
+    return ret, steps * env.frame_skip, score
 
 
 def main() -> None:
@@ -54,6 +61,7 @@ def main() -> None:
     ap.add_argument("--name", default="evo_st1")
     ap.add_argument("--resume", type=Path, default=None)
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--no-hud", action="store_true", help="skip the status window")
     args = ap.parse_args()
 
     rng = np.random.default_rng(args.seed)
@@ -76,15 +84,22 @@ def main() -> None:
     max_steps = env.max_steps
     pol = MLPPolicy(hidden=hidden)
     best_fit = -1e9
+    best_score = 0
+    sim_frames = 0
     hist = []
+    hud = None if args.no_hud else EvoHud(pop=args.pop, total_gens=args.gens)
 
     try:
         for gen in range(gen0, args.gens):
             t0 = time.perf_counter()
             fit = np.empty(len(pop))
+            frames = np.empty(len(pop), dtype=np.int64)
             for i, flat in enumerate(pop):
                 pol.set_flat(flat)
-                fit[i] = rollout(env, pol, max_steps)
+                fit[i], fr, sc = rollout(env, pol, max_steps, hud)
+                frames[i] = fr
+                sim_frames += fr
+                best_score = max(best_score, sc)
             order = np.argsort(fit)[::-1]
             dt = time.perf_counter() - t0
 
@@ -93,6 +108,10 @@ def main() -> None:
             print(f"gen {gen:4d}  best {fbest:7.1f}  mean {fit.mean():6.1f}  "
                   f"med {np.median(fit):6.1f}  worst {fit[order[-1]]:6.1f}  "
                   f"({dt:.0f}s)", flush=True)
+            if hud is not None:
+                hud.update(gen, max(best_fit, fbest), fbest,
+                           fit.mean(), np.median(fit),
+                           sim_frames, best_score, int(frames[order[0]]))
 
             if fbest > best_fit:
                 best_fit = fbest
@@ -113,6 +132,8 @@ def main() -> None:
     finally:
         np.savez(run / "resume.npz", pop=np.array(pop), gen=gen + 1)
         np.save(run / "history.npy", np.array(hist))
+        if hud is not None:
+            hud.close()
         env.close()
 
 
