@@ -99,11 +99,14 @@ def evaluate(islands, hidden, hud=None, stall_timeout=90.0):
             last_ok[i] = now
             r = isl.env.h.eval_result()
             j = running[i]
-            isl.fit[j] = fitness_of(r)
+            f = fitness_of(r)
+            isl.fit[j] = f
             isl.frames[j] = r["frames"]
             isl.scores[j] = r["score"]
             remaining -= 1
             progressed = True
+            if hud is not None:
+                hud.record(i, j, f, r["frames"], r["score"])
             if nxt[i] < len(isl.pop):
                 isl.env.h.eval_start(isl.pop[nxt[i]], h1, h2, isl.frame_skip,
                                      isl.max_frames)
@@ -179,12 +182,15 @@ def main() -> None:
     sim_frames = 0
     hist = []
     genlog = []
-    hud = None if args.no_hud else EvoHud(pop=args.islands * args.island_pop,
-                                          total_gens=args.gens)
+    hud = None if args.no_hud else EvoHud(
+        total=args.islands * args.island_pop, total_gens=args.gens,
+        hidden=hidden, run_dir=run)
     gen = gen0
     try:
         while gen < args.gens:
             t0 = time.perf_counter()
+            if hud is not None:
+                hud.gen_start(gen, [isl.pop for isl in islands])
             try:
                 evaluate(islands, hidden, hud)
             except RuntimeError as e:
@@ -204,20 +210,34 @@ def main() -> None:
             genlog.append(np.stack([np.concatenate([isl.fit for isl in islands]),
                                     np.concatenate([isl.frames for isl in islands]),
                                     np.concatenate([isl.scores for isl in islands])]))
+            bi = int(champs.argmax())
+            bframes = int(islands[bi].frames[islands[bi].fit.argmax()])
 
             print(f"gen {gen:4d}  gbest {gbest:7.1f}  mean {allfit.mean():6.1f}  "
                   f"island-bests {np.round(champs,0)}  ({dt:.0f}s)", flush=True)
             if hud is not None:
-                bi = int(champs.argmax())
-                bframes = int(islands[bi].frames[islands[bi].fit.argmax()])
-                hud.update(gen, max(best_fit, gbest), gbest, allfit.mean(),
-                           np.median(allfit), sim_frames, best_score, bframes)
+                hud.gen_end(bframes)
 
-            if gbest > best_fit:
-                best_fit = gbest
-                bi = int(champs.argmax())
-                pol.set_flat(islands[bi].pop[int(islands[bi].fit.argmax())])
-                pol.save(run / "best.pt")
+            # island fitness isn't comparable across instances - every
+            # --migrate-every gens, re-score all island champions on ONE
+            # reference instance so best.pt is a fair pick with a real number.
+            if gen % max(1, args.migrate_every) == 0:
+                ref = islands[0].env.h
+                champ_w = []
+                ref_fit = []
+                for isl in islands:
+                    w = isl.pop[int(isl.fit.argmax())]
+                    r = ref.eval_policy(w, *hidden, frame_skip=args.frame_skip,
+                                        max_frames=islands[0].max_frames)
+                    champ_w.append(w)
+                    ref_fit.append(fitness_of(r) if r else -1e18)
+                k = int(np.argmax(ref_fit))
+                if ref_fit[k] > best_fit:
+                    best_fit = ref_fit[k]
+                    pol.set_flat(champ_w[k])
+                    pol.save(run / "best.pt")
+                    print(f"  new best.pt: island {k} champ, ref-fitness "
+                          f"{ref_fit[k]:.1f}", flush=True)
 
             for isl in islands:
                 isl.next_gen(args.parents, args.elite, args.sigma, rng)
@@ -235,13 +255,14 @@ def main() -> None:
         np.savez(run / "resume.npz",
                  pop=np.array([isl.pop for isl in islands]), gen=gen)
         np.save(run / "history.npy", np.array(hist))
-        if hud is not None:
-            hud.close()
         for isl in islands:
             try:
                 isl.env.close()
             except Exception:
                 pass
+        print(f"stopped at gen {gen}. best.pt fitness {best_fit:.1f}", flush=True)
+        if hud is not None:
+            hud.finish()   # keep the windows up until the user closes them
 
 
 if __name__ == "__main__":
