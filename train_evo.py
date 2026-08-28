@@ -82,7 +82,7 @@ class Island:
         self.pop = new
 
 
-def evaluate(islands, hidden, fit_fn, hud=None, stall_timeout=90.0):
+def evaluate(islands, hidden, fit_fn, rng, jitter=0, hud=None, stall_timeout=90.0):
     """Work-queue: each island churns through its sub-population on its own
     instance; all N run concurrently. Blocks until every policy is scored.
     Raises RuntimeError if any island makes no progress for stall_timeout s
@@ -93,9 +93,14 @@ def evaluate(islands, hidden, fit_fn, hud=None, stall_timeout=90.0):
     running = [None] * N
     last_ok = [time.perf_counter()] * N
     remaining = 0
+
+    def kick(isl, k):
+        isl.env.h.eval_start(isl.pop[k], h1, h2, isl.frame_skip, isl.max_frames,
+                             warmup=int(rng.integers(0, jitter + 1)))
+
     for i, isl in enumerate(islands):
         remaining += len(isl.pop)
-        isl.env.h.eval_start(isl.pop[0], h1, h2, isl.frame_skip, isl.max_frames)
+        kick(isl, 0)
         running[i] = 0
         nxt[i] = 1
 
@@ -123,8 +128,7 @@ def evaluate(islands, hidden, fit_fn, hud=None, stall_timeout=90.0):
             if hud is not None:
                 hud.record(i, j, f, r["frames"], r["score"])
             if nxt[i] < len(isl.pop):
-                isl.env.h.eval_start(isl.pop[nxt[i]], h1, h2, isl.frame_skip,
-                                     isl.max_frames)
+                kick(isl, nxt[i])
                 running[i] = nxt[i]
                 nxt[i] += 1
             else:
@@ -172,6 +176,10 @@ def main() -> None:
     ap.add_argument("--w-boss", type=float, default=5.0,
                     help="fitness weight on boss damage (~1.0 per phase cleared)")
     ap.add_argument("--death-penalty", type=float, default=1.0)
+    ap.add_argument("--warmup-jitter", type=int, default=90,
+                    help="random 0..N uncounted policy frames before each "
+                         "episode - a phase offset so policies can't memorise "
+                         "one fixed bullet sequence (0 = off, deterministic)")
     ap.add_argument("--name", default="evo")
     ap.add_argument("--resume", type=Path, default=None)
     ap.add_argument("--seed", type=int, default=0)
@@ -219,7 +227,7 @@ def main() -> None:
             if hud is not None:
                 hud.gen_start(gen, [isl.pop for isl in islands])
             try:
-                evaluate(islands, hidden, fit_fn, hud)
+                evaluate(islands, hidden, fit_fn, rng, args.warmup_jitter, hud)
             except RuntimeError as e:
                 print(f"gen {gen}: island eval failed ({e}); relaunching all",
                       flush=True)
@@ -245,19 +253,26 @@ def main() -> None:
             if hud is not None:
                 hud.gen_end(bframes)
 
-            # island fitness isn't comparable across instances - every 10 gens,
-            # re-score all island champions on ONE reference instance so best.pt
-            # is a fair pick with a real number.
+            # island fitness isn't comparable across instances (and each episode
+            # now has a random phase offset), so every 10 gens re-score all
+            # island champions on ONE reference instance at several fixed phase
+            # offsets and take the mean - a robust "how well does this
+            # generalise" number for picking best.pt.
             if gen % 10 == 0:
                 ref = islands[0].env.h
+                phases = [0, 30, 60, 90] if args.warmup_jitter else [0]
                 champ_w = []
                 ref_fit = []
                 for isl in islands:
                     w = isl.pop[int(isl.fit.argmax())]
-                    r = ref.eval_policy(w, *hidden, frame_skip=args.frame_skip,
-                                        max_frames=islands[0].max_frames)
+                    fs = []
+                    for ph in phases:
+                        r = ref.eval_policy(w, *hidden, frame_skip=args.frame_skip,
+                                            max_frames=islands[0].max_frames,
+                                            warmup=ph)
+                        fs.append(fit_fn(r) if r else -1e18)
                     champ_w.append(w)
-                    ref_fit.append(fit_fn(r) if r else -1e18)
+                    ref_fit.append(float(np.mean(fs)))
                 k = int(np.argmax(ref_fit))
                 if ref_fit[k] > best_fit:
                     best_fit = ref_fit[k]

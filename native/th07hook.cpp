@@ -451,14 +451,30 @@ static int __fastcall hooked_do_tick(void* self, void* edx) {
             QueryPerformanceCounter(&t_last);
 
             float obs[OBS_DIM];
+
+            // random phase offset: run the policy for eval_warmup uncounted
+            // frames so it can't just memorise one fixed bullet sequence.
+            bool warm_dead = false;
+            for (uint32_t k = 0; k < s->eval_warmup && !warm_dead; ++k) {
+                build_obs(obs);
+                s->action = decode_action(mlp_forward(s->weights, obs, h1, h2));
+                wr<uint8_t>(FRAMESKIP_BYTE, 0);
+                int wr_ = orig_do_tick(self, edx);
+                s->frame++;
+                uintptr_t wg = rd<uintptr_t>(GAME_MANAGER + GM_GLOBALS_PTR);
+                float wl = wg ? rd<float>(wg + G_LIFE_COUNT) : start_lives;
+                if (wr_ != 0 || wl < start_lives - 0.5f) warm_dead = true;
+            }
+            reset_bullet_hist();   // fresh velocity baseline for the counted run
+
             uint32_t frames = 0;
             int r = 0;
-            bool died = false;
+            bool died = warm_dead;
             bool first = true;
             float boss_dmg = 0.f;
             float prev_bhp = 0.f;
             bool prev_boss = false;
-            while (frames < cap) {
+            while (!warm_dead && frames < cap) {
                 build_obs(obs);
                 if (first) { memcpy(s->dbg_obs, obs, sizeof(obs)); first = false; }
                 s->action = decode_action(mlp_forward(s->weights, obs, h1, h2));

@@ -83,6 +83,9 @@ struct Shm {
     uint32_t eval_max_frames;    // episode cap in game frames
     uint32_t eval_h1, eval_h2;   // MLP hidden layer sizes
     uint32_t eval_render;        // 1 = draw + present + pace to 60 Hz (watch)
+    uint32_t eval_warmup;        // run the policy this many uncounted frames
+                                 // after the reset (random phase offset so a
+                                 // policy can't memorise one fixed sequence)
     uint32_t ep_frames;          // frames survived
     int32_t  ep_score;           // final score
     int32_t  ep_graze;           // final graze

@@ -77,6 +77,7 @@ class Shm(ctypes.Structure):
         ("eval_h1", ctypes.c_uint32),
         ("eval_h2", ctypes.c_uint32),
         ("eval_render", ctypes.c_uint32),
+        ("eval_warmup", ctypes.c_uint32),
         ("ep_frames", ctypes.c_uint32),
         ("ep_score", ctypes.c_int32),
         ("ep_graze", ctypes.c_int32),
@@ -170,7 +171,8 @@ class Hook:
 
     # --- in-DLL episode eval: blocking + split (for the island orchestrator) ---
     def eval_start(self, weights, h1: int, h2: int, frame_skip: int = 3,
-                   max_frames: int = 7200, render: bool = False) -> None:
+                   max_frames: int = 7200, render: bool = False,
+                   warmup: int = 0) -> None:
         """Kick off one full-episode eval with `weights`. Non-blocking."""
         import numpy as np
         w = np.ascontiguousarray(weights, dtype=np.float32)
@@ -180,6 +182,7 @@ class Hook:
         s.eval_frame_skip = int(frame_skip)
         s.eval_max_frames = int(max_frames)
         s.eval_render = 1 if render else 0
+        s.eval_warmup = int(warmup)
         s.done = 0
         s.state = ST_EVAL
 
@@ -199,9 +202,9 @@ class Hook:
 
     def eval_policy(self, weights, h1: int, h2: int, frame_skip: int = 3,
                     max_frames: int = 7200, render: bool = False,
-                    timeout: float = 120.0, on_wait=None):
+                    timeout: float = 120.0, on_wait=None, warmup: int = 0):
         """Blocking single-episode eval. Returns stats dict, or None on timeout."""
-        self.eval_start(weights, h1, h2, frame_skip, max_frames, render)
+        self.eval_start(weights, h1, h2, frame_skip, max_frames, render, warmup)
         deadline = time.perf_counter() + timeout
         while not self.s.done:
             if time.perf_counter() > deadline:
