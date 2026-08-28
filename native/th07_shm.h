@@ -62,6 +62,13 @@ struct Shm {
 
     int32_t  bullet_count;        // number of valid entries in bullets[]
     int32_t  enemy_count;
+
+    // crash diagnostics (VEH fills these on the first access violation)
+    uint32_t crash_code;         // 0 = none; else the SEH exception code
+    uint32_t crash_eip;          // faulting instruction address
+    uint32_t crash_addr;         // address that was read/written
+    uint32_t crash_rw;           // 0 = read, 1 = write
+
     Bullet   bullets[MAX_BULLETS];
     Enemy    enemies[MAX_ENEMIES];
 };

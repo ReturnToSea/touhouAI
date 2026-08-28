@@ -1,4 +1,4 @@
-"""A tiny always-on-top status window for a PPO run. No extra deps (tkinter).
+"""A small always-on-top status window for a PPO run. No extra deps (tkinter).
 
     from hud import TrainHud
     model.learn(..., callback=[ckpt, TrainHud(frame_skip=3, total_steps=5_000_000)])
@@ -6,6 +6,9 @@
 PPO is not generational - it's one policy improved by a gradient update every
 rollout. "iters" = collect-then-update cycles; "steps" = agent steps summed
 over all envs; "sim" = in-game time those steps represent.
+
+The HUD is best-effort: if the window is closed or tkinter errors for any
+reason, it silently stops updating - it must never disturb training.
 """
 from __future__ import annotations
 
@@ -22,6 +25,10 @@ def _hms(sec: float) -> str:
     return (f"{d}d " if d else "") + f"{h:02d}:{m:02d}:{sec:02d}"
 
 
+_FIELDS = ["wall", "sim", "speed", "steps", "iters",
+           "episodes", "best score", "best return", "recent return"]
+
+
 class TrainHud(BaseCallback):
     def __init__(self, frame_skip: int = 3, total_steps: int = 0,
                  refresh: float = 0.25, verbose: int = 0):
@@ -32,43 +39,55 @@ class TrainHud(BaseCallback):
         self._t0 = 0.0
         self._last = 0.0
         self._iters = 0
+        self._ep_total = 0
         self.best_score = 0
         self.best_return = float("-inf")
         self._root = None
         self._rows = {}
 
-    # ---- window -------------------------------------------------------------
+    # ---- window (all tkinter access funnels through _safe) ---------------
+    def _kill_window(self):
+        try:
+            if self._root is not None:
+                self._root.destroy()
+        except Exception:
+            pass
+        self._root = None
+        self._rows = {}
+
     def _build(self):
         try:
             import tkinter as tk
-        except Exception:
-            return
-        try:
-            self._root = tk.Tk()
+            root = tk.Tk()
         except Exception:
             self._root = None
             return
-        r = self._root
-        r.title("Th07 PPO")
-        r.attributes("-topmost", True)
-        r.configure(bg="#12141a")
-        r.resizable(False, False)
-        fields = ["wall", "sim", "steps", "iters", "episodes",
-                  "best score", "best return", "recent return"]
-        for i, name in enumerate(fields):
-            tk.Label(r, text=name, anchor="w", width=12, fg="#8a93a3",
-                     bg="#12141a", font=("Consolas", 10)).grid(
-                         row=i, column=0, sticky="w", padx=(12, 6), pady=2)
-            val = tk.Label(r, text="-", anchor="e", width=16, fg="#e6e9ef",
-                           bg="#12141a", font=("Consolas", 11, "bold"))
-            val.grid(row=i, column=1, sticky="e", padx=(6, 12), pady=2)
-            self._rows[name] = val
-        r.update()
-
-    def _set(self, name, text):
-        w = self._rows.get(name)
-        if w is not None:
-            w.config(text=text)
+        try:
+            root.title("Th07 PPO")
+            root.attributes("-topmost", True)
+            root.configure(bg="#12141a", padx=18, pady=14)
+            root.resizable(False, False)
+            root.minsize(420, 300)
+            root.protocol("WM_DELETE_WINDOW", self._kill_window)
+            lab_font = ("Consolas", 11)
+            val_font = ("Consolas", 14, "bold")
+            # no fixed width on the value label - a tk width= HARD-clips longer
+            # text (that was the bug); let it size to content, hold a column
+            # minsize so it doesn't jitter.
+            root.grid_columnconfigure(1, minsize=260)
+            for i, name in enumerate(_FIELDS):
+                tk.Label(root, text=name, anchor="w", width=13, fg="#8a93a3",
+                         bg="#12141a", font=lab_font).grid(
+                             row=i, column=0, sticky="w", pady=3)
+                val = tk.Label(root, text="-", anchor="e", fg="#e6e9ef",
+                               bg="#12141a", font=val_font)
+                val.grid(row=i, column=1, sticky="e", padx=(20, 0), pady=3)
+                self._rows[name] = val
+            root.update_idletasks()
+            root.update()
+            self._root = root
+        except Exception:
+            self._kill_window()
 
     def _paint(self):
         if self._root is None:
@@ -77,28 +96,32 @@ class TrainHud(BaseCallback):
         frames = self.num_timesteps * self.frame_skip
         sim = frames / 60.0
         speed = sim / wall if wall > 0 else 0.0
-        ep_buf = self.model.ep_info_buffer
+        ep_buf = getattr(self.model, "ep_info_buffer", None)
         recent = (sum(e["r"] for e in ep_buf) / len(ep_buf)) if ep_buf else 0.0
-
-        self._set("wall", _hms(wall))
-        self._set("sim", f"{_hms(sim)} {speed:.0f}x")
         tot = f" / {self.total_steps:,}" if self.total_steps else ""
-        self._set("steps", f"{self.num_timesteps:,}{tot}")
-        self._set("iters", f"{self._iters:,}")
-        self._set("episodes", f"{self._ep_total:,}")
-        self._set("best score", f"{self.best_score:,}")
-        self._set("best return",
-                  f"{self.best_return:.1f}" if self.best_return > -1e17 else "-")
-        self._set("recent return", f"{recent:.1f}")
+        vals = {
+            "wall": _hms(wall),
+            "sim": _hms(sim),
+            "speed": f"{speed:,.0f}x",
+            "steps": f"{self.num_timesteps:,}{tot}",
+            "iters": f"{self._iters:,}",
+            "episodes": f"{self._ep_total:,}",
+            "best score": f"{self.best_score:,}",
+            "best return": (f"{self.best_return:.1f}"
+                            if self.best_return > -1e17 else "-"),
+            "recent return": f"{recent:.1f}",
+        }
         try:
+            for name, text in vals.items():
+                self._rows[name].config(text=text)
             self._root.update()
         except Exception:
-            self._root = None  # window closed - stop touching it
+            # window closed / destroyed / tkinter unhappy - let it go
+            self._kill_window()
 
-    # ---- callback hooks ---------------------------------------------------
+    # ---- callback hooks -------------------------------------------------
     def _on_training_start(self) -> None:
         self._t0 = time.time()
-        self._ep_total = 0
         self._build()
 
     def _on_rollout_end(self) -> None:
@@ -117,14 +140,17 @@ class TrainHud(BaseCallback):
         now = time.time()
         if now - self._last >= self.refresh:
             self._last = now
-            self._paint()
+            try:
+                self._paint()
+            except Exception:
+                self._kill_window()
         return True
 
     def _on_training_end(self) -> None:
-        self._paint()
-        if self._root is not None:
-            try:
-                self._rows["wall"].master.title("Th07 PPO - done")
+        try:
+            self._paint()
+            if self._root is not None:
+                self._root.title("Th07 PPO - done")
                 self._root.update()
-            except Exception:
-                pass
+        except Exception:
+            self._kill_window()

@@ -1,9 +1,10 @@
-"""PPO on Th07Env (Stage 1, Easy). Run from repo root.
+"""PPO on Th07Env (Stage 1, Lunatic). Run from repo root.
 
     .venv\\Scripts\\python train_ppo.py --n-envs 8 --steps 5_000_000
 
-Checkpoints + tensorboard land in runs/<name>/. The game processes are the CPU
-cost; the MLP policy is tiny so CPU torch is fine.
+Checkpoints + tensorboard land in runs/<name>/. The N game processes are the
+real CPU cost - the MLP policy is tiny, so torch is capped to a few threads so
+it doesn't starve the games' do_tick threads (that was crashing long runs).
 """
 from __future__ import annotations
 
@@ -12,6 +13,8 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / "native"))
+
+import torch  # noqa: E402
 
 from stable_baselines3 import PPO  # noqa: E402
 from stable_baselines3.common.callbacks import CheckpointCallback  # noqa: E402
@@ -28,7 +31,11 @@ def main() -> None:
     ap.add_argument("--name", default="ppo_st1")
     ap.add_argument("--resume", type=Path, default=None)
     ap.add_argument("--no-hud", action="store_true", help="skip the status window")
+    ap.add_argument("--torch-threads", type=int, default=4,
+                    help="cap torch CPU threads so the games get scheduler time")
     args = ap.parse_args()
+
+    torch.set_num_threads(max(1, args.torch_threads))
 
     run = Path("runs") / args.name
     run.mkdir(parents=True, exist_ok=True)

@@ -57,18 +57,22 @@ static int __fastcall hooked_run_all_on_draw(void* ecx, void* edx) {
 }
 
 // --- state snapshot for episode reset ---------------------------------------
-// One contiguous span covers every static game-state object: ANM_MANAGER ptr &
-// INPUT (0x4B9E44), PLAYER (0x4BDAD8), GAME_MANAGER (0x626270),
-// BULLET_MANAGER (0x62F958, ~3.6MB), ENEMY_MANAGER (0x9A9B00, ~9.7MB),
-// ECL_MANAGER (0x1347938), STAGE (0x1347B00), STAGE_NUM (0x1347FC8).
-constexpr uintptr_t SNAP_LO = 0x004B0000;
-constexpr uintptr_t SNAP_HI = 0x01350000;
-constexpr size_t    SNAP_SZ = SNAP_HI - SNAP_LO;   // ~15.3 MB
+// The whole .data/.bss section (0x49C000 .. 0x1365258). It holds every static
+// game-state object - ANM_MANAGER/INPUT (0x4B9E44), PLAYER (0x4BDAD8),
+// GAME_MANAGER (0x626270), BULLET_MANAGER (0x62F958), ENEMY_MANAGER (0x9A9B00),
+// ECL_MANAGER (0x1347938), STAGE_NUM (0x1347FC8) - AND the accumulating counters
+// past 0x1350000 (e.g. the frame counter at 0x135E1F8). An earlier, narrower
+// span (0x4B0000..0x1350000) left ~86 KB unreset -> a counter there overflowed
+// and crashed the game deterministically at ~77.8k steps / ~207 episodes.
+constexpr uintptr_t SNAP_LO = 0x0049C000;   // .data section start
+constexpr uintptr_t SNAP_HI = 0x01366000;   // .data end (0x1365258), page-rounded
+constexpr size_t    SNAP_SZ = SNAP_HI - SNAP_LO;   // ~15.5 MB
 constexpr size_t    GLOB_SZ = 0x100;               // zGlobals (heap block)
 
 static uint8_t* g_snap_static = nullptr;
 static uint8_t  g_snap_glob[GLOB_SZ];
 static uintptr_t g_snap_glob_ptr = 0;
+
 
 // limiter skip-branches (see feasibility/README.md) - NOP so do_tick never waits
 static const struct { uintptr_t va; uint8_t want[2]; } LIMITER[] = {
@@ -289,8 +293,24 @@ static void mute_self() {
     }
 }
 
+// ---- crash diagnostics ---------------------------------------------------
+// On the first access violation in the game, record faulting EIP + access
+// address + r/w into the shm crash_* fields (then let it crash normally). Lets
+// Python report *where* a game crash happened instead of just "reset hung".
+static LONG CALLBACK veh(EXCEPTION_POINTERS* ep) {
+    DWORD code = ep->ExceptionRecord->ExceptionCode;
+    if (code == EXCEPTION_ACCESS_VIOLATION && g_shm && !g_shm->crash_code) {
+        g_shm->crash_eip  = (uint32_t)(uintptr_t)ep->ExceptionRecord->ExceptionAddress;
+        g_shm->crash_addr = (uint32_t)ep->ExceptionRecord->ExceptionInformation[1];
+        g_shm->crash_rw   = (uint32_t)ep->ExceptionRecord->ExceptionInformation[0];
+        g_shm->crash_code = (uint32_t)code;         // set last: sentinel
+    }
+    return EXCEPTION_CONTINUE_SEARCH;   // let it crash normally after recording
+}
+
 // ---- setup ----------------------------------------------------------------
 static DWORD WINAPI init_thread(LPVOID) {
+    AddVectoredExceptionHandler(1, veh);
     char name[64];
     if (char* e = getenv("TH07_NO_DRAW"))
         g_stub_draw = atoi(e) != 0;
@@ -330,6 +350,12 @@ static DWORD WINAPI init_thread(LPVOID) {
     static const uint8_t nop2[2] = {0x90, 0x90};
     for (auto& L : LIMITER)
         if (memcmp((void*)L.va, L.want, 2) == 0) patch(L.va, nop2, 2);
+
+    // neuter the replay input recorder: mov eax,1 ; ret  (its per-frame buffer
+    // overruns after ~233k frames -> AV at 0x442DA8). Callers get the same 1.
+    static const uint8_t ret1[6] = {0xB8, 0x01, 0x00, 0x00, 0x00, 0xC3};
+    if (*(uint8_t*)FN_REPLAY_RECORD == 0x55)   // push ebp - unpatched
+        patch(FN_REPLAY_RECORD, ret1, sizeof(ret1));
 
     return 0;
 }

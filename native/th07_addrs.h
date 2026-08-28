@@ -46,6 +46,12 @@ constexpr uintptr_t GAME_MANAGER   = 0x00626270;
 // difficulty index, read by the menu AND by gameplay/scoring code directly
 // (not via the GameManager ptr). 0 Easy 1 Normal 2 Hard 3 Lunatic 4 Extra.
 constexpr uintptr_t DIFFICULTY_SEL = 0x00626280;
+
+// Replay input recorder (__thiscall, returns 1). Appends 4 bytes/frame to a
+// fixed heap buffer that never wraps -> after ~233k frames (one env running
+// many episodes) it overruns and the game AVs at 0x442DA8. We never save
+// replays, so patch the entry to `mov eax,1 ; ret` - callers can't tell.
+constexpr uintptr_t FN_REPLAY_RECORD = 0x00442CD0;
 constexpr uintptr_t BULLET_MANAGER = 0x0062F958;
 constexpr uintptr_t ENEMY_MANAGER  = 0x009A9B00;
 constexpr uintptr_t STAGE_NUM      = 0x01347FC8;

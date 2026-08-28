@@ -248,7 +248,13 @@ class Th07Env(_Base):
     # ------------------------------------------------------------------
     def reset(self, *, seed=None, options=None):
         super().reset(seed=seed)
-        assert self.h.reset(), "hook reset timed out"
+        if not self.h.reset():
+            s = self.h.s
+            if s.crash_code:
+                raise RuntimeError(
+                    f"game crashed: exc {s.crash_code:#x} at eip {s.crash_eip:#x}, "
+                    f"{'wrote' if s.crash_rw else 'read'} {s.crash_addr:#x}")
+            raise RuntimeError("hook reset timed out (game not responding)")
         self._reset_bookkeeping()
         return self._obs(), {}
 

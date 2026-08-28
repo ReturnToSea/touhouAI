@@ -14,6 +14,14 @@ def _make(rank: int, frame_skip: int, max_seconds: float, stagger: float):
     def thunk():
         if _NATIVE not in sys.path:
             sys.path.insert(0, _NATIVE)
+        # a worker only steps its game - no training - so keep its numeric libs
+        # single-threaded and out of the games' way.
+        os.environ.setdefault("OMP_NUM_THREADS", "1")
+        try:
+            import torch
+            torch.set_num_threads(1)
+        except Exception:
+            pass
         # small offset so N workers don't hit the build lock at the same instant;
         # Th07Env's cross-process _BuildLock does the real serialisation.
         time.sleep(rank * stagger)

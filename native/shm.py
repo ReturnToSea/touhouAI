@@ -65,6 +65,10 @@ class Shm(ctypes.Structure):
         ("boss_hp_max", ctypes.c_float),
         ("bullet_count", ctypes.c_int32),
         ("enemy_count", ctypes.c_int32),
+        ("crash_code", ctypes.c_uint32),
+        ("crash_eip", ctypes.c_uint32),
+        ("crash_addr", ctypes.c_uint32),
+        ("crash_rw", ctypes.c_uint32),
         ("bullets", Bullet * MAX_BULLETS),
         ("enemies", Enemy * MAX_ENEMIES),
     ]
@@ -97,34 +101,52 @@ class Hook:
     def set_free(self):
         self.s.state = ST_FREE
 
-    def _cmd(self, state: int, timeout: float) -> bool:
+    def _cmd(self, state: int, timeout: float, poll: float = 0.0) -> bool:
+        # step() passes poll=0: spin hot for the first ~1ms (the common case
+        # finishes in well under that), then yield the core so that N envs
+        # waiting at once don't starve the game do_tick threads of CPU - that
+        # was crashing long runs at ST_RESET. reset/snapshot pass poll>0 (a
+        # real sleep) since their latency doesn't matter.
         s = self.s
         s.done = 0
         s.state = state
-        deadline = time.perf_counter() + timeout
+        t_start = time.perf_counter()
+        deadline = t_start + timeout
         while not s.done:
-            if time.perf_counter() > deadline:
+            now = time.perf_counter()
+            if now > deadline:
                 return False
+            if poll:
+                time.sleep(poll)
+            elif now - t_start > 0.001:
+                time.sleep(0)   # yield: hand the core to the game thread
         return True
 
-    def step(self, action: int, repeat: int = 1, timeout: float = 5.0) -> bool:
+    def step(self, action: int, repeat: int = 1, timeout: float = 10.0) -> bool:
         self.s.action = action & 0xFFFF
         self.s.repeat = max(1, repeat)
         return self._cmd(ST_STEP, timeout)
 
-    def autonav(self, timeout: float = 20.0) -> bool:
+    def autonav(self, timeout: float = 25.0) -> bool:
         """Tap through the menus into Stage 1. Returns False on failure."""
-        if not self._cmd(ST_AUTONAV, timeout):
+        if not self._cmd(ST_AUTONAV, timeout, poll=0.001):
             return False
         return self.s.nav_frames >= 0 and self.s.gamemode == 2
 
-    def snapshot(self, timeout: float = 5.0) -> bool:
+    def snapshot(self, timeout: float = 15.0) -> bool:
         """Capture the current game state as the episode-reset point."""
-        return self._cmd(ST_SNAPSHOT, timeout)
+        return self._cmd(ST_SNAPSHOT, timeout, poll=0.001)
 
-    def reset(self, timeout: float = 5.0) -> bool:
-        """Restore the snapshot (must have called snapshot() first)."""
-        return self._cmd(ST_RESET, timeout)
+    def reset(self, timeout: float = 30.0, tries: int = 3) -> bool:
+        """Restore the snapshot (must have called snapshot() first).
+
+        Retries: a timeout here is usually a transient CPU-contention spike
+        (many envs resetting while torch has the cores), not a dead game.
+        """
+        for _ in range(tries):
+            if self._cmd(ST_RESET, timeout, poll=0.001):
+                return True
+        return False
 
     def bullets(self):
         n = min(self.s.bullet_count, MAX_BULLETS)
