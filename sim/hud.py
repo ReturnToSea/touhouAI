@@ -42,21 +42,35 @@ def load(name):
     if h.ndim != 2 or len(h) == 0:
         return None
     algo = meta.get("algo", "ppo" if h.shape[1] >= 5 else "es")
-    if algo == "ppo":
-        # cols: wall, steps, greedy_dec, sampled_dec, ent
+    n = len(h)
+    nan = np.full(n, np.nan)
+    med = p90 = f60 = f120 = f180 = wallf = enemyf = nan
+    if algo == "ppo" and h.shape[1] >= 12:
+        # v17+ cols: wall_s, steps, mean_s, sampled_dec, ent, med_s, p90_s,
+        #            f60, f120, f180, wallf, enemyf   (survival cols already in seconds)
         wall, steps = h[:, 0], h[:, 1]
-        dec = h[:, 2]                          # greedy -> the graphed curve
-        ret = h[:, 3] if h.shape[1] >= 4 else h[:, 2]   # sampled (decisions)
-        ent = h[:, 4] if h.shape[1] >= 5 else np.full(len(h), np.nan)
-        dcap = np.full(len(h), np.nan)
+        surv = h[:, 2]
+        ret = h[:, 3]
+        ent = h[:, 4]
+        med, p90 = h[:, 5], h[:, 6]
+        f60, f120, f180 = h[:, 7], h[:, 8], h[:, 9]
+        wallf, enemyf = h[:, 10], h[:, 11]
+    elif algo == "ppo":
+        # legacy cols: wall, steps, greedy_dec, sampled_dec, ent
+        wall, steps = h[:, 0], h[:, 1]
+        surv = h[:, 2] * FS / 60.0
+        ret = h[:, 3] * FS / 60.0 if h.shape[1] >= 4 else surv
+        ent = h[:, 4] if h.shape[1] >= 5 else nan
     else:
         wall, steps, dec = (h[:, 0], h[:, 1], h[:, 2]) if h.shape[1] == 4 else \
-                           (np.full(len(h), np.nan), h[:, 0], h[:, 1])
+                           (nan, h[:, 0], h[:, 1])
+        surv = dec * FS / 60.0
         ret = h[:, -1]
-        ent = np.full(len(h), np.nan)
-        dcap = np.full(len(h), np.nan)
+        ent = nan
     return dict(name=name, algo=algo, meta=meta, wall=wall, steps=steps,
-               surv=dec * FS / 60.0, ret=ret, ent=ent, dcap=dcap)
+               surv=surv, ret=ret, ent=ent, dcap=nan,
+               med=med, p90=p90, f60=f60, f120=f120, f180=f180,
+               wallf=wallf, enemyf=enemyf)
 
 
 class Hud:
@@ -98,10 +112,19 @@ class Hud:
                 f"    time {('%.1f min' % (wall / 60)) if not np.isnan(wall) else '  ? '}"
                 f"   steps {steps / 1e6:6.1f}M" + (f" / {tgt / 1e6:.0f}M" if tgt else "") +
                 (f"   {sps:.0f}k/s" if not np.isnan(sps) else ""))
-            lines.append(
-                f"    greedy survival {r['surv'][-1]:5.1f}s (best {r['surv'].max():4.1f})"
-                f"   sampled {r['ret'][-1] * FS / 60:4.1f}s"
-                + (f"   ent {r['ent'][-1]:.2f}" if not np.isnan(r['ent'][-1]) else ""))
+            if not np.isnan(r["med"][-1]):
+                lines.append(
+                    f"    median {r['med'][-1]:5.1f}s   p90 {r['p90'][-1]:6.1f}s"
+                    f" (best p90 {np.nanmax(r['p90']):.0f})"
+                    f"   >60s {r['f60'][-1]*100:.0f}%  >120s {r['f120'][-1]*100:.0f}%"
+                    f"  >180s {r['f180'][-1]*100:.0f}%")
+                lines.append(
+                    f"    deaths: wall {r['wallf'][-1]*100:.0f}%  enemy {r['enemyf'][-1]*100:.0f}%"
+                    f"   ent {r['ent'][-1]:.2f}   mean {r['surv'][-1]:.0f}s")
+            else:
+                lines.append(
+                    f"    greedy survival {r['surv'][-1]:5.1f}s (best {r['surv'].max():4.1f})"
+                    + (f"   ent {r['ent'][-1]:.2f}" if not np.isnan(r['ent'][-1]) else ""))
         self.txt.config(text="\n".join(lines))
 
     def _plot(self, runs):
@@ -111,7 +134,9 @@ class Hud:
         if not runs:
             return
         xmax = max(r["steps"][-1] for r in runs) / 1e6 or 1.0
-        ymax = max(2.0, max(r["surv"].max() for r in runs)) * 1.1
+        def _mx(r):
+            return np.nanmax(r["p90"]) if not np.all(np.isnan(r["p90"])) else r["surv"].max()
+        ymax = max(2.0, max(_mx(r) for r in runs)) * 1.1
         x0, x1, y0, y1 = PL, W - PR, H - PB, PT
 
         def X(v):
@@ -132,15 +157,21 @@ class Hud:
 
         for i, r in enumerate(runs):
             c = COLORS[i % len(COLORS)]
-            pts = []
-            for s, v in zip(r["steps"] / 1e6, r["surv"]):
-                pts += [X(s), Y(v)]
-            if len(pts) >= 4:
-                cv.create_line(*pts, fill=c, width=2, smooth=True)
-            cv.create_text(X(r["steps"][-1] / 1e6), Y(r["surv"][-1]) - 8, anchor="e",
-                           fill=c, font=("Consolas", 8), text=r["name"])
+            sm = r["steps"] / 1e6
+            has_pct = not np.all(np.isnan(r["med"]))
+            for key, w, dash in ((("p90" if has_pct else "surv"), 2, ()),
+                                 ("med", 2, (4, 3))):
+                v = r[key]
+                pts = [coord for s, y in zip(sm, v) if not np.isnan(y)
+                       for coord in (X(s), Y(y))]
+                if len(pts) >= 4:
+                    cv.create_line(*pts, fill=c, width=w, smooth=True, dash=dash)
+            lab = r["name"] + ("  (— p90  ·· med)" if has_pct else "")
+            yv = r["p90"][-1] if has_pct else r["surv"][-1]
+            cv.create_text(X(sm[-1]), Y(yv) - 8, anchor="e",
+                           fill=c, font=("Consolas", 8), text=lab)
         cv.create_text((x0 + x1) / 2, PT, fill="#9aa4b4", font=("Consolas", 9),
-                       text="survival (s)  vs  steps")
+                       text="survival: p90 (solid) + median (dashed)  vs  steps")
 
 
 def main():

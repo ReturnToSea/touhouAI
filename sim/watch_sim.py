@@ -26,8 +26,7 @@ sys.path.insert(0, str(HERE))
 sys.path.insert(0, str(HERE.parent / "native"))
 from danmaku import DanmakuSim  # noqa: E402
 from obs import (HEAD_DIM, NDIRS, GCELLS, GRID, GRID_CELL,  # noqa: E402
-                 PX_LO, PX_HI, PY_LO, PY_HI, OBS_DIRS,
-                 _O_GMAP, _O_ENE, _O_ITEM, GRID_G_W, GRID_G_H, GCELL_G)
+                 PX_LO, PX_HI, PY_LO, PY_HI, OBS_DIRS)
 from policy import MLPPolicy  # noqa: E402
 
 PW, PH = 384.0, 448.0
@@ -135,8 +134,14 @@ class Watcher:
                f"train time   {wall / 60:6.1f} min",
                f"steps        {steps / 1e6:6.1f} M" + (f" / {tgt / 1e6:.0f}M" if tgt else ""),
                f"speed        {steps / max(wall, 1) / 1e3:6.0f} k/s"]
-        if algo == "ppo":
-            # cols: wall, steps, greedy_dec, sampled_dec, ent
+        if algo == "ppo" and h.shape[1] >= 12:
+            # v17+: wall_s, steps, mean_s, sampled_dec, ent, med_s, p90_s, f60, f120, f180, wallf, enemyf
+            out += [f"median surv  {h[-1, 5]:6.1f} s",
+                    f"p90 surv     {h[-1, 6]:6.1f} s   (best {np.nanmax(h[:, 6]):.0f})",
+                    f">60/120/180s {h[-1,7]*100:.0f}/{h[-1,8]*100:.0f}/{h[-1,9]*100:.0f} %",
+                    f"deaths wall/en {h[-1,10]*100:.0f}/{h[-1,11]*100:.0f} %",
+                    f"entropy      {h[-1, 4]:6.3f}"]
+        elif algo == "ppo":
             gd = h[-1, 2]
             sm = h[-1, 3] if h.shape[1] >= 4 else gd
             ent = h[-1, 4] if h.shape[1] >= 5 else float("nan")

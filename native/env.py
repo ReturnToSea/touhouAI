@@ -291,12 +291,11 @@ class Th07Env(_Base):
         try:
             import struct
             base = 0x00575C70                    # ITEM_MANAGER (th07_addrs.h)
-            n = pm.read_int(base + 0xAE2EC)       # item_count
-            if n <= 0:
-                return out
-            blob = pm.read_bytes(base, 0x288 * min(0x44C, n + 64))
+            # items sit near the cycling `next_index` cursor, not the array front,
+            # so the whole 0x44C-slot array must be scanned.
+            blob = pm.read_bytes(base, 0x288 * 0x44C)
             cand = []
-            for i in range(len(blob) // 0x288):
+            for i in range(0x44C):
                 b = i * 0x288
                 if not blob[b + 0x27D]:           # in_use
                     continue

@@ -56,37 +56,47 @@ for _cx, _cy in _CORNERS:
 ROSTER.append((E_LINE, 350.0, 412.0))
 ROSTER += [(E_BRING, CX, CY), (E_BRING, CX, CY)]     # [-2] bounces, [-1] orbits
 
+BULLET_SCALE = 0.65          # v16: all bullets -35% (stage-1 hitboxes are small)
+
 # --- enemies (learn to shoot) ---
-# a wave of 4-6 flies in from off-screen every 12 s, hovers ~6 s, leaves.
-# 2 HP each; touching one kills the player. Holding SHOOT auto-hits the nearest
-# active enemy for 1 dmg/s (no projectiles). No transfer of this damage model -
-# the real game does its own shot damage; the policy just learns to hold shoot
-# and position near enemies.
-MAXE = 18                    # enemy slots
-EN_PER_WAVE = 6              # slots written per wave (4-6 activated)
+# v16: big waves fly in from off-screen every 12 s, hover ~6 s, leave. 1 HP each;
+# touching one kills the player. Holding SHOOT auto-hits the nearest N active
+# enemies (N grows with power) for EN_DPS * power_mult. Enemies drop P items;
+# collecting P raises power -> more damage (capped 3x). The damage/power model
+# doesn't transfer literally but the "collect P, hold shoot, dodge bodies" habit
+# does.
+MAXE = 36                    # enemy slots
+EN_PER_WAVE = 14             # slots written per wave (9-14 activated)
+EN_WAVE_LO, EN_WAVE_HI = 9, 15
 WAVE_PERIOD = 720            # 12 s
-EN_HP = 2.0
+EN_HP = 1.0
 EN_RADIUS = 9.0
 EN_FLY_SPEED = 2.6
 EN_HOVER_FRAMES = 360        # 6 s
-EN_DPS = 1.0 / 60.0          # 1 dmg per second, per frame
-EN_DMG_REW = 0.10           # reward per HP dealt - small; items carry the shoot signal
+EN_DPS = 1.0 / 45.0          # base dmg/frame at power 0 (1 HP -> 0.75 s to kill)
+EN_DMG_REW = 0.10           # reward per HP dealt
 
-# --- P-item drops (learn to shoot; reward only, no weapon effect yet) ---
-IT_MAX = 96                  # item slots
-IT_PER_KILL = 2              # P items dropped per enemy killed
+# --- power meter -> shot damage (0..POWER_MAX, +PWR_PER_ITEM per P collected) ---
+POWER_MAX = 128.0
+PWR_PER_ITEM = 2.5
+PWR_START_HI = 48.0          # episodes start at power ~U(0, PWR_START_HI)
+PWR_DMG_MULT_MAX = 3.0       # damage at full power = 3x
+
+# --- P-item drops ---
+IT_MAX = 192                 # item slots (4/kill * big waves)
+IT_PER_KILL = 4              # P items dropped per enemy killed
 IT_GRAVITY = 0.10            # px/frame^2 downward
-IT_POP_VY = -2.4             # initial upward pop
 IT_TERM_VY = 3.0             # terminal fall speed
 IT_COLLECT_R = 14.0
-IT_REW = 0.15              # reward per P item collected (v15: 0.06 -> 0.15)
+IT_REW = 0.30              # reward per P item collected (v16: 0.15 -> 0.30)
 
-# --- "wall" attack: a half-width curtain sweeps across every ~10 s ---
-WALL_PERIOD = 600            # 10 s
-WALL_SLOTS = 96             # dedicated bullet slots (room for 2 overlapping walls)
-WALL_N = 44                # bullets in the curtain - solid, no threading (v15: 20->44)
-WALL_SPEED = 0.95          # px/frame - v15: 1.8 -> ~half, more reaction time
-WALL_RAD = 5.0
+# --- "wall" attack: a solid half-width curtain sweeps across ---
+WALL_PERIOD = 420           # v16: 10 s -> 7 s
+WALL_FIRST = 100            # first wall this frame (player has ~1.5 s to orient)
+WALL_SLOTS = 128
+WALL_N = 56                # v16: 44 -> 56 (smaller bullets, keep it solid)
+WALL_SPEED = 1.3           # v16: 0.95 -> 1.3 (clears in ~6-7 s, no wall overlap)
+WALL_RAD = 3.5             # v16: 5.0 -> 3.5 (in line with the -35% bullets)
 WALL_OFF = 48.0            # spawn this far off-screen (telegraph before it's lethal)
 
 # top-right CONE (ROSTER emitter index 2): one-shot 50% chance at t=1s to
@@ -154,12 +164,13 @@ class DanmakuSim:
         self.en_cursor = torch.zeros(B, device=d)
         self._ek = torch.arange(EN_PER_WAVE, device=d).float()
 
-        # P-item drops
+        # P-item drops + power meter
         self.it_pos = torch.full((B, IT_MAX, 2), 1e4, device=d)
         self.it_vel = torch.zeros(B, IT_MAX, 2, device=d)
         self.it_active = torch.zeros(B, IT_MAX, device=d)
         self.it_cursor = torch.zeros(B, device=d)
         self._itk = torch.arange(IT_PER_KILL, device=d).float()
+        self.power = torch.zeros(B, 1, device=d)              # 0..POWER_MAX
 
         # wall attack
         self.wall_cursor = torch.zeros(B, device=d)
@@ -192,8 +203,10 @@ class DanmakuSim:
 
         self._k = torch.arange(self.K, device=d).float()
         self._ebase = self._eidx.float() * self.SPE
-        self._z9 = torch.zeros(B, 9, device=d)
-        self._z9[:, 5] = 1.0
+        # head_aux [B,9] = lives/9, bombs/9, power/128, tanh(graze/100), stage/6,
+        # alive, dead, boss_present, boss_frac. Only power + alive vary in the sim.
+        self._head = torch.zeros(B, 9, device=d)
+        self._head[:, 5] = 1.0
         self._zeros2 = torch.zeros(B, 2, device=d)
         self._zeros1 = torch.zeros(B, device=d)
 
@@ -211,9 +224,14 @@ class DanmakuSim:
             self._advance_c = self._advance
 
     # ------------------------------------------------------------------ rng
+    # NOT traced by torch.compile: dynamo guards on the literal lo/hi values, so
+    # the ~30 distinct (lo, hi, shape) call sites would each force a recompile.
+    # Run eager, hand back a plain tensor; the rest of _advance still compiles.
+    @torch._dynamo.disable
     def _r(self, *shape, lo=0.0, hi=1.0):
         return torch.rand(shape, generator=self.g, device=self.dev) * (hi - lo) + lo
 
+    @torch._dynamo.disable
     def _ri(self, lo, hi, *shape):
         return torch.randint(lo, hi, shape, generator=self.g, device=self.dev).float()
 
@@ -285,7 +303,7 @@ class DanmakuSim:
                              self._r(B, E, lo=0.09, hi=0.20))
         self.e_spread = torch.where(mbe, spread, self.e_spread)
         rad = torch.where(is_bring, torch.full((B, E), 3.2, device=d),
-                          self._r(B, E, lo=2.6, hi=4.4))
+                          self._r(B, E, lo=2.6, hi=4.4)) * BULLET_SCALE
         self.e_rad = torch.where(mbe, rad, self.e_rad)
         self.e_ang = torch.where(mbe, self._r(B, E, lo=0, hi=TAU), self.e_ang)
         dang = torch.where(is_bring, torch.full((B, E), 0.06, device=d),
@@ -307,6 +325,7 @@ class DanmakuSim:
         mb1 = mb.squeeze(1)
         self.it_cursor = torch.where(mb1, torch.zeros_like(self.it_cursor), self.it_cursor)
         self.wall_cursor = torch.where(mb1, torch.zeros_like(self.wall_cursor), self.wall_cursor)
+        self.power = torch.where(mb, self._r(B, 1, lo=0.0, hi=PWR_START_HI), self.power)
 
     def reset(self):
         self._spawn(torch.ones(self.B, 1, device=self.dev))
@@ -348,9 +367,11 @@ class DanmakuSim:
         return o
 
     def _obs(self):
+        head = self._head.clone()
+        head[:, 2] = (self.power[:, 0] / 128.0).clamp(0.0, 1.0)
         return self._obs_fn(self.player, self._zeros2, self._zeros1,
                             self.b_pos, self.b_vel, self.b_active,
-                            self._z9, self._enemy_obs(), self._item_obs())
+                            head, self._enemy_obs(), self._item_obs())
 
     # ------------------------------------------------------------------ hot path
     def _advance(self, mv, focus, shoot):
@@ -450,7 +471,7 @@ class DanmakuSim:
         wave_due = ((frs % WAVE_PERIOD) < 1.0) & (frs > 1.0)     # [B]
         NW = EN_PER_WAVE
         ek = self._ek[None, :]                                   # [1,NW]
-        n_wave = self._ri(4, NW + 1, B, 1)                       # [B,1] -> 4,5,6
+        n_wave = self._ri(EN_WAVE_LO, EN_WAVE_HI, B, 1)          # [B,1]
         mkw = wave_due[:, None] & (ek < n_wave)                  # [B,NW]
         edge = self._ri(0, 3, B, NW)
         tx = self._r(B, NW, lo=PX_LO + 30, hi=PX_HI - 30)
@@ -503,41 +524,49 @@ class DanmakuSim:
                 (self.en_pos[..., 1] < -44) | (self.en_pos[..., 1] > PH + 44))
         self.en_active = self.en_active * (~eoff).float() * (self.en_hp > 0.0).float()
 
-        # SHOOT auto-hits the nearest active, ON-SCREEN enemy for 1 dmg/s (no
-        # projectiles). No aim needed, but the enemy has to have flown in.
+        # SHOOT auto-hits the nearest N active, ON-SCREEN enemies (N: 1/2/3 grows
+        # with power). dmg = EN_DPS * power_mult (1x at 0 power .. 3x at full).
         ea = self.en_active > 0.5
         on_screen = ((self.en_pos[..., 0] > PX_LO) & (self.en_pos[..., 0] < PX_HI) &
                      (self.en_pos[..., 1] > 0.0) & (self.en_pos[..., 1] < PY_HI))
         shootable = ea & on_screen
         ed = torch.where(shootable, (self.en_pos - self.player[:, None, :]).norm(dim=2),
                          torch.full((B, MAXE), 1e9, device=d))
-        near_i = ed.argmin(dim=1)                                # [B]
-        near_d = ed.gather(1, near_i[:, None]).squeeze(1)
-        hp_b = self.en_hp.gather(1, near_i[:, None]).squeeze(1).clamp(min=0.0)
-        dmg = torch.minimum((near_d < 1e8).float() * shoot.squeeze(1) * EN_DPS, hp_b)  # [B]
-        self.en_hp = self.en_hp.scatter_add(1, near_i[:, None], -dmg[:, None])
-        hp_after = self.en_hp.gather(1, near_i[:, None]).squeeze(1)
-        killed = (hp_b > 0.0) & (hp_after <= 0.0)                # [B] nearest enemy just died
-        kpos = self.en_pos.gather(1, near_i[:, None, None].expand(-1, 1, 2)).squeeze(1)  # [B,2]
+        pfrac = (self.power[:, 0] / POWER_MAX).clamp(0.0, 1.0)   # [B]
+        pmult = 1.0 + (PWR_DMG_MULT_MAX - 1.0) * pfrac
+        n_tgt = 1.0 + (pfrac > 0.5).float() + (pfrac > 0.85).float()   # [B]
+        NT = 3
+        dk, ik = ed.topk(NT, dim=1, largest=False)              # [B,NT]
+        tgt_ok = (dk < 1e8) & (torch.arange(NT, device=d)[None, :] < n_tgt[:, None])
+        per = (shoot.squeeze(1)[:, None] * EN_DPS * pmult[:, None]) * tgt_ok.float()
+        hp_pre = self.en_hp.gather(1, ik).clamp(min=0.0)        # [B,NT]
+        per = torch.minimum(per, hp_pre)
+        self.en_hp = self.en_hp.scatter_add(1, ik, -per)
+        hp_post = self.en_hp.gather(1, ik)
+        killed_nt = (hp_pre > 0.0) & (hp_post <= 0.0)           # [B,NT]
+        dmg = per.sum(dim=1)                                    # [B] total HP dealt
+        kpos_nt = torch.gather(self.en_pos, 1, ik[:, :, None].expand(-1, -1, 2))  # [B,NT,2]
 
-        # --- P items: spawn on kill, fall under gravity, collect on touch ---
-        itk = self._itk[None, :]                                 # [1,IT_PER_KILL]
-        islot = ((self.it_cursor[:, None] + itk) % IT_MAX).long()  # [B,IT_PER_KILL]
-        is2 = islot[:, :, None].expand(B, IT_PER_KILL, 2)
-        iang = self._r(B, IT_PER_KILL, lo=-0.6, hi=0.6)
-        ipos = kpos[:, None, :].expand(B, IT_PER_KILL, 2)
-        ivel = torch.stack([torch.sin(iang) * 1.4,
-                            torch.full_like(iang, IT_POP_VY)], -1)
-        km = killed[:, None].expand(B, IT_PER_KILL)              # [B,IT_PER_KILL]
+        # --- P items: spawn IT_PER_KILL per killed enemy, varied pop, fall, collect ---
+        NJ = IT_PER_KILL * NT
+        jj = torch.arange(NJ, device=d)
+        kslot = (jj // IT_PER_KILL)[None, :]                    # [1,NJ] which target
+        islot = ((self.it_cursor[:, None] + jj[None, :]) % IT_MAX).long()   # [B,NJ]
+        is2 = islot[:, :, None].expand(B, NJ, 2)
+        jpos = torch.gather(kpos_nt, 1, kslot[:, :, None].expand(B, NJ, 2))
+        pvy = self._r(B, NJ, lo=-3.6, hi=-1.0)                  # some pop high, some low
+        pvx = self._r(B, NJ, lo=-1.9, hi=1.9)
+        jvel = torch.stack([pvx, pvy], -1)
+        jm = torch.gather(killed_nt.float(), 1, kslot.expand(B, NJ)) > 0.5   # [B,NJ]
         cur_ip = torch.gather(self.it_pos, 1, is2)
         cur_iv = torch.gather(self.it_vel, 1, is2)
         cur_ia = torch.gather(self.it_active, 1, islot)
-        self.it_pos = self.it_pos.scatter(1, is2, torch.where(km[:, :, None], ipos, cur_ip))
-        self.it_vel = self.it_vel.scatter(1, is2, torch.where(km[:, :, None], ivel, cur_iv))
+        self.it_pos = self.it_pos.scatter(1, is2, torch.where(jm[:, :, None], jpos, cur_ip))
+        self.it_vel = self.it_vel.scatter(1, is2, torch.where(jm[:, :, None], jvel, cur_iv))
         self.it_active = self.it_active.scatter(
-            1, islot, torch.where(km, torch.ones_like(cur_ia), cur_ia))
-        self.it_cursor = torch.where(killed, (self.it_cursor + IT_PER_KILL) % IT_MAX,
-                                     self.it_cursor)
+            1, islot, torch.where(jm, torch.ones_like(cur_ia), cur_ia))
+        self.it_cursor = (self.it_cursor +
+                          IT_PER_KILL * killed_nt.float().sum(dim=1)) % IT_MAX
 
         ia = self.it_active > 0.5
         nv = self.it_vel.clone()
@@ -546,18 +575,24 @@ class DanmakuSim:
         self.it_pos = self.it_pos + self.it_vel * ia[:, :, None].float()
         idist = (self.it_pos - self.player[:, None, :]).norm(dim=2)   # [B,IT_MAX]
         got = ia & (idist < IT_COLLECT_R)
-        n_got = got.sum(dim=1).float()                           # [B]
+        n_got = got.sum(dim=1).float()                          # [B]
         it_off = self.it_pos[..., 1] > PY_HI + 24.0
         self.it_active = self.it_active * (~got).float() * (~it_off).float()
+        self.power = (self.power + PWR_PER_ITEM * n_got[:, None]).clamp(0.0, POWER_MAX)
 
         # --- wall attack: a half-width curtain sweeps across every WALL_PERIOD ---
-        wall_due = ((frs % WALL_PERIOD) < 1.0) & (frs > 1.0)     # [B]
+        is_first = (frs == float(WALL_FIRST))[:, None]           # [B,1]
+        wall_due = (((frs % WALL_PERIOD) < 1.0) & (frs > 1.0))[:, None] | is_first
+        wall_due = wall_due.squeeze(1)                           # [B]
         wk = self._walln[None, :]                                # [1,WALL_N]
         wdir = self._ri(0, 4, B, 1)                              # 0 L>R 1 R>L 2 T>B 3 B>T
+        # the FIRST wall is always a vertical curtain (horizontal travel) with the
+        # gap over the lower-centre spawn zone - no unavoidable-death opener.
+        wdir = torch.where(is_first, wdir % 2, wdir)
         horiz = wdir <= 1.5                                      # curtain spans Y
         half = torch.where(horiz, torch.full_like(wdir, PH * 0.5),
                            torch.full_like(wdir, PW * 0.5))      # [B,1]
-        gap_first = self._ri(0, 2, B, 1) > 0.5
+        gap_first = (self._ri(0, 2, B, 1) > 0.5) & ~is_first     # first: curtain on top
         seg0 = torch.where(gap_first, half, torch.zeros_like(half))
         perp = seg0 + (wk / (WALL_N - 1)) * half                 # [B,WALL_N] along spanned axis
         woff = WALL_OFF   # off-screen; wall slots have a wide cull margin (telegraph)

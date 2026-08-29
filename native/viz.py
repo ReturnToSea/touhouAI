@@ -40,6 +40,14 @@ SCALE = 1.8
 PAD = 40
 REDRAW_MS = 40                            # ~25 Hz
 
+# ItemManager (th07_addrs.h) - items aren't in shm, read straight from memory
+IM_BASE = 0x00575C70
+IM_COUNT = 0xAE2EC
+IM_STRIDE = 0x288
+IM_MAX = 0x44C
+I_POS, I_TYPE, I_INUSE = 0x24C, 0x27C, 0x27D
+_ITEM_COL = {0: "#ff4fa3", 2: "#ff4fa3", 1: "#4fb0ff", 7: "#c8f0ff"}   # P / point / cherry
+
 
 def _heat(d: float) -> str:
     d = 0.0 if d < 0 else 1.0 if d > 1 else d
@@ -61,8 +69,16 @@ class Viz:
         self.prev_t = None
         self.show_grid = True
         self.miss = 0
+        self.pm = None
+        try:
+            import pymem
+            self.pm = pymem.Pymem()
+            self.pm.open_process_from_id(pid)
+        except Exception:
+            self.pm = None
 
-        print(f"viz: attached to pid {pid}", flush=True)
+        print(f"viz: attached to pid {pid}"
+              + ("" if self.pm else "  (no pymem - items won't show)"), flush=True)
         self.root = tk.Tk()
         self.root.title(f"th07 viz - pid {pid}")
         self.root.configure(bg="#0a0b0e")
@@ -124,6 +140,26 @@ class Viz:
                 np.maximum.at(g, (cy[m], cx[m]), 1.0 - t / GRID_HORIZON)
         return g
 
+    def _items(self):
+        """[(x, y, type), ...] active on-field items from the live ItemManager."""
+        if self.pm is None:
+            return []
+        try:
+            import struct
+            # items sit near the cycling next_index cursor, not the array front
+            blob = self.pm.read_bytes(IM_BASE, IM_STRIDE * IM_MAX)
+            out = []
+            for i in range(IM_MAX):
+                o = i * IM_STRIDE
+                if not blob[o + I_INUSE]:
+                    continue
+                x, y = struct.unpack_from("<ff", blob, o + I_POS)
+                if -16 < y < 464:
+                    out.append((x, y, blob[o + I_TYPE]))
+            return out
+        except Exception:
+            return []
+
     def _in_range(self, px, py, b, v):
         m = np.zeros(len(b), bool)
         for it in range(49):
@@ -183,6 +219,16 @@ class Viz:
             cv.create_rectangle(cx(e.x) - 5, cy(e.y) - 5, cx(e.x) + 5, cy(e.y) + 5,
                                 outline="#ff9c33" if big else "#ffd23f", width=2)
 
+        # items (P = pink, point = blue, cherry = pale) + collect radius
+        items = self._items()
+        for (ix, iy, it) in items:
+            c = _ITEM_COL.get(it, "#8a8f9c")
+            cv.create_rectangle(cx(ix) - 3, cy(iy) - 3, cx(ix) + 3, cy(iy) + 3,
+                                fill=c, outline="#ffffff")
+        cv.create_oval(cx(px) - 14 * SCALE, cy(py) - 14 * SCALE,
+                       cx(px) + 14 * SCALE, cy(py) + 14 * SCALE,
+                       outline="#7a3350", dash=(2, 3))
+
         # player + focus ring
         cv.create_oval(cx(px) - 3, cy(py) - 3, cx(px) + 3, cy(py) + 3,
                        fill="#ffffff", outline="")
@@ -207,8 +253,8 @@ class Viz:
             (S.SLOW, "slow"), (S.SHOOT, "shoot")) if s.action & bit) or "-"
         cv.create_text(cx(0), 16, anchor="w", fill="#c8ccd4", font=("Consolas", 11),
                        text=f"bullets {int(live.sum())}   in-range {int(inr.sum())}"
-                            f"   nearest {nd:.0f}px      lives {s.lives:.0f}"
-                            f"   score {s.score}   act [{acts}]")
+                            f"   items {len(items)}   nearest {nd:.0f}px"
+                            f"   lives {s.lives:.0f}   score {s.score}   act [{acts}]")
 
 
 def main():

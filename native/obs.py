@@ -11,7 +11,7 @@ dbg_obs byte-for-byte on the grid and ~1e-3 on the escape scalars.
 NOTE: as of v14 the DLL's build_obs is STALE (no global map / item slots) - it
 only matters for the in-DLL live-evo path, not for sim training or transfer.
 
-Layout (OBS_DIM = 404):
+Layout (OBS_DIM = 236):
   [0:16)     head       - px/W, py/H, pvx/6, pvy/6, focus, lives/9, bombs/9,
                           power/128, tanh(graze/100), stage/6, alive, dead,
                           near_d, boss_present, boss_frac, 0
@@ -19,11 +19,12 @@ Layout (OBS_DIM = 404):
                           player holds that move for DIR_HORIZON frames, / DIR_HORIZON
   [25:194)   local grid - 13x13 player-centred danger grid (imminence of a strike
                           per cell from marching every bullet; walls read 0.5)
-  [194:362)  global map - 12x14 ABSOLUTE-coord coarse danger map over the whole
-                          playfield (32px cells, ~48f horizon) - for macro
-                          positioning / seeing walls form at range
-  [362:380)  enemies    - 6 * (rel_x/128, rel_y/128, life/maxlife)
-  [380:404)  items      - 8 * (rel_x/128, rel_y/128, type/9); P-drops etc.
+  [194:212)  enemies    - 6 * (rel_x/128, rel_y/128, life/maxlife)
+  [212:236)  items      - 8 * (rel_x/128, rel_y/128, type/9); P-drops etc.
+
+(v18: the 12x14 absolute-coord "global map" was dropped - the policy's
+first-layer weights for it stayed flat at the noise floor across v14-v17, i.e.
+it never learned to use it, and it was ~40% of the obs + a chunk of build cost.)
 """
 from __future__ import annotations
 
@@ -44,19 +45,6 @@ DIR_HORIZON = 20.0
 DIR_HIT_R = 7.0          # player_r (~2) + typical stage-1 bullet_r (~4), a touch generous
 K_NEAREST = 128          # only the K nearest bullets feed the local grid + escape scan
 
-# --- global (absolute-coord) coarse danger map: macro positioning ---
-# v15: shorter horizon + DENSITY-weighted (count of bullets projected into a
-# cell / GMAP_DENOM, clamped) so a lone bullet reads faint and only genuine
-# walls / dense streams saturate. The v14 max-imminence version was a red wash.
-GRID_G_W, GRID_G_H = 12, 14           # 384/32, 448/32
-GCELLS_G = GRID_G_W * GRID_G_H        # 168
-GCELL_G = 32.0
-GRID_G_HORIZON = 24.0
-GMAP_DENOM = 6.0                      # bullet-projections per cell that = full danger
-K_GLOBAL = 512                        # nearest-K feeding the global map (wider net
-                                     # than K_NEAREST so far-side walls register)
-_MARCH_T_G = torch.tensor([0.0, 12.0, 24.0])
-
 M_ENEMIES = 6
 M_ITEMS = 8
 ITEM_STRIDE = 3
@@ -64,10 +52,9 @@ ITEM_STRIDE = 3
 # slice offsets
 _O_ESC = HEAD_DIM                              # 16
 _O_GRID = _O_ESC + NDIRS                       # 25
-_O_GMAP = _O_GRID + GCELLS                     # 194
-_O_ENE = _O_GMAP + GCELLS_G                    # 362
-_O_ITEM = _O_ENE + M_ENEMIES * 3              # 380
-OBS_DIM = _O_ITEM + M_ITEMS * ITEM_STRIDE      # 404
+_O_ENE = _O_GRID + GCELLS                      # 194
+_O_ITEM = _O_ENE + M_ENEMIES * 3              # 212
+OBS_DIM = _O_ITEM + M_ITEMS * ITEM_STRIDE      # 236
 
 # index 0 = stay still, then the 8 compass dirs (matches decode_action / _DIRS)
 OBS_DIRS = torch.tensor(
@@ -92,7 +79,7 @@ def build_obs_batch(player_pos, player_vel, player_focus,
                             stage/6, alive, dead, boss_present, boss_frac
     enemies        [B,18]   6 * (rel_x/128, rel_y/128, life/maxlife)
     items          [B,24]   8 * (rel_x/128, rel_y/128, type/9)
-    returns        [B,404]
+    returns        [B,236]
     """
     dev = player_pos.device
     dt = player_pos.dtype
@@ -118,16 +105,6 @@ def build_obs_batch(player_pos, player_vel, player_focus,
     else:
         bpos, bvel, act = bullets_pos, bullets_vel, act_all
     bv = _guard(bvel)
-
-    # wider nearest-K for the global map
-    if N > K_GLOBAL:
-        d_g, selg = torch.topk(d_all, K_GLOBAL, dim=1, largest=False)
-        gpos = torch.gather(bullets_pos, 1, selg[:, :, None].expand(-1, -1, 2))
-        gvel = torch.gather(bullets_vel, 1, selg[:, :, None].expand(-1, -1, 2))
-        gact = d_g < 1e8
-    else:
-        gpos, gvel, gact = bullets_pos, bullets_vel, act_all
-    gv = _guard(gvel)
 
     dirs = OBS_DIRS.to(dev, dt)
     tsteps = _MARCH_T.to(dev, dt)
@@ -156,20 +133,7 @@ def build_obs_batch(player_pos, player_vel, player_focus,
         dval = torch.full_like(lin, float(1.0 - t / GRID_HORIZON), dtype=dt)
         dval = torch.where(valid, dval, torch.zeros_like(dval))
         grid.scatter_reduce_(1, lin, dval, reduce="amax")
-    o[:, _O_GRID:_O_GMAP] = grid
-
-    # ---------- global (absolute-coord) coarse danger map (density) ----------
-    gmt = _MARCH_T_G.to(dev, dt)
-    gmap = torch.zeros(B, GCELLS_G, device=dev, dtype=dt)
-    for i in range(gmt.shape[0]):
-        t = gmt[i]
-        wp = gpos + gv * t
-        cx = torch.floor(wp[..., 0] / GCELL_G).long()
-        cy = torch.floor(wp[..., 1] / GCELL_G).long()
-        valid = (cx >= 0) & (cx < GRID_G_W) & (cy >= 0) & (cy < GRID_G_H) & gact
-        lin = cy.clamp(0, GRID_G_H - 1) * GRID_G_W + cx.clamp(0, GRID_G_W - 1)
-        gmap.scatter_add_(1, lin, valid.to(dt))
-    o[:, _O_GMAP:_O_ENE] = (gmap / GMAP_DENOM).clamp(0.0, 1.0)
+    o[:, _O_GRID:_O_ENE] = grid
 
     # ---------- escape scalars ----------
     L = dirs.norm(dim=1, keepdim=True)

@@ -71,6 +71,10 @@ class ActorCritic(nn.Module):
 # --------------------------------------------------------------------------- PPO
 def train_ppo(args, sim, dev, run):
     ac = ActorCritic(args.hidden).to(dev)
+    if args.init:
+        src = MLPPolicy.load(args.init)
+        ac.actor.load_state_dict(src.net.state_dict())
+        print(f"warm-started actor from {args.init}", flush=True)
     opt = torch.optim.Adam(ac.parameters(), lr=args.lr, eps=1e-5)
     if dev == "cuda":
         torch.set_float32_matmul_precision("high")
@@ -82,12 +86,12 @@ def train_ppo(args, sim, dev, run):
     # greedy (argmax) eval - this is what transfer uses, and it's much better
     # than the sampled policy PPO's rollout metric measures.
     from danmaku import DanmakuSim
-    eval_sim = DanmakuSim(B=512, device=dev, max_frames=sim.max_frames * 2,
+    eval_sim = DanmakuSim(B=512, device=dev, max_frames=24000,
                           alive_rew=args.alive_rew, seed=args.seed + 777,
                           compile=(dev == "cuda"))
 
     @torch.no_grad()
-    def greedy_eval(n_dec=2400):        # 2400 dec * fs3 = 7200 f = 120 s ceiling
+    def greedy_eval(n_dec=3200):        # 3200 dec * fs3 = 9600 f = 160 s ceiling
         o = eval_sim.reset()
         el = torch.zeros(eval_sim.B, device=dev)
         lens = []
@@ -103,16 +107,21 @@ def train_ppo(args, sim, dev, run):
                 dw += float(eval_sim.step_death_wall.sum())
                 de += float(eval_sim.step_death_enemy.sum())
         lens += el[el > 0].tolist()          # survivors counted at current length
-        surv = float(np.mean(lens)) if lens else 0.0
-        wf = dw / max(ndeaths, 1)
-        ef = de / max(ndeaths, 1)
-        return surv, wf, ef
+        a = np.array(lens) if lens else np.zeros(1)
+        fs = 3.0 / 60.0
+        return dict(mean=float(a.mean()) * fs, med=float(np.median(a)) * fs,
+                    p10=float(np.percentile(a, 10)) * fs,
+                    p90=float(np.percentile(a, 90)) * fs,
+                    f60=float((a * fs > 60).mean()), f120=float((a * fs > 120).mean()),
+                    f180=float((a * fs > 180).mean()),
+                    wall=dw / max(ndeaths, 1), enemy=de / max(ndeaths, 1))
 
     ep_ret = torch.zeros(B, device=dev)
     ep_len = torch.zeros(B, device=dev)
     hist, best = [], -1e9
     total, upd, t0 = 0, 0, time.perf_counter()
     recent_len, recent_ret = [], []
+    next_log = 1_000_000            # cheap status line every ~1M steps
 
     o_buf = torch.zeros(T, B, OBS_DIM, device=dev)
     a_buf = torch.zeros(T, B, dtype=torch.long, device=dev)
@@ -180,19 +189,33 @@ def train_ppo(args, sim, dev, run):
                 nn.utils.clip_grad_norm_(ac.parameters(), 0.5)
                 opt.step()
 
+        fs = sim.frame_skip
+        # --- cheap status line every ~1M steps (rollout metrics only) ---
+        if total >= next_log:
+            next_log = total + 1_000_000
+            ml = float(np.mean(recent_len[-2000:])) if recent_len else 0.0
+            sps = total / (time.perf_counter() - t0)
+            print(f"  {total/1e6:6.1f}M  {sps/1e3:4.0f}k/s  sampled {ml*fs/60:5.1f}s  "
+                  f"ent {ent.item():.2f}", flush=True)
+            recent_len, recent_ret = recent_len[-4000:], recent_ret[-4000:]
+
+        # --- full greedy eval + checkpoint every args.log_every updates ---
         if upd % args.log_every == 0:
             ml = float(np.mean(recent_len[-2000:])) if recent_len else 0.0
-            fs = sim.frame_skip
-            gd, wf, ef = greedy_eval()                # argmax survival + death causes
+            e = greedy_eval()                        # dict, values already in seconds
             sps = total / (time.perf_counter() - t0)
-            print(f"upd {upd:4d}  {total/1e6:6.1f}M  {sps/1e3:5.0f}k/s  "
-                  f"greedy {gd*fs/60:5.1f}s  sampled {ml*fs/60:5.1f}s  "
-                  f"ent {ent.item():.3f}  deaths: wall {wf*100:3.0f}% enemy {ef*100:3.0f}%",
+            print(f"EVAL upd {upd:4d}  {total/1e6:6.1f}M  {sps/1e3:4.0f}k/s  "
+                  f"med {e['med']:5.1f}s  p90 {e['p90']:6.1f}s  >60s {e['f60']*100:3.0f}%  "
+                  f">120s {e['f120']*100:3.0f}%  >180s {e['f180']*100:3.0f}%  "
+                  f"sampled {ml*fs/60:4.1f}s  ent {ent.item():.2f}  "
+                  f"deaths: wall {e['wall']*100:2.0f}% enemy {e['enemy']*100:2.0f}%",
                   flush=True)
-            hist.append((time.perf_counter() - t0, total, gd, ml, float(ent.item())))
-            recent_len, recent_ret = recent_len[-4000:], recent_ret[-4000:]
-            if gd > best:
-                best = gd
+            # history cols: wall_s, steps, mean, sampled_dec, ent, med, p90, f60, f120, f180, wallf, enemyf
+            hist.append((time.perf_counter() - t0, total, e['mean'], ml, float(ent.item()),
+                         e['med'], e['p90'], e['f60'], e['f120'], e['f180'], e['wall'], e['enemy']))
+            score = e['med'] + 0.5 * e['p90']        # rank checkpoints by center + top end
+            if score > best:
+                best = score
                 ac.export_mlp().save(run / "best.pt")
             ac.export_mlp().save(run / "last.pt")
             np.save(run / "history.npy", np.array(hist))
@@ -286,11 +309,14 @@ def main():
     # es
     ap.add_argument("--es-sigma", type=float, default=0.02)
     ap.add_argument("--es-horizon", type=int, default=400)
-    ap.add_argument("--log-every", type=int, default=8,
+    ap.add_argument("--log-every", type=int, default=12,   # updates between full greedy evals
                     help="updates per logged point (~0.8M steps each)")
     ap.add_argument("--alive-rew", type=float, default=0.01)
-    ap.add_argument("--compile-sim", action="store_true",
-                    help="torch.compile the training sim (default: eager)")
+    ap.add_argument("--eager-sim", action="store_true",
+                    help="run the training sim eager (default: torch.compile, ~5x)")
+    ap.add_argument("--init", type=str, default="",
+                    help="warm-start the actor from a checkpoint (.pt) - avoid this "
+                         "when the env/obs changed; start fresh instead")
     args = ap.parse_args()
     args.steps = int(args.steps)
 
@@ -301,11 +327,11 @@ def main():
     (run / "meta.json").write_text(json.dumps({
         "algo": args.algo, "hidden": args.hidden, "B": args.B,
         "steps": args.steps, "started": time.time()}))
-    # training sim runs EAGER by default (matches v12-v14; compiling it churns
-    # dynamo recompiles on the varied rand shapes). --compile-sim to try it.
+    # training sim is torch.compile'd by default (~5x; _r/_ri are @dynamo.disable
+    # so the varied rand shapes no longer churn recompiles). --eager-sim to skip.
     sim = DanmakuSim(B=args.B, device=dev, max_frames=args.max_frames,
                      alive_rew=args.alive_rew, seed=args.seed,
-                     compile=(dev == "cuda" and args.compile_sim))
+                     compile=(dev == "cuda" and not args.eager_sim))
     print(f"{args.algo.upper()}  B={args.B}  hidden={args.hidden}  dev={dev}  "
           f"-> {run}", flush=True)
     (train_ppo if args.algo == "ppo" else train_es)(args, sim, dev, run)
