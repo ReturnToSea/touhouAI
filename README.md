@@ -66,12 +66,16 @@ then drop it into the real game.
 - `sim/hud.py <run>` — live survival-vs-steps curve.
 - `sim/watch_sim.py <best.pt> [--follow]` — watch the sim policy play, with the
   same overlay as `viz.py`, reloading the checkpoint as it trains.
-- `sim/transfer.py <best.pt> [--watch]` — run a sim-trained policy on the real
-  Lunatic stage 1 and report survival.
+- `sim/transfer.py <best.pt> [--watch] [--until-death]` — run a sim-trained
+  policy on the real game and report survival.
 
-**Result so far:** an early sim-trained policy transferred to the real game and
-survived ~90 s on Lunatic stage 1, moving on 99 % of decisions — the from-scratch
-reactive dodging that neither live-PPO nor evolution produced.
+**Result:** a sim-trained policy (`ppo_v12`, mid-training) transferred to the
+real game and survived **470 s / 1.63M score on Lunatic — clearing stages 1–3
+and reaching stage 4** — dodging on 95 % of decisions. An earlier checkpoint
+did 91 s. This is the from-scratch reactive dodging that neither live-PPO nor
+evolution produced across ~10 runs. (`env.reset()` only rewinds stage-1
+snapshots, so a long-surviving policy crashes the game on the *next* reset —
+use `--episodes 1` for `--until-death`.)
 
 Needs a CUDA PyTorch venv (`.venv-cuda`, kept separate so the live-game venv
 stays untouched):
