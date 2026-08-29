@@ -235,54 +235,71 @@ def _nearest(pm, buf_live, px, py):
     return best
 
 
+# (dx,dy) sign -> sim/env dir index (see _DIRS): 0 none,1 U,2 UR,3 R,4 DR,5 D,6 DL,7 L,8 UL
+_DIR_IX = {(0, 0): 0, (0, -1): 1, (1, -1): 2, (1, 0): 3, (1, 1): 4,
+           (0, 1): 5, (-1, 1): 6, (-1, 0): 7, (-1, -1): 8}
+
+
 def deathdist(env, act, steps):
-    """Drive into the stage, then SIT STILL and record, on the frame the player
-    dies, the PREVIOUS frame's nearest live bullet: (kind, centre-to-centre
-    distance, its box). distance ~= player_box + bullet_box for that kind."""
+    """Dodge with the policy for a random interval, then walk SLOWLY (focused,
+    1.6 px/f) straight at the nearest bullet until it kills us. On the death
+    frame, log the previous frame's nearest bullet: (0xB8A class, 0xB7C size,
+    centre-to-centre distance). min distance over many samples ~= the true
+    head-on lethal distance = player_hitbox + bullet_hitbox."""
+    import random
     pm = env._pm
     hits = []
     r = env.reset()
     obs = r[0] if isinstance(r, tuple) else r
-    settle, prev_alive, prev_near = 0, True, None
+    settle, dodge_for, prev_alive, prev = 0, random.randint(30, 300), True, None
     for step in range(steps):
-        # dodge ~1 s to reach the fight, then drift slowly through the fire
-        # (0=still, 1=up, 5=down) so we eat a mix of bullet kinds point-blank
-        a = act(obs) if settle < 60 else (0, 1, 0, 5)[(settle // 25) % 4]
+        try:
+            px, py = struct.unpack_from("<ff", pm.read_bytes(PLAYER + P_POS_X, 8), 0)
+            pstate = pm.read_bytes(PLAYER + P_STATE, 1)[0]
+            live = _read_bullets(pm)
+        except Exception:
+            live, pstate, px, py = [], 0, 192, 380
+        near = _nearest(pm, live, px, py)
+        if settle < dodge_for or near is None:
+            a = act(obs)
+        else:                                    # creep at the nearest bullet, focused
+            bx, by = None, None
+            for (idx, st, x, y, buf) in live:
+                if ((x - px) ** 2 + (y - py) ** 2) ** 0.5 == near[2]:
+                    bx, by = x, y
+            dx = (bx > px + 0.5) - (bx < px - 0.5)
+            dy = (by > py + 0.5) - (by < py - 0.5)
+            a = _DIR_IX.get((dx, dy), 0) + 9     # + focus (slow)
         try:
             obs, _, term, trunc, info = env.step(a)
         except Exception:
             break
         settle += 1
-        try:
-            pb = pm.read_bytes(PLAYER + P_POS_X, 8)
-            px, py = struct.unpack_from("<ff", pb, 0)
-            pstate = pm.read_bytes(PLAYER + P_STATE, 1)[0]
-            live = _read_bullets(pm)
-        except Exception:
-            prev_alive = True
-            continue
         alive = pstate in (0, 3, 4)
-        near = _nearest(pm, live, px, py)
-        if prev_alive and not alive and prev_near and settle > 61 and prev_near[2] < 30:
-            hits.append(prev_near)          # (kind, box, dist)
-        prev_alive, prev_near = alive, near
+        if prev_alive and not alive and prev and settle > dodge_for + 1 and prev[2] < 20:
+            hits.append(prev)
+        prev_alive, prev = alive, near
         if term:
             r = env.reset()
             obs = r[0] if isinstance(r, tuple) else r
-            settle, prev_alive, prev_near = 0, True, None
-        if step % 400 == 0:
-            print(f"  step {step}  frame {info.get('frame')}  deaths logged={len(hits)}")
+            settle, dodge_for, prev_alive, prev = 0, random.randint(30, 300), True, None
+        if step % 500 == 0:
+            print(f"  step {step}  frame {info.get('frame')}  deaths={len(hits)}")
 
-    print(f"\n=== point-blank death distance (n={len(hits)}) ===")
-    by_kind = defaultdict(list)
-    for kind, box, dist in hits:
-        by_kind[(kind, box)].append(dist)
-    for (kind, box) in sorted(by_kind):
-        ds = np.array(by_kind[(kind, box)])
-        print(f"  kind {kind}  box {box:.1f}  n={len(ds)}  "
-              f"dist min {ds.min():.1f} / p25 {np.percentile(ds,25):.1f} / "
-              f"median {np.median(ds):.1f} / p75 {np.percentile(ds,75):.1f} / max {ds.max():.1f}")
-        print(f"      -> implied player_box = min_dist - bullet_box ~= {ds.min() - box:.2f}")
+    print(f"\n=== point-blank death distance, still player (n={len(hits)}) ===")
+    print("  centre-to-centre px on the death frame = player_hitbox + bullet_hitbox\n")
+    by = defaultdict(list)
+    for cls, spr, dist in hits:
+        by[(cls, spr)].append(dist)
+    for (cls, spr) in sorted(by):
+        ds = np.array(by[(cls, spr)])
+        print(f"  class {cls}  sprite-size {spr:.1f}   n={len(ds)}   "
+              f"lethal dist: min {ds.min():.2f} / p10 {np.percentile(ds,10):.2f} / "
+              f"median {np.median(ds):.2f} / p90 {np.percentile(ds,90):.2f}")
+    allds = np.array([d for _, _, d in hits])
+    if len(allds):
+        print(f"\n  ALL: min {allds.min():.2f}  median {np.median(allds):.2f}  "
+              f"(min ~= the true head-on lethal distance)")
 
 
 kind_off_i16 = True    # set by main from args
