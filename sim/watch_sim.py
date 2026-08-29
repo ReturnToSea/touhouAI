@@ -228,12 +228,17 @@ class Watcher:
         cv.create_rectangle(cx(px - box), cy(py - box), cx(px + box), cy(py + box),
                             outline="#3fa7ff", width=1, dash=(3, 3))
 
-        # bullets: red if inside the +-box window, else grey
+        # bullets: b_rad is the real th07 hitbox (2-3 px); the visible sprite is
+        # ~2.4x that. draw the sprite translucent + a bright dot for the hitbox.
         for (bx, by), r in zip(bpos, brad):
             inb = abs(bx - px) < box and abs(by - py) < box
-            rr = max(2.0, r * SCALE * 0.8)
+            spr = max(2.5, r * 2.4 * SCALE)
+            hb = max(1.2, r * SCALE)
             col = "#ff4d4d" if inb else "#5b6472"
-            cv.create_oval(cx(bx) - rr, cy(by) - rr, cx(bx) + rr, cy(by) + rr, fill=col, outline="")
+            cv.create_oval(cx(bx) - spr, cy(by) - spr, cx(bx) + spr, cy(by) + spr,
+                           fill=col, outline="", stipple="gray50")
+            cv.create_oval(cx(bx) - hb, cy(by) - hb, cx(bx) + hb, cy(by) + hb,
+                           fill=col, outline="")
 
         # enemies (magenta = active), hp bar above; line to the one being shot
         en_act = s.en_active[0].numpy() > 0.5
