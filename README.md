@@ -16,19 +16,21 @@ for an agent that survives and maximizes score on **Stage 1 Lunatic**.
 
 ## The observation
 
-The Python side (and, when rebuilt, the DLL) computes the *same* 404-value
+The Python side (and, when rebuilt, the DLL) computes the *same* 236-value
 observation via the shared builder `native/obs.py`:
 
 | part | size | what |
 |---|---|---|
-| head | 16 | player pos/vel, focus, lives/bombs/power/graze, nearest-bullet distance, boss/midboss HP |
+| head | 16 | player pos/vel, focus, power, nearest-bullet distance, boss/midboss HP |
 | **escape scalars** | 9 | for {stay, N, NE, E, SE, S, SW, W, NW}: frames-until-hit if the player holds that move for 20 frames, `/20` |
-| **local danger grid** | 13×13 | player-centred; each cell = how imminent a bullet strike there is (bullets marched along their paths); out-of-bounds cells = 0.5 |
-| **global danger map** | 12×14 | absolute playfield coords, 32px cells, 24-frame horizon; each cell = bullet *density* projected into it (a lone bullet reads faint, only walls / dense streams saturate) — for macro positioning |
+| **local danger grid** | 13×13 | player-centred (±78 px); each cell = how imminent a bullet strike there is (bullets marched along their paths); out-of-bounds cells = 0.5 |
 | enemies | 6×3 | nearest on-screen enemies (rel pos, hp fraction) |
 | items | 8×3 | nearest items (rel pos, type) — P drops etc. |
 
-The policy is a tiny MLP (`404 → h → h → 36`, tanh, argmax). 36 actions =
+An absolute-coordinate "global danger map" was tried (obs → 404) and dropped —
+ablation showed the policy ignored it (flat first-layer weights).
+
+The policy is a tiny MLP (`236 → h → h → 36`, tanh, argmax). 36 actions =
 9 directions × focus × shoot.
 
 ## Two training tracks
@@ -61,11 +63,11 @@ then drop it into the real game.
   RTX 5070 Ti. A fixed stage of procedural emitters (cones + sprays in every
   corner — the top-right cone's bullets get one 50 % chance to snap to a random
   heading after 1 s — a fast sweeping line, a bouncing ring emitter, and one
-  that orbits the perimeter), waves of 4–6 fly-in enemies (2 HP, lethal on
-  contact) that holding SHOOT auto-damages and that drop collectable P items on
-  death, and a solid half-width "curtain" of bullets that sweeps across from a
-  random edge every ~10 s. Player physics are measured from the real game
-  (`sim/physics.json`, via `sim/physics_probe.py`).
+  that orbits the perimeter), waves of 9–15 fly-in enemies (1 HP, lethal on
+  contact) that holding SHOOT auto-damages and that drop P items which raise a
+  power meter (→ more shot damage), and a solid half-width "curtain" of bullets
+  that sweeps across from a random edge every ~7 s. 180 s episode cap. Player
+  physics are measured from the real game (`sim/physics.json`).
 - `sim/train.py --algo ppo|es` — PPO (or antithetic ES). The actor's architecture
   is identical to `native/policy.py MLPPolicy`, so the result loads straight into
   the real env.
@@ -80,11 +82,18 @@ then drop it into the real game.
 
 **Result:** a sim-trained policy (`ppo_v12`, mid-training) transferred to the
 real game and survived **470 s / 1.63M score on Lunatic — clearing stages 1–3
-and reaching stage 4** — dodging on 95 % of decisions. An earlier checkpoint
-did 91 s. This is the from-scratch reactive dodging that neither live-PPO nor
-evolution produced across ~10 runs. (`env.reset()` only rewinds stage-1
-snapshots, so a long-surviving policy crashes the game on the *next* reset —
-use `--episodes 1` for `--until-death`.)
+and reaching stage 4** — dodging on 95 % of decisions. This is the from-scratch
+reactive dodging that neither live-PPO nor evolution produced across ~10 runs.
+(`env.reset()` only rewinds stage-1 snapshots, so a long-surviving policy
+crashes the game on the *next* reset — use `--episodes 1` for `--until-death`.)
+
+Since v12 the sim stage has been reworked several times (global map added then
+dropped, wall + P-item power meter, a realism redesign reverted). The current
+run `ppo_v21` transfers to ~105 s — a competent dodger that drifts to a corner
+and stalls. Two known sim gaps to close in v22: enemies don't shoot (so the
+policy crowds them and eats point-blank fire in the real game), and the wall
+curtain is wider than the perception window (so its gap can't be seen and
+dodged). See `sim/README.md` for the full status table.
 
 Needs a CUDA PyTorch venv (`.venv-cuda`, kept separate so the live-game venv
 stays untouched):
