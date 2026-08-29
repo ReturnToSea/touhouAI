@@ -135,8 +135,11 @@ class EvoHud:
                                 f"th07_watch_i{isl}_p{idx}.pt")
             p.save(path)
             here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            # keep it short: a watched game RENDERS (no headless stubs) and
+            # oversubscribes the CPU, dragging the whole run's speed down while
+            # it's alive. 3 episodes is enough of a look.
             subprocess.Popen([sys.executable, os.path.join(here, "watch.py"),
-                              path, "--evo", "--episodes", "3"],
+                              path, "--evo", "--episodes", "3", "--viz"],
                              cwd=here)
         except Exception:
             pass

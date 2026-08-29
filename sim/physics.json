@@ -1,0 +1,71 @@
+{
+  "move_unfocused": {
+    "per_frame_after_settle": 4.0,
+    "first_5_frames": [
+      4.0,
+      4.0,
+      4.0,
+      4.0,
+      4.0
+    ],
+    "dx_settled": -4.0,
+    "dy_settled": 0.0
+  },
+  "move_focused": {
+    "per_frame_after_settle": 1.600006103515625,
+    "first_5_frames": [
+      1.6,
+      1.6,
+      1.6,
+      1.6,
+      1.6
+    ],
+    "dx_settled": -1.6,
+    "dy_settled": 0.0
+  },
+  "move_diag_unfocused": {
+    "per_frame_after_settle": 4.000004314815161,
+    "first_5_frames": [
+      4.0,
+      4.0,
+      4.0,
+      4.0,
+      4.0
+    ],
+    "dx_settled": -2.828,
+    "dy_settled": -2.828
+  },
+  "move_diag_focused": {
+    "per_frame_after_settle": 1.6000103576006395,
+    "first_5_frames": [
+      1.6,
+      1.6,
+      1.6,
+      1.6,
+      1.6
+    ],
+    "dx_settled": -1.131,
+    "dy_settled": -1.131
+  },
+  "bounds": {
+    "left": 8.0,
+    "right": 376.0,
+    "up": 16.0,
+    "down": 432.0
+  },
+  "bullets": {
+    "count_samples": 6954,
+    "speed_px_per_frame": {
+      "p10": 2.0,
+      "p50": 2.0,
+      "p90": 2.0,
+      "max": 2.81
+    },
+    "frac_speed_changing": 0.014,
+    "frac_curving": 0.0
+  },
+  "collision_dist_at_death": [
+    27.21,
+    27.21
+  ]
+}

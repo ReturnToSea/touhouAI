@@ -92,10 +92,10 @@ from inject import inject
 _DIRS = [(0, 0), (0, -1), (1, -1), (1, 0), (1, 1), (0, 1), (-1, 1), (-1, 0), (-1, -1)]
 NUM_ACTIONS = len(_DIRS) * 2 * 2  # dir x focus x shoot
 
-K_BULLETS = 32
-M_ENEMIES = 6
-HEAD_DIM = 12
-OBS_DIM = HEAD_DIM + K_BULLETS * 5 + M_ENEMIES * 3 + 2  # = 192
+# observation: the canonical builder is native/obs.py, shared with the sim.
+import torch  # noqa: E402
+from obs import (build_obs_batch, OBS_DIM, HEAD_DIM, NDIRS, GCELLS,  # noqa: E402,F401
+                 GRID, M_ENEMIES)
 
 
 def _decode_action(a: int) -> int:
@@ -179,6 +179,7 @@ class Th07Env(_Base):
             offset=S.Shm.bullets.offset,
         ).reshape(S.MAX_BULLETS, 4)
         self._prev_bpos = np.full((S.MAX_BULLETS, 2), -9999.0, np.float32)
+        self._prev_ppos = np.full(2, -9999.0, np.float32)
         self._reset_bookkeeping()
 
     # ------------------------------------------------------------------
@@ -190,6 +191,7 @@ class Th07Env(_Base):
         self._prev_boss = s.boss_hp
         self._prev_lives = s.lives
         self._prev_bpos[:] = -9999.0
+        self._prev_ppos[:] = -9999.0
 
     def _bullet_arrays(self):
         xy = self._bview[:, :2].copy()
@@ -200,50 +202,72 @@ class Th07Env(_Base):
         self._prev_bpos = np.where(live[:, None], xy, -9999.0)
         return xy, vel, live
 
+    def _big_target(self):
+        """(present, hp_fraction) of the stage boss (GUI bar) or, before it
+        appears, the midboss - an on-screen enemy with maxlife >= 200."""
+        s = self.h.s
+        if s.boss_present and s.boss_hp_max > 1:
+            return True, float(s.boss_hp / s.boss_hp_max)
+        best_ml, best_life = 0, 0
+        for i in range(min(s.enemy_count, S.MAX_ENEMIES)):
+            e = s.enemies[i]
+            if e.y < -8 or e.y > 480:
+                continue
+            if e.maxlife >= 200 and e.maxlife > best_ml:
+                best_ml, best_life = e.maxlife, e.life
+        if best_ml:
+            return True, best_life / best_ml
+        return False, 0.0
+
     def _obs(self) -> np.ndarray:
+        """Build the observation via the shared batched builder (native/obs.py),
+        so the real env and the danmaku sim see bit-identical inputs."""
         s = self.h.s
         px, py = s.player_x, s.player_y
-        W, H = 384.0, 448.0
-        pstate = np.zeros(5, np.float32)
+        fs = self.frame_skip
+
+        if self._prev_ppos[0] > -9000.0:
+            pvx = (px - self._prev_ppos[0]) / fs
+            pvy = (py - self._prev_ppos[1]) / fs
+        else:
+            pvx = pvy = 0.0
+        self._prev_ppos[:] = (px, py)
+
+        xy, vel, live = self._bullet_arrays()          # [N,2], per-decision, [N]
+        bp = torch.from_numpy(np.ascontiguousarray(xy))[None]
+        bv = torch.from_numpy(np.ascontiguousarray(vel / fs))[None]   # per-frame
+        ba = torch.from_numpy(live.astype(np.float32))[None]
+
+        pstate = [0.0] * 5
         if 0 <= s.player_state < 5:
             pstate[s.player_state] = 1.0
-
-        head = np.array([
-            px / W, py / H, s.player_vx / 10.0, s.player_vy / 10.0,
-            float(s.player_focus),
+        bt_present, bt_frac = self._big_target()
+        head_aux = torch.tensor([[
             s.lives / 9.0, s.bombs / 9.0, s.power / 128.0,
-            np.tanh(s.graze / 100.0),
-            s.stage / 6.0,
-            pstate[0], pstate[2],  # alive-flag, dead-flag
-        ], np.float32)
+            float(np.tanh(s.graze / 100.0)), s.stage / 6.0,
+            pstate[0], pstate[2],
+            1.0 if bt_present else 0.0, float(bt_frac),
+        ]], dtype=torch.float32)
 
-        xy, vel, live = self._bullet_arrays()
-        idx = np.where(live)[0]
-        if len(idx):
-            rel = xy[idx] - (px, py)
-            d = np.hypot(rel[:, 0], rel[:, 1])
-            order = np.argsort(d)[:K_BULLETS]
-            sel = idx[order]
-            rel = (xy[sel] - (px, py)) / 128.0
-            v = vel[sel] / 10.0
-            dist = (d[order] / 200.0)[:, None]
-            b = np.concatenate([rel, v, dist], axis=1)
-        else:
-            b = np.zeros((0, 5), np.float32)
-        if len(b) < K_BULLETS:
-            b = np.vstack([b, np.zeros((K_BULLETS - len(b), 5), np.float32)])
-
-        en = np.zeros((M_ENEMIES, 3), np.float32)
-        for i in range(min(s.enemy_count, M_ENEMIES)):
+        enemies = torch.zeros(1, M_ENEMIES * 3)
+        filled = 0
+        for i in range(min(s.enemy_count, S.MAX_ENEMIES)):
+            if filled >= M_ENEMIES:
+                break
             e = s.enemies[i]
+            if e.y < -8 or e.y > 480:
+                continue
             ml = max(e.maxlife, 1)
-            en[i] = [(e.x - px) / 128.0, (e.y - py) / 128.0, e.life / ml]
+            enemies[0, filled * 3:filled * 3 + 3] = torch.tensor(
+                [(e.x - px) / 128.0, (e.y - py) / 128.0, e.life / ml])
+            filled += 1
 
-        boss = np.array([float(s.boss_present),
-                         (s.boss_hp / s.boss_hp_max) if s.boss_hp_max > 0 else 0.0],
-                        np.float32)
-
-        return np.concatenate([head, b.ravel(), en.ravel(), boss]).astype(np.float32)
+        o = build_obs_batch(
+            torch.tensor([[px, py]], dtype=torch.float32),
+            torch.tensor([[pvx, pvy]], dtype=torch.float32),
+            torch.tensor([float(s.player_focus)]),
+            bp, bv, ba, head_aux, enemies)
+        return o[0].numpy()
 
     # ------------------------------------------------------------------
     def rollout_policy(self, weights, hidden, render: bool = False,

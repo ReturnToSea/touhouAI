@@ -11,7 +11,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 
-OBS_DIM = 192
+OBS_DIM = 212
 N_ACTIONS = 36
 
 

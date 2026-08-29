@@ -76,34 +76,51 @@ class Island:
     def next_gen(self, parents_cut, elite, sigma, rng):
         order = np.argsort(self.fit)[::-1]
         parents = order[:parents_cut]
-        new = [self.pop[order[j]].copy() for j in range(elite)]
-        while len(new) < len(self.pop):
-            src = self.pop[parents[rng.integers(len(parents))]]
-            new.append(src + rng.normal(0.0, sigma, src.shape).astype(np.float32))
-        self.pop = new
+        pop = np.stack(self.pop)                       # (P, nparams)
+        P, D = pop.shape
+        n_child = P - elite
+        src = parents[rng.integers(len(parents), size=n_child)]
+        # one big gaussian draw instead of a per-child Python loop (that loop
+        # was a ~1 s main-thread stall every generation - it froze the HUD and
+        # any watch.py window)
+        kids = pop[src] + rng.normal(0.0, sigma, (n_child, D)).astype(np.float32)
+        self.pop = [pop[order[j]].copy() for j in range(elite)] + list(kids)
 
 
-def evaluate(islands, hidden, fit_fn, rng, jitter=0, hud=None, stall_timeout=90.0):
+def evaluate(islands, hidden, fit_fn, rng, jitter=0, hud=None, stall_timeout=90.0,
+             reps=1):
     """Work-queue: each island churns through its sub-population on its own
     instance; all N run concurrently. Blocks until every policy is scored.
-    Raises RuntimeError if any island makes no progress for stall_timeout s
-    (a crashed / hung instance)."""
+
+    Each policy is run `reps` times (independent random phase offsets) and its
+    fitness is the WORST of those runs - so a policy that only survives when
+    the pattern lines up favourably is scored low. Cuts the phase-jitter noise
+    that was making truncation selection pick lucky mediocre policies.
+
+    Returns the total game-frames simulated. Raises RuntimeError if any island
+    makes no progress for stall_timeout s (a crashed / hung instance)."""
     h1, h2 = hidden
     N = len(islands)
-    nxt = [0] * N
-    running = [None] * N
+    queue = [[(j, rp) for j in range(len(islands[i].pop)) for rp in range(reps)]
+             for i in range(N)]
+    qpos = [0] * N
+    running = [None] * N                       # (j, rp) in flight per island
+    acc = [[[] for _ in isl.pop] for isl in islands]
     last_ok = [time.perf_counter()] * N
-    remaining = 0
+    remaining = sum(len(q) for q in queue)
+    total_frames = 0
 
-    def kick(isl, k):
-        isl.env.h.eval_start(isl.pop[k], h1, h2, isl.frame_skip, isl.max_frames,
+    def kick(i):
+        j, rp = queue[i][qpos[i]]
+        qpos[i] += 1
+        isl = islands[i]
+        isl.env.h.eval_start(isl.pop[j], h1, h2, isl.frame_skip, isl.max_frames,
                              warmup=int(rng.integers(0, jitter + 1)))
+        running[i] = (j, rp)
 
-    for i, isl in enumerate(islands):
-        remaining += len(isl.pop)
-        kick(isl, 0)
-        running[i] = 0
-        nxt[i] = 1
+    for i in range(N):
+        if queue[i]:
+            kick(i)
 
     last_pump = time.perf_counter()
     while remaining:
@@ -119,19 +136,21 @@ def evaluate(islands, hidden, fit_fn, rng, jitter=0, hud=None, stall_timeout=90.
                 continue
             last_ok[i] = now
             r = isl.env.h.eval_result()
-            j = running[i]
-            f = fit_fn(r)
-            isl.fit[j] = f
-            isl.frames[j] = r["frames"]
-            isl.scores[j] = r["score"]
+            j = running[i][0]
+            acc[i][j].append(r)
+            total_frames += int(r["frames"])
             remaining -= 1
             progressed = True
-            if hud is not None:
-                hud.record(i, j, f, r["frames"], r["score"])
-            if nxt[i] < len(isl.pop):
-                kick(isl, nxt[i])
-                running[i] = nxt[i]
-                nxt[i] += 1
+            if len(acc[i][j]) == reps:         # policy fully evaluated
+                fits = [fit_fn(rr) for rr in acc[i][j]]
+                k = int(np.argmin(fits))       # worst rep
+                isl.fit[j] = fits[k]
+                isl.frames[j] = acc[i][j][k]["frames"]
+                isl.scores[j] = max(rr["score"] for rr in acc[i][j])
+                if hud is not None:
+                    hud.record(i, j, isl.fit[j], isl.frames[j], isl.scores[j])
+            if qpos[i] < len(queue[i]):
+                kick(i)
             else:
                 running[i] = None
         now = time.perf_counter()
@@ -140,6 +159,7 @@ def evaluate(islands, hidden, fit_fn, rng, jitter=0, hud=None, stall_timeout=90.
             last_pump = now
         if not progressed:
             time.sleep(0.0005)
+    return total_frames
 
 
 def migrate(islands, n_migrants):
@@ -156,12 +176,16 @@ def migrate(islands, n_migrants):
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--islands", type=int, default=8)
+    ap.add_argument("--islands", type=int, default=12)
+    ap.add_argument("--reps", type=int, default=1,
+                    help="episodes per policy per generation; fitness = worst "
+                         "rep (1 = fast + noisy, 2 = ~2x slower + cleaner "
+                         "selection - only worth it once policies are decent)")
     ap.add_argument("--island-pop", type=int, default=40)
     ap.add_argument("--parents", type=int, default=15, help="truncation cut per island")
     ap.add_argument("--elite", type=int, default=2)
     ap.add_argument("--sigma", type=float, default=0.05)
-    ap.add_argument("--hidden", type=int, nargs="+", default=[128, 128])
+    ap.add_argument("--hidden", type=int, nargs="+", default=[64, 64])
     ap.add_argument("--gens", type=int, default=5000)
     ap.add_argument("--migrate-every", type=int, default=25)
     ap.add_argument("--n-migrants", type=int, default=1)
@@ -175,10 +199,13 @@ def main() -> None:
     ap.add_argument("--w-frame", type=float, default=0.01,
                     help="fitness weight on frames survived")
     ap.add_argument("--w-boss", type=float, default=5.0,
-                    help="fitness weight on boss damage (~1.0 per phase cleared)")
-    ap.add_argument("--w-center", type=float, default=10.0,
+                    help="fitness weight on big-target damage - stage boss AND "
+                         "the stage-1 midboss (~1.0 per phase / full midboss)")
+    ap.add_argument("--w-center", type=float, default=4.0,
                     help="fitness penalty on mean (x/W - 0.5)^2 - a gentle nudge "
-                         "toward centre-x (edge-hug costs ~w_center*0.25)")
+                         "toward centre-x (edge-hug costs ~w_center*0.25). The "
+                         "danger grid now also paints out-of-bounds cells as "
+                         "walls, so this can stay small.")
     ap.add_argument("--death-penalty", type=float, default=1.0)
     ap.add_argument("--warmup-jitter", type=int, default=90,
                     help="random 0..N uncounted policy frames before each "
@@ -231,7 +258,8 @@ def main() -> None:
             if hud is not None:
                 hud.gen_start(gen, [isl.pop for isl in islands])
             try:
-                evaluate(islands, hidden, fit_fn, rng, args.warmup_jitter, hud)
+                gen_frames = evaluate(islands, hidden, fit_fn, rng,
+                                      args.warmup_jitter, hud, reps=args.reps)
             except RuntimeError as e:
                 print(f"gen {gen}: island eval failed ({e}); relaunching all",
                       flush=True)
@@ -243,7 +271,7 @@ def main() -> None:
             allfit = np.concatenate([isl.fit for isl in islands])
             champs = np.array([isl.fit.max() for isl in islands])
             gbest = champs.max()
-            sim_frames += int(sum(isl.frames.sum() for isl in islands))
+            sim_frames += gen_frames
             best_score = max(best_score, max(int(isl.scores.max()) for isl in islands))
             hist.append((gen, gbest, allfit.mean()))
             genlog.append(np.stack([np.concatenate([isl.fit for isl in islands]),
@@ -258,13 +286,15 @@ def main() -> None:
                 hud.gen_end(bframes)
 
             # island fitness isn't comparable across instances (and each episode
-            # now has a random phase offset), so every 10 gens re-score all
-            # island champions on ONE reference instance at several fixed phase
-            # offsets and take the mean - a robust "how well does this
-            # generalise" number for picking best.pt.
-            if gen % 10 == 0:
+            # now has a random phase offset), so periodically re-score all
+            # island champions on ONE reference instance at a couple of fixed
+            # phase offsets and take the mean - a robust "how well does this
+            # generalise" number for picking best.pt. Kept infrequent + few
+            # phases: it's N_islands*len(phases) flat-out episodes back to back
+            # on the main thread, which stalls the HUD / any watch.py window.
+            if gen % 15 == 0:
                 ref = islands[0].env.h
-                phases = [0, 30, 60, 90] if args.warmup_jitter else [0]
+                phases = [0, 45] if args.warmup_jitter else [0]
                 champ_w = []
                 ref_fit = []
                 for isl in islands:
@@ -305,7 +335,7 @@ def main() -> None:
                           flush=True)
 
             gen += 1
-            if gen % 5 == 0:
+            if gen % 15 == 0:   # ~100 MB savez - keep it off the hot path
                 np.savez(run / "resume.npz",
                          pop=np.array([isl.pop for isl in islands]), gen=gen)
                 np.save(run / "history.npy", np.array(hist))

@@ -9,9 +9,9 @@ import time
 SHM_MAGIC = 0x37304854
 MAX_BULLETS = 2048
 MAX_ENEMIES = 64
-OBS_DIM = 192
+OBS_DIM = 212  # 16 head + 9 escape dirs + 13*13 danger grid + 6*3 enemies (mirror th07_shm.h)
 N_ACTIONS = 36
-MAX_WEIGHTS = 1 << 16
+MAX_WEIGHTS = 1 << 17
 
 ST_IDLE, ST_STEP, ST_FREE, ST_RESET, ST_SNAPSHOT, ST_AUTONAV, ST_EVAL = range(7)
 

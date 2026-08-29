@@ -1,0 +1,271 @@
+"""Watch a policy play the danmaku sim, in real time, with the same debug
+overlay as native/viz.py (detection box, danger-grid heatmap, in/out-range
+bullets, action arrow) PLUS the 9 escape scalars drawn as rays from the player.
+
+    .venv-cuda\\Scripts\\python sim\\watch_sim.py runs_sim\\ppo_v1\\best.pt
+    .venv-cuda\\Scripts\\python sim\\watch_sim.py runs_sim\\ppo_v1\\best.pt --follow
+    .venv-cuda\\Scripts\\python sim\\watch_sim.py --random
+
+Keys:  g grid on/off   space pause   r reset episode   esc quit
+--follow reloads the .pt every few seconds so you can watch it improve mid-run.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+import time
+import tkinter as tk
+from pathlib import Path
+
+import numpy as np
+import torch
+
+HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE))
+sys.path.insert(0, str(HERE.parent / "native"))
+from danmaku import DanmakuSim  # noqa: E402
+from obs import (HEAD_DIM, NDIRS, GCELLS, GRID, GRID_CELL,  # noqa: E402
+                 PX_LO, PX_HI, PY_LO, PY_HI, OBS_DIRS)
+from policy import MLPPolicy  # noqa: E402
+
+PW, PH = 384.0, 448.0
+SCALE = 1.9
+PAD = 34
+REDRAW_MS = 33
+DIRS = OBS_DIRS.tolist()   # [[0,0],[0,-1],...]
+
+
+def heat(d):
+    d = 0.0 if d < 0 else 1.0 if d > 1 else d
+    return f"#{int(110 + 145 * d):02x}{int(95 * (1 - d)):02x}{int(45 * (1 - d)):02x}"
+
+
+def safe_col(v):
+    v = 0.0 if v < 0 else 1.0 if v > 1 else v
+    return f"#{int(230 * (1 - v)):02x}{int(70 + 150 * v):02x}40"
+
+
+class Watcher:
+    def __init__(self, args):
+        self.args = args
+        self.sim = DanmakuSim(B=1, device="cpu", max_frames=100000,
+                              seed=args.seed, compile=False)
+        self.pol = None
+        self.pol_mtime = 0
+        self.run_dir = None if args.random else Path(args.model).parent
+        self.meta = {}
+        if self.run_dir and (self.run_dir / "meta.json").exists():
+            try:
+                self.meta = json.loads((self.run_dir / "meta.json").read_text())
+            except Exception:
+                pass
+        self._hist = None
+        self._hist_mt = 0.0
+        self._load()
+        self.obs = self.sim.reset()
+        self.paused = False
+        self.show_grid = True
+        self.last_load = time.time()
+        self.ep_start_frame = 0
+
+        self.root = tk.Tk()
+        self.root.title("danmaku sim - watch")
+        self.root.configure(bg="#0a0b0e")
+        self.root.attributes("-topmost", True)
+        w = int(PW * SCALE + PAD + 296)      # + right gutter for the stats panel
+        h = int(PH * SCALE + 2 * PAD)
+        self.cv = tk.Canvas(self.root, width=w, height=h, bg="#0a0b0e", highlightthickness=0)
+        self.cv.pack()
+        self.root.bind("g", lambda e: setattr(self, "show_grid", not self.show_grid))
+        self.root.bind("<space>", lambda e: setattr(self, "paused", not self.paused))
+        self.root.bind("r", lambda e: self._reset())
+        self.root.bind("<Escape>", lambda e: self.root.destroy())
+        self.root.after(REDRAW_MS, self._tick)
+        self.root.mainloop()
+
+    def _load(self):
+        if self.args.random:
+            return
+        p = Path(self.args.model)
+        if not p.exists():
+            print(f"waiting for {p} ...")
+            return
+        m = p.stat().st_mtime
+        if m == self.pol_mtime:
+            return
+        try:
+            self.pol = MLPPolicy.load(p)
+            self.pol_mtime = m
+            print(f"loaded {p}  hidden={self.pol.hidden}  (mtime {time.ctime(m)})")
+        except Exception as e:
+            print("load failed:", e)
+
+    def _reset(self):
+        self.obs = self.sim.reset()
+        self.ep_start_frame = 0
+
+    def _stats_lines(self):
+        """Training stats from runs_sim/<name>/history.npy (+ meta.json).
+        history cols: ppo (wall, steps, dec, ret, ent); es (wall, steps, surv, bestret)."""
+        if self.run_dir is None:
+            return ["random policy"]
+        import numpy as np
+        hp = self.run_dir / "history.npy"
+        if not hp.exists():
+            return [self.run_dir.name, "(no history yet)"]
+        try:
+            mt = hp.stat().st_mtime
+            if mt != self._hist_mt:
+                self._hist = np.load(hp)
+                self._hist_mt = mt
+        except Exception:
+            return [self.run_dir.name, "(reading...)"]
+        h = self._hist
+        if h is None or len(h) == 0 or h.shape[1] < 4:
+            return [self.run_dir.name, "(warming up)"]
+        algo = self.meta.get("algo", "ppo" if h.shape[1] == 5 else "es")
+        wall, steps = float(h[-1, 0]), float(h[-1, 1])
+        fs = self.sim.frame_skip
+        tgt = self.meta.get("steps")
+        out = [f"{self.run_dir.name}   [{algo}]   {self.meta.get('hidden', '')}",
+               f"train time   {wall / 60:6.1f} min",
+               f"steps        {steps / 1e6:6.1f} M" + (f" / {tgt / 1e6:.0f}M" if tgt else ""),
+               f"speed        {steps / max(wall, 1) / 1e3:6.0f} k/s"]
+        if algo == "ppo":
+            # cols: wall, steps, greedy_dec, sampled_dec, ent
+            gd = h[-1, 2]
+            sm = h[-1, 3] if h.shape[1] >= 4 else gd
+            ent = h[-1, 4] if h.shape[1] >= 5 else float("nan")
+            out += [f"greedy surv  {gd * fs / 60:6.1f} s   (best {h[:, 2].max() * fs / 60:.1f})",
+                    f"sampled surv {sm * fs / 60:6.1f} s",
+                    f"entropy      {ent:6.3f}"]
+        else:
+            surv, bret = h[-1, 2], h[-1, 3]
+            out += [f"survival ~   {surv * fs / 60:6.1f} s",
+                    f"best ep ret  {bret:6.2f}"]
+        return out
+
+    def _cx(self, x):
+        return x * SCALE + PAD
+
+    def _cy(self, y):
+        return y * SCALE + PAD
+
+    def _tick(self):
+        try:
+            if self.args.follow and time.time() - self.last_load > 3:
+                self._load()
+                self.last_load = time.time()
+            if not self.paused:
+                if self.pol is not None:
+                    a = int(self.pol.act(self.obs[0].numpy()))
+                elif self.args.random:
+                    a = np.random.randint(36)
+                else:
+                    a = 0
+                self.obs, rew, done = self.sim.step(torch.tensor([a]))
+                self.last_action = a
+                if bool(done[0]):
+                    self.ep_start_frame = float(self.sim.frame[0])
+            self._draw()
+        except Exception:
+            import traceback
+            traceback.print_exc()
+        self.root.after(REDRAW_MS, self._tick)
+
+    def _draw(self):
+        cv = self.cv
+        cv.delete("all")
+        s = self.sim
+        px, py = float(s.player[0, 0]), float(s.player[0, 1])
+        cx, cy = self._cx, self._cy
+        act = s.b_active[0].numpy() > 0.5
+        bpos = s.b_pos[0].numpy()[act]
+        brad = s.b_rad[0].numpy()[act]
+        obs = self.obs[0].numpy()
+        esc = obs[HEAD_DIM:HEAD_DIM + NDIRS]
+        grid = obs[HEAD_DIM + NDIRS:HEAD_DIM + NDIRS + GCELLS].reshape(GRID, GRID)
+        a = getattr(self, "last_action", 0)
+
+        cv.create_rectangle(cx(0), cy(0), cx(PW), cy(PH), outline="#22262e")
+        cv.create_rectangle(cx(PX_LO), cy(PY_LO), cx(PX_HI), cy(PY_HI), outline="#333a44")
+
+        # danger grid heatmap
+        if self.show_grid:
+            R = GRID // 2
+            for j in range(GRID):
+                for i in range(GRID):
+                    d = float(grid[j, i])
+                    if d <= 0.03:
+                        continue
+                    x0 = px + (i - R - 0.5) * GRID_CELL
+                    y0 = py + (j - R - 0.5) * GRID_CELL
+                    cv.create_rectangle(cx(x0), cy(y0), cx(x0 + GRID_CELL), cy(y0 + GRID_CELL),
+                                        fill=heat(d), outline="", stipple="gray50")
+
+        box = (GRID // 2 + 0.5) * GRID_CELL
+        cv.create_rectangle(cx(px - box), cy(py - box), cx(px + box), cy(py + box),
+                            outline="#3fa7ff", width=1, dash=(3, 3))
+
+        # bullets: red if inside the +-box window, else grey
+        for (bx, by), r in zip(bpos, brad):
+            inb = abs(bx - px) < box and abs(by - py) < box
+            rr = max(2.0, r * SCALE * 0.8)
+            col = "#ff4d4d" if inb else "#5b6472"
+            cv.create_oval(cx(bx) - rr, cy(by) - rr, cx(bx) + rr, cy(by) + rr, fill=col, outline="")
+
+        # escape rays (dirs 1..8), length ~ escape value
+        for i in range(1, NDIRS):
+            dx, dy = DIRS[i]
+            n = (dx * dx + dy * dy) ** 0.5
+            ln = 12 + esc[i] * 62
+            ex, ey = px + dx / n * ln, py + dy / n * ln
+            cv.create_line(cx(px), cy(py), cx(ex), cy(ey), fill=safe_col(esc[i]), width=3)
+        # stay-still escape as a ring
+        cv.create_oval(cx(px) - 9, cy(py) - 9, cx(px) + 9, cy(py) + 9,
+                       outline=safe_col(esc[0]), width=2)
+
+        # player + hitbox
+        cv.create_oval(cx(px) - 2.5, cy(py) - 2.5, cx(px) + 2.5, cy(py) + 2.5,
+                       fill="#ffffff", outline="")
+
+        # action arrow
+        di = a % 9
+        focus = (a // 9) % 2
+        dx, dy = DIRS[di]
+        if dx or dy:
+            n = (dx * dx + dy * dy) ** 0.5
+            sp = 1.6 if focus else 4.0
+            ex, ey = px + dx / n * sp * 10, py + dy / n * sp * 10
+            cv.create_line(cx(px), cy(py), cx(ex), cy(ey), fill="#00e5ff", width=4, arrow="last")
+        if focus:
+            cv.create_oval(cx(px) - 14, cy(py) - 14, cx(px) + 14, cy(py) + 14, outline="#66ffcc")
+
+        cv.create_text(cx(0), 14, anchor="w", fill="#c8ccd4", font=("Consolas", 11),
+                       text=f"frame {int(s.frame[0]):5d}  ~{float(s.frame[0]) / 60:5.1f}s   "
+                            f"diff {float(s.diff[0]):.2f}   bullets {len(bpos):3d}   "
+                            f"{'PAUSED' if self.paused else ''}")
+
+        # training-stats panel (top-right)
+        lines = self._stats_lines()
+        x = cx(PW) + 6
+        cv.create_rectangle(x - 4, 24, x + 260, 24 + 16 * len(lines) + 8,
+                            fill="#12151b", outline="#2a2f3a")
+        for i, ln in enumerate(lines):
+            cv.create_text(x, 32 + i * 16, anchor="nw", fill="#9fd0ff" if i == 0 else "#c8ccd4",
+                           font=("Consolas", 9), text=ln)
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("model", nargs="?", default="runs_sim/ppo_v1/best.pt")
+    ap.add_argument("--random", action="store_true")
+    ap.add_argument("--follow", action="store_true", help="reload the .pt every 3s")
+    ap.add_argument("--seed", type=int, default=0)
+    args = ap.parse_args()
+    Watcher(args)
+
+
+if __name__ == "__main__":
+    main()

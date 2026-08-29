@@ -11,16 +11,16 @@
 namespace th07 {
 
 constexpr uint32_t SHM_MAGIC   = 0x37304854;  // 'TH07'
-constexpr uint32_t SHM_VERSION = 2;
+constexpr uint32_t SHM_VERSION = 5;
 
 constexpr int   MAX_BULLETS = 2048;   // >= the 1025 pool slots
 constexpr int   MAX_ENEMIES = 64;
 constexpr float INACTIVE    = -9999.0f;  // sentinel for an empty bullet slot
 
-constexpr int   OBS_DIM     = 192;
+constexpr int   OBS_DIM     = 212;   // 16 head + 9 escape dirs + 13*13 grid + 6*3 enemies
 constexpr int   N_ACTIONS   = 36;
 constexpr int   MAX_HIDDEN  = 256;   // per-layer hidden cap for the in-DLL MLP
-constexpr int   MAX_WEIGHTS = 1 << 16;  // 64k float32 = 256 KB flat param buffer
+constexpr int   MAX_WEIGHTS = 1 << 17;  // 128k float32 = 512 KB flat param buffer
 
 // control.state values
 enum ShmState : uint32_t {

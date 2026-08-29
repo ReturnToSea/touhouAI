@@ -114,21 +114,79 @@ static void patch(uintptr_t a, const uint8_t* b, size_t n) {
     FlushInstructionCache(GetCurrentProcess(), (void*)a, n);
 }
 
-// ---- in-DLL policy: obs builder + MLP (mirror of native/env.py & policy.py) --
-constexpr int K_BULLETS = 32;   // nearest bullets in the obs
-constexpr int M_ENEMIES = 6;
+// ---- in-DLL policy: obs builder + MLP (mirror of native/env.py) --------------
+// The observation is:
+//   * a small scalar head (16)
+//   * NDIRS "escape" scalars (9): for each of {stay, N, NE, E, SE, S, SW, W, NW}
+//     how many frames until the player is hit if it holds that move for the
+//     next DIR_HORIZON frames (1 = safe the whole time, ->0 = hit now). This
+//     turns "which way do I dodge" into an argmax, and its stay-still entry
+//     is low exactly when freezing is fatal - the thing evolution kept doing.
+//   * a player-centred "danger grid" (13x13): each cell = how imminent a
+//     bullet strike there is, from marching every live bullet's straight-line
+//     path. Cells outside the playfield read 0.5 (wall).
+//   * the nearest on-screen enemies (6 x 3).
+constexpr int   GRID        = 13;        // danger-grid side (odd; player-centred)
+constexpr int   GRID_R      = GRID / 2;  // 6
+constexpr int   GCELLS      = GRID * GRID;
+constexpr float GRID_CELL   = 12.0f;     // px per cell -> +-78 px window
+constexpr float GRID_HORIZON = 24.0f;    // frames of bullet look-ahead
+constexpr int   HEAD_DIM    = 16;
+constexpr int   NDIRS       = 9;
+constexpr int   K_NEAREST   = 128;      // grid + escape use only the K nearest bullets
+                                        // (must match native/obs.py K_NEAREST)
+constexpr float DIR_SPEED   = 4.0f;      // measured unfocused player move speed (px/frame)
+constexpr float DIR_HORIZON = 20.0f;     // escape look-ahead (frames)
+constexpr float DIR_HIT_R2  = 7.0f * 7.0f;
+// measured player movement bounds (sim/physics.json)
+constexpr float PX_LO = 8.0f, PX_HI = 376.0f, PY_LO = 16.0f, PY_HI = 432.0f;
+constexpr int   M_ENEMIES   = 6;
+static_assert(OBS_DIM == HEAD_DIM + NDIRS + GCELLS + M_ENEMIES * 3, "OBS_DIM mismatch");
+
+// {dx,dy}: index 0 = stay still, then the 8 compass dirs (matches A_DIRS /
+// env.py _DIRS ordering used by decode_action).
+static const int8_t OBS_DIRS[NDIRS][2] = {
+    {0,0},{0,-1},{1,-1},{1,0},{1,1},{0,1},{-1,1},{-1,0},{-1,-1}
+};
 
 static float g_prev_bx[MAX_BULLETS];
 static float g_prev_by[MAX_BULLETS];
+static float g_prev_px = -9999.f, g_prev_py = -9999.f;
 static void reset_bullet_hist() {
     for (int i = 0; i < MAX_BULLETS; ++i) { g_prev_bx[i] = -9999.f; g_prev_by[i] = -9999.f; }
+    g_prev_px = g_prev_py = -9999.f;
 }
 
-// Build the 192-dim observation exactly as env.py `_obs()` does. Bullet
-// velocity is the displacement since the previous build_obs() call (i.e. over
-// one decision = frame_skip frames), matching the Python `_prev_bpos` diff.
-static void build_obs(float* o) {
+// The "big target": the stage boss (GUI life bar) or, before it appears, the
+// stage-1 midboss - a normal enemy on screen with a large maxlife. Returns the
+// present flag and fills hp/hpmax. Shared by the obs head and the eval reward.
+static bool big_target(float& hp, float& hpmax) {
+    if (rd<int32_t>(GUI + GUI_BOSS_PRESENT) != 0) {
+        float m = rd<float>(GUI + GUI_BOSS_HP_MAX);
+        if (m > 1.f) { hp = rd<float>(GUI + GUI_BOSS_HP_CUR); hpmax = m; return true; }
+    }
+    int32_t ec = rd<int32_t>(ENEMY_MANAGER + EM_ENEMY_COUNT);
+    if (ec < 0 || ec > 480) ec = 0;
+    int best_ml = 0; float best_life = 0.f;
+    for (int i = 0; i < ec && i < 64; ++i) {
+        uintptr_t e = ENEMY_MANAGER + EM_ENEMIES + (uintptr_t)i * EM_ENEMY_STRIDE;
+        float ey = rd<float>(e + ENEMY_POS + 4);
+        if (ey < -8.f || ey > PLAYFIELD_H + 32.f) continue;       // offscreen spawner
+        int32_t ml = rd<int32_t>(e + ENEMY_MAXLIFE);
+        if (ml >= 200 && ml > best_ml) {
+            best_ml = ml; best_life = (float)rd<int32_t>(e + ENEMY_LIFE);
+        }
+    }
+    if (best_ml > 0) { hp = best_life; hpmax = (float)best_ml; return true; }
+    hp = hpmax = 0.f;
+    return false;
+}
+
+// Build the danger-grid observation. `frame_skip` scales the per-call position
+// deltas into per-frame velocities for the trajectory march.
+static void build_obs(float* o, int frame_skip) {
     const float W = PLAYFIELD_W, H = PLAYFIELD_H;
+    const float vscale = 1.0f / (float)(frame_skip > 0 ? frame_skip : 3);
     float px = rd<float>(PLAYER + PL_POS_X), py = rd<float>(PLAYER + PL_POS_Y);
     uint8_t pst = rd<uint8_t>(PLAYER + PL_STATE);
     uint8_t focus = rd<uint8_t>(PLAYER + PL_IS_FOCUS);
@@ -141,22 +199,34 @@ static void build_obs(float* o) {
         bombs = rd<float>(g + G_BOMB_COUNT);
         power = rd<float>(g + G_POWER);
     }
-    int boss_present = rd<int32_t>(GUI + GUI_BOSS_PRESENT);
-    float bhp = rd<float>(GUI + GUI_BOSS_HP_CUR), bhpm = rd<float>(GUI + GUI_BOSS_HP_MAX);
 
-    // head (12)
-    o[0] = px / W; o[1] = py / H; o[2] = 0.f; o[3] = 0.f;   // player_vx/vy unset (== env.py)
-    o[4] = (float)focus;
-    o[5] = lives / 9.f; o[6] = bombs / 9.f; o[7] = power / 128.f;
-    o[8] = tanhf(graze / 100.f);
-    o[9] = stage / 6.f;
-    o[10] = (pst == 0) ? 1.f : 0.f;
-    o[11] = (pst == 2) ? 1.f : 0.f;
+    // player velocity over the last decision (per-frame)
+    float pvx = 0.f, pvy = 0.f;
+    if (g_prev_px > -9000.f) {
+        pvx = (px - g_prev_px) * vscale; pvy = (py - g_prev_py) * vscale;
+    }
+    g_prev_px = px; g_prev_py = py;
 
-    // bullets: gather live, K nearest by distance, [rel/128, vel/10, dist/200]
-    float bd[K_BULLETS];                       // sorted ascending distance
-    float brx[K_BULLETS], bry[K_BULLETS], bvx[K_BULLETS], bvy[K_BULLETS];
+    float bt_hp = 0.f, bt_max = 0.f;
+    bool bt = big_target(bt_hp, bt_max);
+
+    // ---- danger grid -> o[HEAD_DIM + NDIRS ..] ----
+    float* grid = o + HEAD_DIM + NDIRS;
+    for (int i = 0; i < GCELLS; ++i) grid[i] = 0.f;
+    for (int gy = 0; gy < GRID; ++gy)
+        for (int gx = 0; gx < GRID; ++gx) {
+            float wx = px + (gx - GRID_R) * GRID_CELL;
+            float wy = py + (gy - GRID_R) * GRID_CELL;
+            if (wx < PX_LO || wx > PX_HI || wy < PY_LO || wy > PY_HI)
+                grid[gy * GRID + gx] = 0.5f;     // wall
+        }
+
+    // pass 1: gather the K_NEAREST live bullets (insertion-sorted by distance),
+    // exactly as native/obs.py does before it builds the grid + escape scalars.
+    static float lbx[K_NEAREST], lby[K_NEAREST], lvx[K_NEAREST], lvy[K_NEAREST];
+    static float lbd[K_NEAREST];
     int nb = 0;
+    float near_d = 1e9f;
     uintptr_t bb = BULLET_MANAGER + BM_BULLETS;
     const int nslot = (int)BM_BULLET_MAX < MAX_BULLETS ? (int)BM_BULLET_MAX : MAX_BULLETS;
     for (int i = 0; i < nslot; ++i) {
@@ -166,58 +236,102 @@ static void build_obs(float* o) {
         bool live = (st != 0 && st != 6 &&
                      bx > -64 && bx < W + 64 && by > -64 && by < H + 64);
         float vx = 0.f, vy = 0.f;
-        if (live && g_prev_bx[i] > -9000.f) { vx = bx - g_prev_bx[i]; vy = by - g_prev_by[i]; }
+        if (live && g_prev_bx[i] > -9000.f) {
+            vx = (bx - g_prev_bx[i]) * vscale; vy = (by - g_prev_by[i]) * vscale;
+        }
         g_prev_bx[i] = live ? bx : -9999.f;
         g_prev_by[i] = live ? by : -9999.f;
         if (!live) continue;
+        if (vx > 24.f || vx < -24.f || vy > 24.f || vy < -24.f) vx = vy = 0.f;  // recycled slot
         float rx = bx - px, ry = by - py;
         float d = sqrtf(rx * rx + ry * ry);
-        if (nb < K_BULLETS) {                  // insertion sort into the K-buffer
-            int j = nb++;
-            while (j > 0 && bd[j - 1] > d) {
-                bd[j] = bd[j - 1]; brx[j] = brx[j - 1]; bry[j] = bry[j - 1];
-                bvx[j] = bvx[j - 1]; bvy[j] = bvy[j - 1]; --j;
-            }
-            bd[j] = d; brx[j] = rx; bry[j] = ry; bvx[j] = vx; bvy[j] = vy;
-        } else if (d < bd[K_BULLETS - 1]) {
-            int j = K_BULLETS - 1;
-            while (j > 0 && bd[j - 1] > d) {
-                bd[j] = bd[j - 1]; brx[j] = brx[j - 1]; bry[j] = bry[j - 1];
-                bvx[j] = bvx[j - 1]; bvy[j] = bvy[j - 1]; --j;
-            }
-            bd[j] = d; brx[j] = rx; bry[j] = ry; bvx[j] = vx; bvy[j] = vy;
+        if (d < near_d) near_d = d;
+        if (nb == K_NEAREST && d >= lbd[K_NEAREST - 1]) continue;
+        int j = (nb < K_NEAREST) ? nb++ : K_NEAREST - 1;
+        for (; j > 0 && lbd[j - 1] > d; --j) {
+            lbd[j] = lbd[j - 1]; lbx[j] = lbx[j - 1]; lby[j] = lby[j - 1];
+            lvx[j] = lvx[j - 1]; lvy[j] = lvy[j - 1];
         }
+        lbd[j] = d; lbx[j] = bx; lby[j] = by; lvx[j] = vx; lvy[j] = vy;
     }
-    float* ob = o + 12;
-    for (int i = 0; i < K_BULLETS; ++i) {
-        if (i < nb) {
-            ob[i * 5 + 0] = brx[i] / 128.f; ob[i * 5 + 1] = bry[i] / 128.f;
-            ob[i * 5 + 2] = bvx[i] / 10.f;  ob[i * 5 + 3] = bvy[i] / 10.f;
-            ob[i * 5 + 4] = bd[i] / 200.f;
-        } else {
-            ob[i * 5 + 0] = ob[i * 5 + 1] = ob[i * 5 + 2] = ob[i * 5 + 3] = ob[i * 5 + 4] = 0.f;
+
+    // pass 2: march those bullets to stamp the danger grid
+    const float inv_h = 1.0f / GRID_HORIZON;
+    for (int k = 0; k < nb; ++k) {
+        float bx = lbx[k], by = lby[k], vx = lvx[k], vy = lvy[k];
+        for (int it = 0; it <= 48; ++it) {                 // 24 frames @ 0.5f
+            float t = it * 0.5f;
+            int gx = (int)floorf((bx + vx * t - px) / GRID_CELL + 0.5f) + GRID_R;
+            int gy = (int)floorf((by + vy * t - py) / GRID_CELL + 0.5f) + GRID_R;
+            if (gx < 0 || gx >= GRID || gy < 0 || gy >= GRID) continue;
+            float danger = 1.0f - t * inv_h;
+            float* c = &grid[gy * GRID + gx];
+            if (danger > *c) *c = danger;
         }
     }
 
-    // enemies (6 * 3): [rel/128, life/maxlife]
-    float* oe = o + 12 + K_BULLETS * 5;
-    for (int i = 0; i < M_ENEMIES; ++i) { oe[i * 3] = oe[i * 3 + 1] = oe[i * 3 + 2] = 0.f; }
+    // ---- escape scalars -> o[HEAD_DIM ..] ----
+    // for each candidate move: closest-approach time to any nearby bullet, and
+    // the frame the path leaves the playfield. normalised by DIR_HORIZON
+    // (1 = safe the whole look-ahead).
+    float* od = o + HEAD_DIM;
+    for (int dd = 0; dd < NDIRS; ++dd) {
+        float ndx = OBS_DIRS[dd][0], ndy = OBS_DIRS[dd][1];
+        float L = sqrtf(ndx * ndx + ndy * ndy);
+        float pmx = 0.f, pmy = 0.f;
+        if (L > 0.f) { pmx = ndx / L * DIR_SPEED; pmy = ndy / L * DIR_SPEED; }
+        float safe_t = DIR_HORIZON;
+        if (pmx > 0.f)      { float tw = (PX_HI - px) / pmx; if (tw < safe_t) safe_t = tw; }
+        else if (pmx < 0.f) { float tw = (PX_LO - px) / pmx; if (tw < safe_t) safe_t = tw; }
+        if (pmy > 0.f)      { float tw = (PY_HI - py) / pmy; if (tw < safe_t) safe_t = tw; }
+        else if (pmy < 0.f) { float tw = (PY_LO - py) / pmy; if (tw < safe_t) safe_t = tw; }
+        if (safe_t < 0.f) safe_t = 0.f;
+        for (int i = 0; i < nb && safe_t > 0.f; ++i) {
+            if (lbd[i] > 150.f) break;                  // sorted; matches obs.py `near` gate
+            float r0x = px - lbx[i], r0y = py - lby[i];
+            float rvx = pmx - lvx[i], rvy = pmy - lvy[i];
+            float a = rvx * rvx + rvy * rvy;
+            float ts;
+            if (a < 1e-6f) ts = 0.f;
+            else { ts = -(r0x * rvx + r0y * rvy) / a; if (ts < 0.f) ts = 0.f; }
+            if (ts >= safe_t) continue;
+            float cx = r0x + rvx * ts, cy = r0y + rvy * ts;
+            if (cx * cx + cy * cy < DIR_HIT_R2) safe_t = ts;
+        }
+        od[dd] = safe_t / DIR_HORIZON;
+    }
+
+    // ---- head (16) ----
+    o[0] = px / W; o[1] = py / H;
+    o[2] = pvx / 6.f; o[3] = pvy / 6.f;
+    o[4] = (float)focus;
+    o[5] = lives / 9.f; o[6] = bombs / 9.f; o[7] = power / 128.f;
+    o[8] = tanhf(graze / 100.f);
+    o[9] = stage / 6.f;
+    o[10] = (pst == 0) ? 1.f : 0.f;
+    o[11] = (pst == 2) ? 1.f : 0.f;
+    o[12] = (near_d < 1e8f) ? fminf(near_d / 80.f, 3.f) : 2.f;
+    o[13] = bt ? 1.f : 0.f;
+    o[14] = (bt && bt_max > 0.f) ? (bt_hp / bt_max) : 0.f;
+    o[15] = 0.f;
+
+    // ---- enemies (6 * 3): nearest on-screen, [rel/128, life/maxlife] ----
+    float* oe = o + HEAD_DIM + NDIRS + GCELLS;
+    for (int i = 0; i < M_ENEMIES * 3; ++i) oe[i] = 0.f;
     int32_t ec = rd<int32_t>(ENEMY_MANAGER + EM_ENEMY_COUNT);
     if (ec < 0 || ec > 480) ec = 0;
-    for (int i = 0; i < ec && i < M_ENEMIES; ++i) {
+    int filled = 0;
+    for (int i = 0; i < ec && filled < M_ENEMIES; ++i) {
         uintptr_t e = ENEMY_MANAGER + EM_ENEMIES + (uintptr_t)i * EM_ENEMY_STRIDE;
         float ex = rd<float>(e + ENEMY_POS), ey = rd<float>(e + ENEMY_POS + 4);
+        if (ey < -8.f || ey > PLAYFIELD_H + 32.f) continue;
         int32_t life = rd<int32_t>(e + ENEMY_LIFE), ml = rd<int32_t>(e + ENEMY_MAXLIFE);
         if (ml < 1) ml = 1;
-        oe[i * 3 + 0] = (ex - px) / 128.f;
-        oe[i * 3 + 1] = (ey - py) / 128.f;
-        oe[i * 3 + 2] = (float)life / (float)ml;
+        oe[filled * 3 + 0] = (ex - px) / 128.f;
+        oe[filled * 3 + 1] = (ey - py) / 128.f;
+        oe[filled * 3 + 2] = (float)life / (float)ml;
+        ++filled;
     }
-
-    // boss (2)
-    float* obo = o + 12 + K_BULLETS * 5 + M_ENEMIES * 3;
-    obo[0] = (float)(boss_present != 0);
-    obo[1] = (bhpm > 0.f) ? (bhp / bhpm) : 0.f;
 }
 
 // MLP: Linear(192,h1)-Tanh-Linear(h1,h2)-Tanh-Linear(h2,36) -> argmax.
@@ -456,7 +570,7 @@ static int __fastcall hooked_do_tick(void* self, void* edx) {
             // frames so it can't just memorise one fixed bullet sequence.
             bool warm_dead = false;
             for (uint32_t k = 0; k < s->eval_warmup && !warm_dead; ++k) {
-                build_obs(obs);
+                build_obs(obs, (int)fs);
                 s->action = decode_action(mlp_forward(s->weights, obs, h1, h2));
                 wr<uint8_t>(FRAMESKIP_BYTE, 0);
                 int wr_ = orig_do_tick(self, edx);
@@ -474,10 +588,9 @@ static int __fastcall hooked_do_tick(void* self, void* edx) {
             bool first = true;
             float boss_dmg = 0.f;
             float x_dev_sum = 0.f;
-            float prev_bhp = 0.f;
-            bool prev_boss = false;
+            float prev_bt_hp = 0.f, prev_bt_max = 0.f;
             while (!warm_dead && frames < cap) {
-                build_obs(obs);
+                build_obs(obs, (int)fs);
                 if (first) { memcpy(s->dbg_obs, obs, sizeof(obs)); first = false; }
                 s->action = decode_action(mlp_forward(s->weights, obs, h1, h2));
                 for (uint32_t k = 0; k < fs && frames < cap; ++k) {
@@ -489,17 +602,19 @@ static int __fastcall hooked_do_tick(void* self, void* edx) {
                 float pxn = rd<float>(PLAYER + PL_POS_X) / PLAYFIELD_W - 0.5f;
                 x_dev_sum += pxn * pxn;
                 decisions++;
-                // boss damage: sum per-decision HP drops, normalised by hp_max
-                // (spell-card refills -> negative delta, ignored). Only count
-                // when the boss was present on both this and the previous check.
-                bool boss = rd<int32_t>(GUI + GUI_BOSS_PRESENT) != 0;
-                float bhp = rd<float>(GUI + GUI_BOSS_HP_CUR);
-                float bhpm = rd<float>(GUI + GUI_BOSS_HP_MAX);
-                if (boss && prev_boss && bhpm > 1.f && prev_bhp - bhp > 0.f) {
-                    float d = (prev_bhp - bhp) / bhpm;
+                // big-target damage: sum per-decision HP drops (normalised by
+                // hp_max) dealt to the stage boss OR the midboss. Spell-card
+                // refills -> negative delta, ignored. Only count when the same
+                // target (matched by hp_max) was present on the previous check.
+                float bt_hp = 0.f, bt_max = 0.f;
+                bool bt = big_target(bt_hp, bt_max);
+                if (bt && prev_bt_max > 1.f && fabsf(bt_max - prev_bt_max) < 0.5f
+                        && prev_bt_hp - bt_hp > 0.f) {
+                    float d = (prev_bt_hp - bt_hp) / bt_max;
                     boss_dmg += d < 0.25f ? d : 0.25f;   // clamp per-decision
                 }
-                prev_bhp = bhp; prev_boss = boss;
+                prev_bt_hp = bt ? bt_hp : 0.f;
+                prev_bt_max = bt ? bt_max : 0.f;
                 gp = rd<uintptr_t>(GAME_MANAGER + GM_GLOBALS_PTR);
                 float lives = gp ? rd<float>(gp + G_LIFE_COUNT) : start_lives;
                 if (r != 0 || lives < start_lives - 0.5f) { died = true; break; }

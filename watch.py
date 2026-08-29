@@ -32,6 +32,8 @@ def main() -> None:
     ap.add_argument("--frame-skip", type=int, default=3)
     ap.add_argument("--stochastic", action="store_true",
                     help="sample actions instead of taking the argmax")
+    ap.add_argument("--viz", action="store_true",
+                    help="open native/viz.py - live view of the danger window")
     args = ap.parse_args()
 
     act_fn = None
@@ -39,18 +41,32 @@ def main() -> None:
         if not args.model or not args.model.exists():
             ap.error("give a model path, or pass --random")
         if args.evo:
+            # Per-decision step loop (NOT the in-DLL eval path): watch.py must
+            # return to the game's WinMain each decision so the window message
+            # pump keeps running - otherwise, when the trainer is hammering all
+            # cores at a generation boundary, the DLL episode loop stalls and
+            # the whole window freezes. env._obs is byte-exact to the DLL's
+            # build_obs, so pol.act(obs) reproduces training behaviour (bar the
+            # random phase offset, which doesn't matter for eyeballing).
             from policy import MLPPolicy
             pol = MLPPolicy.load(args.model)
             act_fn = lambda obs: pol.act(obs)  # noqa: E731
+            print(f"loaded {args.model}  hidden={pol.hidden}")
         else:
             from stable_baselines3 import PPO
             ppo = PPO.load(args.model, device="cpu")
             act_fn = lambda obs: int(  # noqa: E731
                 ppo.predict(obs, deterministic=not args.stochastic)[0])
-        print(f"loaded {args.model}")
+            print(f"loaded {args.model}")
 
     env = Th07Env(frame_skip=args.frame_skip, max_seconds=600, render=True)
     dt = args.frame_skip / 60.0
+
+    if args.viz:
+        import subprocess
+        vp = Path(__file__).resolve().parent / "native" / "viz.py"
+        print(f"launching viz on pid {env.pid}")
+        subprocess.Popen([sys.executable, str(vp), str(env.pid)])
 
     try:
         for ep in range(args.episodes):
