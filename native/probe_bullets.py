@@ -1,5 +1,11 @@
-"""Find the th07 enemy-bullet KIND and HITBOX fields in the live zBullet struct,
-and tabulate the real collision size per bullet kind seen on Stage 1 Lunatic.
+"""Find the th07 enemy-bullet class + hitbox fields in the live zBullet struct
+and tabulate the real collision size per class on Stage 1 Lunatic.
+
+RESULT (see memory ref-th07-bullet-hitboxes): collision is an AABB-overlap test
+in fn 0x43e260, using `zBullet + 0xB7C` (float2) as the bullet box, ±size/2.
+Stage 1 classes (`+0xB8A`): 4/5 = pellet (size 4.0 -> hitbox half 2.0),
+3 = ball (size 6.0 -> half 3.0). Player half-extent ~1.8 (class-3 kills at
+4.8 px centre-to-centre head-on). Graze box = hitbox + 20 px.
 
     .venv\\Scripts\\python native\\probe_bullets.py --explore     # find the offsets
     .venv\\Scripts\\python native\\probe_bullets.py --collect \\
