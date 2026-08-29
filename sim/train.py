@@ -86,35 +86,41 @@ def train_ppo(args, sim, dev, run):
     # greedy (argmax) eval - this is what transfer uses, and it's much better
     # than the sampled policy PPO's rollout metric measures.
     from danmaku import DanmakuSim
-    eval_sim = DanmakuSim(B=512, device=dev, max_frames=24000,
+    eval_sim = DanmakuSim(B=2048, device=dev, max_frames=20000,
                           alive_rew=args.alive_rew, seed=args.seed + 777,
                           compile=(dev == "cuda"))
 
     @torch.no_grad()
-    def greedy_eval(n_dec=3200):        # 3200 dec * fs3 = 9600 f = 160 s ceiling
+    def greedy_eval(n_dec=3600):     # 3600 dec * fs3 = 10800 f = 180 s ceiling
+        # sync-free: everything stays on the GPU, single host transfer at the end.
         o = eval_sim.reset()
-        el = torch.zeros(eval_sim.B, device=dev)
-        lens = []
-        dw = de = ndeaths = 0
-        for _ in range(n_dec):
+        B = eval_sim.B
+        el = torch.zeros(B, device=dev)
+        comp = torch.zeros(n_dec, B, device=dev)   # per-step: length if just died, else 0
+        dw = torch.zeros((), device=dev)
+        de = torch.zeros((), device=dev)
+        nd = torch.zeros((), device=dev)
+        for i in range(n_dec):
             a = ac.actor(o).argmax(-1)
             o, _, done = eval_sim.step(a)
-            el += 1
-            if done.any():
-                lens += el[done].tolist()
-                el[done] = 0
-                ndeaths += int(done.sum())
-                dw += float(eval_sim.step_death_wall.sum())
-                de += float(eval_sim.step_death_enemy.sum())
-        lens += el[el > 0].tolist()          # survivors counted at current length
-        a = np.array(lens) if lens else np.zeros(1)
+            el = el + 1.0
+            df = done.float()
+            comp[i] = el * df
+            el = el * (1.0 - df)
+            nd = nd + df.sum()
+            dw = dw + eval_sim.step_death_wall.sum()
+            de = de + eval_sim.step_death_enemy.sum()
+        lens = torch.cat([comp[comp > 0], el[el > 0]])          # survivors at current len
         fs = 3.0 / 60.0
-        return dict(mean=float(a.mean()) * fs, med=float(np.median(a)) * fs,
-                    p10=float(np.percentile(a, 10)) * fs,
-                    p90=float(np.percentile(a, 90)) * fs,
-                    f60=float((a * fs > 60).mean()), f120=float((a * fs > 120).mean()),
-                    f180=float((a * fs > 180).mean()),
-                    wall=dw / max(ndeaths, 1), enemy=de / max(ndeaths, 1))
+        a = (lens * fs).sort().values.cpu().numpy()             # <-- the one sync
+        ndeaths = float(nd)
+        if a.size == 0:
+            a = np.zeros(1)
+        return dict(mean=float(a.mean()), med=float(np.median(a)),
+                    p10=float(np.percentile(a, 10)), p90=float(np.percentile(a, 90)),
+                    f60=float((a > 60).mean()), f120=float((a > 120).mean()),
+                    f180=float((a > 180).mean()),
+                    wall=float(dw) / max(ndeaths, 1), enemy=float(de) / max(ndeaths, 1))
 
     ep_ret = torch.zeros(B, device=dev)
     ep_len = torch.zeros(B, device=dev)
@@ -294,7 +300,7 @@ def main():
     ap.add_argument("--steps", type=float, default=30e6)
     ap.add_argument("--B", type=int, default=24576)
     ap.add_argument("--hidden", type=int, nargs="+", default=[128, 128])
-    ap.add_argument("--max-frames", type=int, default=5400)
+    ap.add_argument("--max-frames", type=int, default=10800)   # 180 s training episodes
     ap.add_argument("--seed", type=int, default=0)
     # ppo
     ap.add_argument("--rollout", type=int, default=32)
@@ -309,7 +315,7 @@ def main():
     # es
     ap.add_argument("--es-sigma", type=float, default=0.02)
     ap.add_argument("--es-horizon", type=int, default=400)
-    ap.add_argument("--log-every", type=int, default=12,   # updates between full greedy evals
+    ap.add_argument("--log-every", type=int, default=26,   # updates between full greedy evals (~20M steps)
                     help="updates per logged point (~0.8M steps each)")
     ap.add_argument("--alive-rew", type=float, default=0.01)
     ap.add_argument("--eager-sim", action="store_true",

@@ -39,6 +39,7 @@ BOX = (GRID_R + 0.5) * GRID_CELL          # +-78 px
 SCALE = 1.8
 PAD = 40
 REDRAW_MS = 40                            # ~25 Hz
+SHOOT_ALIGN_DX = 26.0                     # mirror of danmaku.py: straight-shot column
 
 # ItemManager (th07_addrs.h) - items aren't in shm, read straight from memory
 IM_BASE = 0x00575C70
@@ -210,7 +211,16 @@ class Viz:
             cv.create_oval(cx(bx) - rr, cy(by) - rr, cx(bx) + rr, cy(by) + rr,
                            fill=col, outline="")
 
+        # straight-shot column (mirror of the sim's front-only shot) + hit target
+        shooting = bool(s.action & S.SHOOT)
+        scol = "#ffe14d" if shooting else "#5a5330"
+        cv.create_rectangle(cx(px - SHOOT_ALIGN_DX), cy(0), cx(px + SHOOT_ALIGN_DX), cy(py),
+                            outline="", fill=scol, stipple="gray12")
+        cv.create_line(cx(px), cy(py), cx(px), cy(0), fill=scol, width=1, dash=(2, 3))
+
         # enemies
+        aligned_ex = aligned_ey = None
+        aligned_d = 1e9
         for k in range(min(s.enemy_count, S.MAX_ENEMIES)):
             e = s.enemies[k]
             if e.y < -50:
@@ -218,6 +228,16 @@ class Viz:
             big = e.maxlife >= 200
             cv.create_rectangle(cx(e.x) - 5, cy(e.y) - 5, cx(e.x) + 5, cy(e.y) + 5,
                                 outline="#ff9c33" if big else "#ffd23f", width=2)
+            d = ((e.x - px) ** 2 + (e.y - py) ** 2) ** 0.5
+            if abs(e.x - px) < SHOOT_ALIGN_DX and e.y < py and d < aligned_d:
+                aligned_ex, aligned_ey, aligned_d = e.x, e.y, d
+        if aligned_ex is not None:
+            cv.create_oval(cx(aligned_ex) - 8, cy(aligned_ey) - 8,
+                           cx(aligned_ex) + 8, cy(aligned_ey) + 8,
+                           outline="#ffe14d", width=2)
+            if shooting:
+                cv.create_line(cx(px), cy(py), cx(aligned_ex), cy(aligned_ey),
+                               fill="#ffe14d", width=3)
 
         # items (P = pink, point = blue, cherry = pale) + collect radius
         items = self._items()
