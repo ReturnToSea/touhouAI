@@ -37,7 +37,8 @@ saturates). Only per-episode bullet-speed jitter varies; the layout is fixed.
 .venv-cuda\Scripts\python sim\hud.py ppo1
 .venv-cuda\Scripts\python sim\watch_sim.py runs_sim\ppo1\best.pt --follow
 # when it's good:
-.venv\Scripts\python sim\transfer.py runs_sim\ppo1\best.pt --watch
+.venv\Scripts\python sim\transfer.py runs_sim\ppo1\best.pt --watch --episodes 3
+.venv\Scripts\python sim\transfer.py runs_sim\ppo1\best.pt --watch --until-death --episodes 1
 ```
 
 ## Notes
@@ -46,5 +47,9 @@ saturates). Only per-episode bullet-speed jitter varies; the layout is fixed.
   but fine). It is **not** applied to the policy net — that stalled a run.
 - The transfer eval uses the Python step loop (not the in-DLL fast path) so the
   observation matches training exactly regardless of the DLL build.
+- `env.reset()` restores a snapshot of *start-of-stage-1*, so it can only rewind
+  short stage-1 episodes. A policy that survives deep into later stages will
+  crash the game on the next reset - use `--episodes 1` for `--until-death`
+  watches (each fresh run still starts clean from stage 1).
 - Constants in `native/obs.py` (`DIR_SPEED`, playfield bounds, `K_NEAREST`) must
   match `native/th07hook.cpp` for the fast in-DLL eval / real-game fine-tuning.

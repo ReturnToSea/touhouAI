@@ -30,12 +30,18 @@ def main():
     ap.add_argument("--frame-skip", type=int, default=3)
     ap.add_argument("--watch", action="store_true", help="render + launch viz.py")
     ap.add_argument("--max-seconds", type=float, default=180)
+    ap.add_argument("--until-death", action="store_true",
+                    help="no time limit - each episode runs until the agent dies "
+                         "or the stage/game ends")
     args = ap.parse_args()
 
-    pol = MLPPolicy.load(args.model)
-    print(f"loaded {args.model}  hidden={pol.hidden}  params={pol.n_params()}")
+    max_seconds = 36000.0 if args.until_death else args.max_seconds  # 10 h ~ unlimited
 
-    env = Th07Env(frame_skip=args.frame_skip, max_seconds=args.max_seconds,
+    pol = MLPPolicy.load(args.model)
+    print(f"loaded {args.model}  hidden={pol.hidden}  params={pol.n_params()}"
+          + ("  [until death]" if args.until_death else f"  [cap {max_seconds:.0f}s]"))
+
+    env = Th07Env(frame_skip=args.frame_skip, max_seconds=max_seconds,
                   render=args.watch)
     if args.watch:
         import subprocess
