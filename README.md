@@ -16,17 +16,19 @@ for an agent that survives and maximizes score on **Stage 1 Lunatic**.
 
 ## The observation
 
-Both the DLL (`native/th07hook.cpp`) and the Python side compute the *same*
-212-value observation via the shared builder `native/obs.py`:
+The Python side (and, when rebuilt, the DLL) computes the *same* 404-value
+observation via the shared builder `native/obs.py`:
 
 | part | size | what |
 |---|---|---|
 | head | 16 | player pos/vel, focus, lives/bombs/power/graze, nearest-bullet distance, boss/midboss HP |
 | **escape scalars** | 9 | for {stay, N, NE, E, SE, S, SW, W, NW}: frames-until-hit if the player holds that move for 20 frames, `/20` |
-| **danger grid** | 13×13 | player-centred; each cell = how imminent a bullet strike there is (bullets marched along their paths); out-of-bounds cells = 0.5 |
+| **local danger grid** | 13×13 | player-centred; each cell = how imminent a bullet strike there is (bullets marched along their paths); out-of-bounds cells = 0.5 |
+| **global danger map** | 12×14 | absolute playfield coords, 32px cells, 24-frame horizon; each cell = bullet *density* projected into it (a lone bullet reads faint, only walls / dense streams saturate) — for macro positioning |
 | enemies | 6×3 | nearest on-screen enemies (rel pos, hp fraction) |
+| items | 8×3 | nearest items (rel pos, type) — P drops etc. |
 
-The policy is a tiny MLP (`212 → h → h → 36`, tanh, argmax). 36 actions =
+The policy is a tiny MLP (`404 → h → h → 36`, tanh, argmax). 36 actions =
 9 directions × focus × shoot.
 
 ## Two training tracks
@@ -55,17 +57,24 @@ feedback per ~20 s episode is a weak signal for learning a reactive reflex.
 Train a dodging policy in a **fully-vectorized made-up-danmaku sim** on the GPU,
 then drop it into the real game.
 
-- `sim/danmaku.py` — thousands of parallel episodes as batched tensors, ~100–150k
-  env-steps/s on an RTX 5070 Ti (`torch.compile`d). A fixed stage of procedural
-  emitters (cones + sprays in every corner, a fast sweeping line, a bouncing
-  ring emitter, and one that orbits the perimeter). Player physics are measured
-  from the real game (`sim/physics.json`, via `sim/physics_probe.py`).
+- `sim/danmaku.py` — thousands of parallel episodes as batched tensors on an
+  RTX 5070 Ti. A fixed stage of procedural emitters (cones + sprays in every
+  corner — the top-right cone's bullets get one 50 % chance to snap to a random
+  heading after 1 s — a fast sweeping line, a bouncing ring emitter, and one
+  that orbits the perimeter), waves of 4–6 fly-in enemies (2 HP, lethal on
+  contact) that holding SHOOT auto-damages and that drop collectable P items on
+  death, and a solid half-width "curtain" of bullets that sweeps across from a
+  random edge every ~10 s. Player physics are measured from the real game
+  (`sim/physics.json`, via `sim/physics_probe.py`).
 - `sim/train.py --algo ppo|es` — PPO (or antithetic ES). The actor's architecture
   is identical to `native/policy.py MLPPolicy`, so the result loads straight into
   the real env.
-- `sim/hud.py <run>` — live survival-vs-steps curve.
+- `sim/hud.py <run>` — live survival-vs-steps curve. `train.py` also logs a
+  death-cause breakdown (`wall % / enemy %`) so it's clear what's killing the
+  policy.
 - `sim/watch_sim.py <best.pt> [--follow]` — watch the sim policy play, with the
-  same overlay as `viz.py`, reloading the checkpoint as it trains.
+  same overlay as `viz.py` plus items and a predicted-bullet-track macro view,
+  reloading the checkpoint as it trains.
 - `sim/transfer.py <best.pt> [--watch] [--until-death]` — run a sim-trained
   policy on the real game and report survival.
 

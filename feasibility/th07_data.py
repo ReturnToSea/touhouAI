@@ -75,6 +75,23 @@ ENEMY_POS      = 0x2B0C   # zFloat3
 ENEMY_LIFE     = 0x2BB8   # int32  current HP of this enemy
 ENEMY_MAXLIFE  = 0x2BBC   # int32  HP at start of the current life segment
 
+# --- zItemManager (static VA; from th-re-data, verified live) ---
+ITEM_MANAGER      = 0x00575C70   # struct zItemManager
+IM_ITEMS          = 0x00000000   # zItem items[0x44C]
+IM_ITEM_STRIDE    = 0x00000288   # sizeof(zItem) = 648
+IM_ITEM_MAX       = 0x44C        # 1100
+IM_NEXT_INDEX     = 0x000AE2E8   # int32 spawn cursor (wraps at 0x44C)
+IM_ITEM_COUNT     = 0x000AE2EC   # int32 live item count
+#   within a zItem:
+ITEM_POS      = 0x24C   # float x, y, z
+ITEM_VEL      = 0x258   # float vx, vy, vz
+ITEM_TYPE     = 0x27C   # uint8: 0 P-small, 1 point, 2 P-big, 3 bomb, 4 full-power,
+                        #        5 1up, 6 star, 7 cherry, 8 cherry-petal, 9 cherry-bullet
+ITEM_IN_USE   = 0x27D   # uint8  slot active
+ITEM_STATE    = 0x27F   # uint8  0 falling; changes on auto-collect
+ITEM_TYPE_NAMES = {0: "P-small", 1: "point", 2: "P-big", 3: "bomb", 4: "full-power",
+                   5: "1up", 6: "star", 7: "cherry", 8: "cherry-petal", 9: "cherry-bullet"}
+
 # --- zGui (base = GUI) ---
 GUI_IMPL_PTR      = 0x08     # zGuiImpl*
 GUI_BOSS_PRESENT  = 0x24     # BOOL

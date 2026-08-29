@@ -39,10 +39,16 @@ island instances.
 
 ## The observation
 
-`build_obs()` in `th07hook.cpp` and `build_obs_batch()` in `obs.py` compute the
-**same** 212-value vector (verified byte-exact): 16 scalar head + 9 escape
-scalars + a 13×13 player-centred danger grid + 6 enemies. `obs.py` is the
-canonical version, shared with the GPU sim.
+`build_obs_batch()` in `obs.py` is the canonical version (shared with the GPU
+sim): a **404**-value vector = 16 scalar head + 9 escape scalars + a 13×13
+player-centred danger grid + a 12×14 absolute-coord global density map + 6
+enemies + 8 items. `build_obs()` in `th07hook.cpp` is the byte-exact C twin for
+the in-DLL fast path — **as of the v14/v15 obs overhaul it is stale** (still the
+old 212-value layout, no global map / items); it only matters for the in-DLL
+live-evo eval, not for `env.py` / sim training / transfer, which all use
+`obs.py`. `env.py` reads items straight from the game's `ItemManager`
+(`0x00575C70`, offsets in `th07_addrs.h`) via pymem since the DLL doesn't
+mirror them into shm yet.
 
 ## Shared memory
 

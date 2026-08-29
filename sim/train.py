@@ -82,15 +82,16 @@ def train_ppo(args, sim, dev, run):
     # greedy (argmax) eval - this is what transfer uses, and it's much better
     # than the sampled policy PPO's rollout metric measures.
     from danmaku import DanmakuSim
-    eval_sim = DanmakuSim(B=1024, device=dev, max_frames=sim.max_frames * 2,
+    eval_sim = DanmakuSim(B=512, device=dev, max_frames=sim.max_frames * 2,
                           alive_rew=args.alive_rew, seed=args.seed + 777,
                           compile=(dev == "cuda"))
 
     @torch.no_grad()
-    def greedy_eval(n_dec=500):
+    def greedy_eval(n_dec=2400):        # 2400 dec * fs3 = 7200 f = 120 s ceiling
         o = eval_sim.reset()
         el = torch.zeros(eval_sim.B, device=dev)
         lens = []
+        dw = de = ndeaths = 0
         for _ in range(n_dec):
             a = ac.actor(o).argmax(-1)
             o, _, done = eval_sim.step(a)
@@ -98,8 +99,14 @@ def train_ppo(args, sim, dev, run):
             if done.any():
                 lens += el[done].tolist()
                 el[done] = 0
+                ndeaths += int(done.sum())
+                dw += float(eval_sim.step_death_wall.sum())
+                de += float(eval_sim.step_death_enemy.sum())
         lens += el[el > 0].tolist()          # survivors counted at current length
-        return float(np.mean(lens)) if lens else 0.0
+        surv = float(np.mean(lens)) if lens else 0.0
+        wf = dw / max(ndeaths, 1)
+        ef = de / max(ndeaths, 1)
+        return surv, wf, ef
 
     ep_ret = torch.zeros(B, device=dev)
     ep_len = torch.zeros(B, device=dev)
@@ -176,11 +183,12 @@ def train_ppo(args, sim, dev, run):
         if upd % args.log_every == 0:
             ml = float(np.mean(recent_len[-2000:])) if recent_len else 0.0
             fs = sim.frame_skip
-            gd = greedy_eval()                        # argmax survival, the stage
+            gd, wf, ef = greedy_eval()                # argmax survival + death causes
             sps = total / (time.perf_counter() - t0)
             print(f"upd {upd:4d}  {total/1e6:6.1f}M  {sps/1e3:5.0f}k/s  "
                   f"greedy {gd*fs/60:5.1f}s  sampled {ml*fs/60:5.1f}s  "
-                  f"ent {ent.item():.3f}", flush=True)
+                  f"ent {ent.item():.3f}  deaths: wall {wf*100:3.0f}% enemy {ef*100:3.0f}%",
+                  flush=True)
             hist.append((time.perf_counter() - t0, total, gd, ml, float(ent.item())))
             recent_len, recent_ret = recent_len[-4000:], recent_ret[-4000:]
             if gd > best:
@@ -278,9 +286,11 @@ def main():
     # es
     ap.add_argument("--es-sigma", type=float, default=0.02)
     ap.add_argument("--es-horizon", type=int, default=400)
-    ap.add_argument("--log-every", type=int, default=4,
+    ap.add_argument("--log-every", type=int, default=8,
                     help="updates per logged point (~0.8M steps each)")
     ap.add_argument("--alive-rew", type=float, default=0.01)
+    ap.add_argument("--compile-sim", action="store_true",
+                    help="torch.compile the training sim (default: eager)")
     args = ap.parse_args()
     args.steps = int(args.steps)
 
@@ -291,9 +301,11 @@ def main():
     (run / "meta.json").write_text(json.dumps({
         "algo": args.algo, "hidden": args.hidden, "B": args.B,
         "steps": args.steps, "started": time.time()}))
+    # training sim runs EAGER by default (matches v12-v14; compiling it churns
+    # dynamo recompiles on the varied rand shapes). --compile-sim to try it.
     sim = DanmakuSim(B=args.B, device=dev, max_frames=args.max_frames,
                      alive_rew=args.alive_rew, seed=args.seed,
-                     compile=False)
+                     compile=(dev == "cuda" and args.compile_sim))
     print(f"{args.algo.upper()}  B={args.B}  hidden={args.hidden}  dev={dev}  "
           f"-> {run}", flush=True)
     (train_ppo if args.algo == "ppo" else train_es)(args, sim, dev, run)

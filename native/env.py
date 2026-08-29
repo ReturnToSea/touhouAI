@@ -95,7 +95,7 @@ NUM_ACTIONS = len(_DIRS) * 2 * 2  # dir x focus x shoot
 # observation: the canonical builder is native/obs.py, shared with the sim.
 import torch  # noqa: E402
 from obs import (build_obs_batch, OBS_DIM, HEAD_DIM, NDIRS, GCELLS,  # noqa: E402,F401
-                 GRID, M_ENEMIES)
+                 GRID, M_ENEMIES, M_ITEMS)
 
 
 def _decode_action(a: int) -> int:
@@ -164,6 +164,14 @@ class Th07Env(_Base):
                 pass
             _kill_pid(self.pid)
             raise
+        self._pm = None
+        try:
+            import pymem
+            self._pm = pymem.Pymem()
+            self._pm.open_process_from_id(self.pid)
+        except Exception:
+            self._pm = None      # items just read as zeros
+
         self.start_lives = s.lives
         self.start_stage = s.stage
         print(f"[Th07Env] pid {self.pid}: nav {s.nav_frames}f -> stage {s.stage}, "
@@ -262,12 +270,48 @@ class Th07Env(_Base):
                 [(e.x - px) / 128.0, (e.y - py) / 128.0, e.life / ml])
             filled += 1
 
+        items = self._item_arrays(px, py)      # [1, M_ITEMS*3]
+
         o = build_obs_batch(
             torch.tensor([[px, py]], dtype=torch.float32),
             torch.tensor([[pvx, pvy]], dtype=torch.float32),
             torch.tensor([float(s.player_focus)]),
-            bp, bv, ba, head_aux, enemies)
+            bp, bv, ba, head_aux, enemies, items)
         return o[0].numpy()
+
+    def _item_arrays(self, px: float, py: float) -> "torch.Tensor":
+        """Nearest M_ITEMS on-field items from the live ItemManager, as
+        (rel_x/128, rel_y/128, type/9). Read straight from process memory
+        (pymem); the DLL doesn't mirror items into shm yet. Returns zeros if
+        the read isn't available."""
+        out = torch.zeros(1, M_ITEMS * 3)
+        pm = getattr(self, "_pm", None)
+        if pm is None:
+            return out
+        try:
+            import struct
+            base = 0x00575C70                    # ITEM_MANAGER (th07_addrs.h)
+            n = pm.read_int(base + 0xAE2EC)       # item_count
+            if n <= 0:
+                return out
+            blob = pm.read_bytes(base, 0x288 * min(0x44C, n + 64))
+            cand = []
+            for i in range(len(blob) // 0x288):
+                b = i * 0x288
+                if not blob[b + 0x27D]:           # in_use
+                    continue
+                x, y = struct.unpack_from("<ff", blob, b + 0x24C)
+                if y < -16 or y > 464:
+                    continue
+                t = blob[b + 0x27C]
+                cand.append(((x - px) ** 2 + (y - py) ** 2, x, y, t))
+            cand.sort(key=lambda c: c[0])
+            for k, (_, x, y, t) in enumerate(cand[:M_ITEMS]):
+                out[0, k * 3:k * 3 + 3] = torch.tensor(
+                    [(x - px) / 128.0, (y - py) / 128.0, t / 9.0])
+        except Exception:
+            pass
+        return out
 
     # ------------------------------------------------------------------
     def rollout_policy(self, weights, hidden, render: bool = False,

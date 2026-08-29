@@ -26,7 +26,8 @@ sys.path.insert(0, str(HERE))
 sys.path.insert(0, str(HERE.parent / "native"))
 from danmaku import DanmakuSim  # noqa: E402
 from obs import (HEAD_DIM, NDIRS, GCELLS, GRID, GRID_CELL,  # noqa: E402
-                 PX_LO, PX_HI, PY_LO, PY_HI, OBS_DIRS)
+                 PX_LO, PX_HI, PY_LO, PY_HI, OBS_DIRS,
+                 _O_GMAP, _O_ENE, _O_ITEM, GRID_G_W, GRID_G_H, GCELL_G)
 from policy import MLPPolicy  # noqa: E402
 
 PW, PH = 384.0, 448.0
@@ -66,6 +67,7 @@ class Watcher:
         self.obs = self.sim.reset()
         self.paused = False
         self.show_grid = True
+        self.show_gmap = True
         self.last_load = time.time()
         self.ep_start_frame = 0
 
@@ -78,6 +80,7 @@ class Watcher:
         self.cv = tk.Canvas(self.root, width=w, height=h, bg="#0a0b0e", highlightthickness=0)
         self.cv.pack()
         self.root.bind("g", lambda e: setattr(self, "show_grid", not self.show_grid))
+        self.root.bind("G", lambda e: setattr(self, "show_gmap", not self.show_gmap))
         self.root.bind("<space>", lambda e: setattr(self, "paused", not self.paused))
         self.root.bind("r", lambda e: self._reset())
         self.root.bind("<Escape>", lambda e: self.root.destroy())
@@ -191,6 +194,18 @@ class Watcher:
         cv.create_rectangle(cx(0), cy(0), cx(PW), cy(PH), outline="#22262e")
         cv.create_rectangle(cx(PX_LO), cy(PY_LO), cx(PX_HI), cy(PY_HI), outline="#333a44")
 
+        # macro view (toggle G): predicted bullet tracks - each active bullet's
+        # near-future path drawn as a faint line, so walls / dense streams read
+        # as clear bands without washing the whole field red.
+        if self.show_gmap:
+            bvel = s.b_vel[0].numpy()[act]
+            H_G = 24.0
+            for (bx, by), (vx, vy) in zip(bpos, bvel):
+                if abs(vx) < 1e-3 and abs(vy) < 1e-3:
+                    continue
+                cv.create_line(cx(bx), cy(by), cx(bx + vx * H_G), cy(by + vy * H_G),
+                               fill="#5a3030", width=1)
+
         # danger grid heatmap
         if self.show_grid:
             R = GRID // 2
@@ -214,6 +229,41 @@ class Watcher:
             rr = max(2.0, r * SCALE * 0.8)
             col = "#ff4d4d" if inb else "#5b6472"
             cv.create_oval(cx(bx) - rr, cy(by) - rr, cx(bx) + rr, cy(by) + rr, fill=col, outline="")
+
+        # enemies (magenta = active), hp bar above; line to the one being shot
+        en_act = s.en_active[0].numpy() > 0.5
+        en_pos = s.en_pos[0].numpy()
+        en_hp = s.en_hp[0].numpy()
+        shooting = (a // 18) % 2
+        near_i, near_d = -1, 1e9
+        for k in range(len(en_act)):
+            if not en_act[k]:
+                continue
+            ex, ey = en_pos[k]
+            d = ((ex - px) ** 2 + (ey - py) ** 2) ** 0.5
+            if 0 < ey < PH and d < near_d:
+                near_i, near_d = k, d
+            cv.create_oval(cx(ex) - 9, cy(ey) - 9, cx(ex) + 9, cy(ey) + 9,
+                           fill="#d54de0", outline="#ffffff")
+            hpf = max(0.0, min(1.0, en_hp[k] / 2.0))
+            cv.create_rectangle(cx(ex) - 10, cy(ey) - 16, cx(ex) - 10 + 20 * hpf, cy(ey) - 13,
+                                fill="#66ff88", outline="")
+        if shooting and near_i >= 0:
+            ex, ey = en_pos[near_i]
+            cv.create_line(cx(px), cy(py), cx(ex), cy(ey), fill="#ffe14d", width=2, dash=(4, 2))
+
+        # P items (falling) + the collect radius
+        it_act = s.it_active[0].numpy() > 0.5
+        it_pos = s.it_pos[0].numpy()
+        for k in range(len(it_act)):
+            if not it_act[k]:
+                continue
+            ix, iy = it_pos[k]
+            cv.create_rectangle(cx(ix) - 3, cy(iy) - 3, cx(ix) + 3, cy(iy) + 3,
+                                fill="#ff4fa3", outline="#ffd0e6")
+        cv.create_oval(cx(px) - 14 * SCALE, cy(py) - 14 * SCALE,
+                       cx(px) + 14 * SCALE, cy(py) + 14 * SCALE,
+                       outline="#7a3350", dash=(2, 3))
 
         # escape rays (dirs 1..8), length ~ escape value
         for i in range(1, NDIRS):
@@ -241,6 +291,8 @@ class Watcher:
             cv.create_line(cx(px), cy(py), cx(ex), cy(ey), fill="#00e5ff", width=4, arrow="last")
         if focus:
             cv.create_oval(cx(px) - 14, cy(py) - 14, cx(px) + 14, cy(py) + 14, outline="#66ffcc")
+        if (a // 18) % 2:
+            cv.create_text(cx(px), cy(py) + 22, fill="#ffe14d", font=("Consolas", 8), text="SHOOT")
 
         cv.create_text(cx(0), 14, anchor="w", fill="#c8ccd4", font=("Consolas", 11),
                        text=f"frame {int(s.frame[0]):5d}  ~{float(s.frame[0]) / 60:5.1f}s   "

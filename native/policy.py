@@ -11,7 +11,8 @@ import numpy as np
 import torch
 import torch.nn as nn
 
-OBS_DIM = 212
+from obs import OBS_DIM  # single source of truth (obs.py)
+
 N_ACTIONS = 36
 
 
@@ -62,6 +63,9 @@ class MLPPolicy(nn.Module):
     @classmethod
     def load(cls, path: str | Path) -> "MLPPolicy":
         blob = torch.load(path, map_location="cpu", weights_only=True)
-        pol = cls(hidden=blob["hidden"])
-        pol.load_state_dict(blob["state_dict"])
+        sd = blob["state_dict"]
+        # infer obs_dim from the first Linear so pre-v14 (212) checkpoints still load
+        w0 = next(v for k, v in sd.items() if k.endswith("weight"))
+        pol = cls(hidden=blob["hidden"], obs_dim=w0.shape[1])
+        pol.load_state_dict(sd)
         return pol

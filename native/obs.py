@@ -8,16 +8,22 @@ Used by:
 Must stay in lockstep with th07hook.cpp `build_obs` (the C version the live
 trainer actually runs); the parity smoke test checks env._obs vs the DLL's
 dbg_obs byte-for-byte on the grid and ~1e-3 on the escape scalars.
+NOTE: as of v14 the DLL's build_obs is STALE (no global map / item slots) - it
+only matters for the in-DLL live-evo path, not for sim training or transfer.
 
-Layout (OBS_DIM = 212):
-  [0:16)    head      - px/W, py/H, pvx/6, pvy/6, focus, lives/9, bombs/9,
-                        power/128, tanh(graze/100), stage/6, alive, dead,
-                        near_d, boss_present, boss_frac, 0
-  [16:25)   escape    - for {stay,N,NE,E,SE,S,SW,W,NW}: frames-until-hit if the
-                        player holds that move for DIR_HORIZON frames, / DIR_HORIZON
-  [25:194)  grid      - 13x13 player-centred danger grid (imminence of a strike
-                        per cell from marching every bullet; walls read 0.5)
-  [194:212) enemies   - 6 * (rel_x/128, rel_y/128, life/maxlife); zeros in the sim
+Layout (OBS_DIM = 404):
+  [0:16)     head       - px/W, py/H, pvx/6, pvy/6, focus, lives/9, bombs/9,
+                          power/128, tanh(graze/100), stage/6, alive, dead,
+                          near_d, boss_present, boss_frac, 0
+  [16:25)    escape     - for {stay,N,NE,E,SE,S,SW,W,NW}: frames-until-hit if the
+                          player holds that move for DIR_HORIZON frames, / DIR_HORIZON
+  [25:194)   local grid - 13x13 player-centred danger grid (imminence of a strike
+                          per cell from marching every bullet; walls read 0.5)
+  [194:362)  global map - 12x14 ABSOLUTE-coord coarse danger map over the whole
+                          playfield (32px cells, ~48f horizon) - for macro
+                          positioning / seeing walls form at range
+  [362:380)  enemies    - 6 * (rel_x/128, rel_y/128, life/maxlife)
+  [380:404)  items      - 8 * (rel_x/128, rel_y/128, type/9); P-drops etc.
 """
 from __future__ import annotations
 
@@ -36,11 +42,32 @@ NDIRS = 9
 DIR_SPEED = 4.0          # measured unfocused player move speed (px/frame)
 DIR_HORIZON = 20.0
 DIR_HIT_R = 7.0          # player_r (~2) + typical stage-1 bullet_r (~4), a touch generous
-K_NEAREST = 128          # only the K nearest bullets feed the grid + escape scan
-                         # (the rest are too far to touch the +-78px window). DLL
-                         # build_obs must apply the same cap for transfer parity.
+K_NEAREST = 128          # only the K nearest bullets feed the local grid + escape scan
+
+# --- global (absolute-coord) coarse danger map: macro positioning ---
+# v15: shorter horizon + DENSITY-weighted (count of bullets projected into a
+# cell / GMAP_DENOM, clamped) so a lone bullet reads faint and only genuine
+# walls / dense streams saturate. The v14 max-imminence version was a red wash.
+GRID_G_W, GRID_G_H = 12, 14           # 384/32, 448/32
+GCELLS_G = GRID_G_W * GRID_G_H        # 168
+GCELL_G = 32.0
+GRID_G_HORIZON = 24.0
+GMAP_DENOM = 6.0                      # bullet-projections per cell that = full danger
+K_GLOBAL = 512                        # nearest-K feeding the global map (wider net
+                                     # than K_NEAREST so far-side walls register)
+_MARCH_T_G = torch.tensor([0.0, 12.0, 24.0])
+
 M_ENEMIES = 6
-OBS_DIM = HEAD_DIM + NDIRS + GCELLS + M_ENEMIES * 3   # 212
+M_ITEMS = 8
+ITEM_STRIDE = 3
+
+# slice offsets
+_O_ESC = HEAD_DIM                              # 16
+_O_GRID = _O_ESC + NDIRS                       # 25
+_O_GMAP = _O_GRID + GCELLS                     # 194
+_O_ENE = _O_GMAP + GCELLS_G                    # 362
+_O_ITEM = _O_ENE + M_ENEMIES * 3              # 380
+OBS_DIM = _O_ITEM + M_ITEMS * ITEM_STRIDE      # 404
 
 # index 0 = stay still, then the 8 compass dirs (matches decode_action / _DIRS)
 OBS_DIRS = torch.tensor(
@@ -53,7 +80,7 @@ _MARCH_T = torch.arange(0.0, GRID_HORIZON + 0.5, 0.5)   # 49 steps, t = 0..24 by
 @torch.no_grad()
 def build_obs_batch(player_pos, player_vel, player_focus,
                     bullets_pos, bullets_vel, bullets_active,
-                    head_aux, enemies):
+                    head_aux, enemies, items):
     """
     player_pos     [B,2]   playfield coords (px, py), origin top-left
     player_vel     [B,2]   per-frame velocity (head only; 0 is fine)
@@ -63,8 +90,9 @@ def build_obs_batch(player_pos, player_vel, player_focus,
     bullets_active [B,N]    bool / 0-1 mask
     head_aux       [B,9]    lives/9, bombs/9, power/128, tanh(graze/100),
                             stage/6, alive, dead, boss_present, boss_frac
-    enemies        [B,18]   6 * (rel_x/128, rel_y/128, life/maxlife); zeros in sim
-    returns        [B,212]
+    enemies        [B,18]   6 * (rel_x/128, rel_y/128, life/maxlife)
+    items          [B,24]   8 * (rel_x/128, rel_y/128, type/9)
+    returns        [B,404]
     """
     dev = player_pos.device
     dt = player_pos.dtype
@@ -73,10 +101,15 @@ def build_obs_batch(player_pos, player_vel, player_focus,
     py = player_pos[:, 1:2]
     act_all = bullets_active.to(torch.bool)
 
-    # keep only the K nearest active bullets - everything downstream is O(B*K)
     N = bullets_pos.shape[1]
     d_all = (bullets_pos - player_pos[:, None, :]).norm(dim=2)
     d_all = torch.where(act_all, d_all, torch.full_like(d_all, 1e9))
+
+    def _guard(v):
+        bad = (v.abs() > 24.0).any(dim=-1, keepdim=True)
+        return torch.where(bad, torch.zeros_like(v), v)
+
+    # nearest-K for the local grid + escape scan
     if N > K_NEAREST:
         d_k, sel = torch.topk(d_all, K_NEAREST, dim=1, largest=False)
         bpos = torch.gather(bullets_pos, 1, sel[:, :, None].expand(-1, -1, 2))
@@ -84,45 +117,64 @@ def build_obs_batch(player_pos, player_vel, player_focus,
         act = d_k < 1e8
     else:
         bpos, bvel, act = bullets_pos, bullets_vel, act_all
+    bv = _guard(bvel)
 
-    # recycled-slot guard (matches the DLL: if either component blows up, drop both)
-    bad = (bvel.abs() > 24.0).any(dim=-1, keepdim=True)
-    bv = torch.where(bad, torch.zeros_like(bvel), bvel)
-    bullets_pos = bpos
+    # wider nearest-K for the global map
+    if N > K_GLOBAL:
+        d_g, selg = torch.topk(d_all, K_GLOBAL, dim=1, largest=False)
+        gpos = torch.gather(bullets_pos, 1, selg[:, :, None].expand(-1, -1, 2))
+        gvel = torch.gather(bullets_vel, 1, selg[:, :, None].expand(-1, -1, 2))
+        gact = d_g < 1e8
+    else:
+        gpos, gvel, gact = bullets_pos, bullets_vel, act_all
+    gv = _guard(gvel)
 
     dirs = OBS_DIRS.to(dev, dt)
     tsteps = _MARCH_T.to(dev, dt)
     o = torch.zeros(B, OBS_DIM, device=dev, dtype=dt)
 
-    # ---------- danger grid ----------
+    # ---------- local danger grid ----------
     ci = torch.arange(GRID, device=dev)
     cgy, cgx = torch.meshgrid(ci, ci, indexing="ij")
-    cdx = (cgx.reshape(-1).to(dt) - GRID_R) * GRID_CELL      # [GC]
-    cdy = (cgy.reshape(-1).to(dt) - GRID_R) * GRID_CELL
-    wx = px + cdx                                            # [B,GC]
-    wy = py + cdy
     grid = torch.zeros(B, GCELLS, device=dev, dtype=dt)
+    cdx = (cgx.reshape(-1).to(dt) - GRID_R) * GRID_CELL
+    cdy = (cgy.reshape(-1).to(dt) - GRID_R) * GRID_CELL
+    wx = px + cdx
+    wy = py + cdy
     wall = (wx < PX_LO) | (wx > PX_HI) | (wy < PY_LO) | (wy > PY_HI)
     grid = torch.where(wall, torch.full_like(grid, 0.5), grid)
 
     for i in range(tsteps.shape[0]):
         t = tsteps[i]
-        bp = bullets_pos + bv * t                            # [B,N,2]
+        bp = bpos + bv * t
         rel = (bp - player_pos[:, None, :]) / GRID_CELL
-        cell = torch.floor(rel + 0.5).long() + GRID_R        # [B,N,2]
+        cell = torch.floor(rel + 0.5).long() + GRID_R
         gx = cell[..., 0]
         gy = cell[..., 1]
         valid = (gx >= 0) & (gx < GRID) & (gy >= 0) & (gy < GRID) & act
-        lin = gy.clamp(0, GRID - 1) * GRID + gx.clamp(0, GRID - 1)   # [B,N]
+        lin = gy.clamp(0, GRID - 1) * GRID + gx.clamp(0, GRID - 1)
         dval = torch.full_like(lin, float(1.0 - t / GRID_HORIZON), dtype=dt)
         dval = torch.where(valid, dval, torch.zeros_like(dval))
         grid.scatter_reduce_(1, lin, dval, reduce="amax")
-    o[:, HEAD_DIM + NDIRS:HEAD_DIM + NDIRS + GCELLS] = grid
+    o[:, _O_GRID:_O_GMAP] = grid
+
+    # ---------- global (absolute-coord) coarse danger map (density) ----------
+    gmt = _MARCH_T_G.to(dev, dt)
+    gmap = torch.zeros(B, GCELLS_G, device=dev, dtype=dt)
+    for i in range(gmt.shape[0]):
+        t = gmt[i]
+        wp = gpos + gv * t
+        cx = torch.floor(wp[..., 0] / GCELL_G).long()
+        cy = torch.floor(wp[..., 1] / GCELL_G).long()
+        valid = (cx >= 0) & (cx < GRID_G_W) & (cy >= 0) & (cy < GRID_G_H) & gact
+        lin = cy.clamp(0, GRID_G_H - 1) * GRID_G_W + cx.clamp(0, GRID_G_W - 1)
+        gmap.scatter_add_(1, lin, valid.to(dt))
+    o[:, _O_GMAP:_O_ENE] = (gmap / GMAP_DENOM).clamp(0.0, 1.0)
 
     # ---------- escape scalars ----------
     L = dirs.norm(dim=1, keepdim=True)
     unit = torch.where(L > 1e-6, dirs / L.clamp(min=1e-9), torch.zeros_like(dirs))
-    pm = unit * DIR_SPEED                                    # [9,2]
+    pm = unit * DIR_SPEED
     pmx = pm[:, 0][None, :]
     pmy = pm[:, 1][None, :]
     big = torch.full((B, NDIRS), 1e9, device=dev, dtype=dt)
@@ -134,20 +186,20 @@ def build_obs_batch(player_pos, player_vel, player_focus,
     safe = torch.full((B, NDIRS), DIR_HORIZON, device=dev, dtype=dt)
     safe = torch.minimum(safe, torch.minimum(twx, twy)).clamp(min=0.0)
 
-    rb = bullets_pos - player_pos[:, None, :]                # [B,N,2]
-    dist = rb.norm(dim=2)                                    # [B,N]
+    rb = bpos - player_pos[:, None, :]
+    dist = rb.norm(dim=2)
     near = (dist < 150.0) & act
-    r0 = -rb                                                 # player - bullet
-    rv = pm[None, None, :, :] - bv[:, :, None, :]            # [B,N,9,2]
-    a = (rv * rv).sum(-1)                                    # [B,N,9]
-    bdot = (r0[:, :, None, :] * rv).sum(-1)                  # [B,N,9]
+    r0 = -rb
+    rv = pm[None, None, :, :] - bv[:, :, None, :]
+    a = (rv * rv).sum(-1)
+    bdot = (r0[:, :, None, :] * rv).sum(-1)
     ts = torch.where(a < 1e-6, torch.zeros_like(a), -bdot / a.clamp(min=1e-6))
     ts = ts.clamp(min=0.0)
-    cp = r0[:, :, None, :] + rv * ts[..., None]              # [B,N,9,2]
+    cp = r0[:, :, None, :] + rv * ts[..., None]
     hit = ((cp * cp).sum(-1) < DIR_HIT_R * DIR_HIT_R) & near[:, :, None]
     cand = torch.where(hit, ts, torch.full_like(ts, 1e9))
     safe = torch.minimum(safe, cand.min(dim=1).values).clamp(min=0.0)
-    o[:, HEAD_DIM:HEAD_DIM + NDIRS] = safe / DIR_HORIZON
+    o[:, _O_ESC:_O_GRID] = safe / DIR_HORIZON
 
     # ---------- head ----------
     near_d = torch.where(act, dist, torch.full_like(dist, 1e9)).min(dim=1).values
@@ -158,9 +210,10 @@ def build_obs_batch(player_pos, player_vel, player_focus,
     o[:, 2] = player_vel[:, 0] / 6.0
     o[:, 3] = player_vel[:, 1] / 6.0
     o[:, 4] = player_focus.to(dt)
-    o[:, 5:12] = head_aux[:, 0:7]        # lives, bombs, power, graze, stage, alive, dead
+    o[:, 5:12] = head_aux[:, 0:7]
     o[:, 12] = near_d
-    o[:, 13:15] = head_aux[:, 7:9]       # boss_present, boss_frac
+    o[:, 13:15] = head_aux[:, 7:9]
     o[:, 15] = 0.0
-    o[:, HEAD_DIM + NDIRS + GCELLS:] = enemies
+    o[:, _O_ENE:_O_ITEM] = enemies
+    o[:, _O_ITEM:] = items
     return o

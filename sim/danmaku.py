@@ -7,7 +7,10 @@ from the real game (sim/physics.json). Observations are built by the SHARED
 builder (native/obs.py) so a policy trained here sees bit-identical inputs to
 the real Th07Env.
 
-Scope: pure dodging. No enemies to shoot, no boss, no items.
+Scope: dodging + shooting. Waves of 4-6 enemies (2 HP each) fly in from
+off-screen every 12 s, hover ~6 s, then leave; touching one kills the player.
+Holding SHOOT auto-damages the nearest on-screen enemy at 1 dmg/s (no
+projectiles). No boss, no items.
 
     from sim.danmaku import DanmakuSim
     sim = DanmakuSim(B=8192, device="cuda")
@@ -24,7 +27,7 @@ import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "native"))
 from obs import build_obs_batch, OBS_DIM, PX_LO, PX_HI, PY_LO, PY_HI  # noqa: E402
-from obs import W as PW, H as PH  # noqa: E402
+from obs import W as PW, H as PH, M_ITEMS  # noqa: E402
 
 TAU = 2 * math.pi
 _DIRS = torch.tensor([[0, 0], [0, -1], [1, -1], [1, 0], [1, 1],
@@ -53,6 +56,45 @@ for _cx, _cy in _CORNERS:
 ROSTER.append((E_LINE, 350.0, 412.0))
 ROSTER += [(E_BRING, CX, CY), (E_BRING, CX, CY)]     # [-2] bounces, [-1] orbits
 
+# --- enemies (learn to shoot) ---
+# a wave of 4-6 flies in from off-screen every 12 s, hovers ~6 s, leaves.
+# 2 HP each; touching one kills the player. Holding SHOOT auto-hits the nearest
+# active enemy for 1 dmg/s (no projectiles). No transfer of this damage model -
+# the real game does its own shot damage; the policy just learns to hold shoot
+# and position near enemies.
+MAXE = 18                    # enemy slots
+EN_PER_WAVE = 6              # slots written per wave (4-6 activated)
+WAVE_PERIOD = 720            # 12 s
+EN_HP = 2.0
+EN_RADIUS = 9.0
+EN_FLY_SPEED = 2.6
+EN_HOVER_FRAMES = 360        # 6 s
+EN_DPS = 1.0 / 60.0          # 1 dmg per second, per frame
+EN_DMG_REW = 0.10           # reward per HP dealt - small; items carry the shoot signal
+
+# --- P-item drops (learn to shoot; reward only, no weapon effect yet) ---
+IT_MAX = 96                  # item slots
+IT_PER_KILL = 2              # P items dropped per enemy killed
+IT_GRAVITY = 0.10            # px/frame^2 downward
+IT_POP_VY = -2.4             # initial upward pop
+IT_TERM_VY = 3.0             # terminal fall speed
+IT_COLLECT_R = 14.0
+IT_REW = 0.15              # reward per P item collected (v15: 0.06 -> 0.15)
+
+# --- "wall" attack: a half-width curtain sweeps across every ~10 s ---
+WALL_PERIOD = 600            # 10 s
+WALL_SLOTS = 96             # dedicated bullet slots (room for 2 overlapping walls)
+WALL_N = 44                # bullets in the curtain - solid, no threading (v15: 20->44)
+WALL_SPEED = 0.95          # px/frame - v15: 1.8 -> ~half, more reaction time
+WALL_RAD = 5.0
+WALL_OFF = 48.0            # spawn this far off-screen (telegraph before it's lethal)
+
+# top-right CONE (ROSTER emitter index 2): one-shot 50% chance at t=1s to
+# redirect anywhere in 360 deg, same speed. Those bullets get a 5 s life cap.
+TR_CONE_EIDX = 2
+TR_REDIR_AGE = 60.0
+TR_CONE_LIFE = 300.0
+
 
 class DanmakuSim:
     def __init__(self, B=16384, device="cuda", slots_per_emitter=176, spawn_k=24,
@@ -63,7 +105,8 @@ class DanmakuSim:
         self.E = len(ROSTER)
         self.SPE = slots_per_emitter
         self.K = spawn_k
-        self.N = self.E * slots_per_emitter + 1            # +1 = dump slot
+        self._wall_base = self.E * slots_per_emitter       # WALL_SLOTS after the emitters
+        self.N = self._wall_base + WALL_SLOTS + 1          # +1 = dump slot
         self.dump = self.N - 1
         self.max_frames = max_frames
         self.frame_skip = frame_skip
@@ -100,24 +143,57 @@ class DanmakuSim:
         self.e_swrate = torch.zeros(B, E, device=d)
         self.e_swphase = torch.zeros(B, E, device=d)
 
+        # enemies
+        self.en_pos = torch.full((B, MAXE, 2), 1e4, device=d)
+        self.en_vel = torch.zeros(B, MAXE, 2, device=d)
+        self.en_tgt = torch.zeros(B, MAXE, 2, device=d)
+        self.en_hp = torch.zeros(B, MAXE, device=d)
+        self.en_phase = torch.zeros(B, MAXE, device=d)     # 0 fly-in, 1 hover, 2 leave
+        self.en_timer = torch.zeros(B, MAXE, device=d)
+        self.en_active = torch.zeros(B, MAXE, device=d)
+        self.en_cursor = torch.zeros(B, device=d)
+        self._ek = torch.arange(EN_PER_WAVE, device=d).float()
+
+        # P-item drops
+        self.it_pos = torch.full((B, IT_MAX, 2), 1e4, device=d)
+        self.it_vel = torch.zeros(B, IT_MAX, 2, device=d)
+        self.it_active = torch.zeros(B, IT_MAX, device=d)
+        self.it_cursor = torch.zeros(B, device=d)
+        self._itk = torch.arange(IT_PER_KILL, device=d).float()
+
+        # wall attack
+        self.wall_cursor = torch.zeros(B, device=d)
+        self._walln = torch.arange(WALL_N, device=d).float()
+
+        # death-cause diagnostic (set each frame an env dies): which killed it
+        self.death_wall = torch.zeros(B, device=d)
+        self.death_enemy = torch.zeros(B, device=d)
+
         rt = torch.tensor(ROSTER, device=d, dtype=torch.float32)
         self._R_type = rt[:, 0]
         self._R_xy = rt[:, 1:3]
         self._eidx = torch.arange(E, device=d)
         self._is_orbit = (self._eidx == E - 1).float()     # last BRING orbits the edge
 
-        # per-slot bullet lifetime: the moving (BRING) emitters fire very slow
-        # bullets, so cap them at 5 s (300 f) or the screen just fills up.
-        slot_emit = (torch.arange(self.N, device=d) // self.SPE).clamp(max=E - 1)
-        self._slot_life = torch.where(self._R_type[slot_emit] == E_BRING,
+        # per-slot bullet lifetime: BRING (slow moving emitters) and the
+        # redirecting top-right CONE get a 5 s (300 f) cap or the screen fills.
+        # wall slots (>= _wall_base) and the dump slot self-cull off-screen.
+        slot_emit = torch.arange(self.N, device=d) // self.SPE
+        _capped = ((slot_emit < E) &
+                   ((self._R_type[slot_emit.clamp(max=E - 1)] == E_BRING) |
+                    (slot_emit == TR_CONE_EIDX)))
+        self._slot_life = torch.where(_capped,
                                       torch.full((self.N,), 300.0, device=d),
                                       torch.full((self.N,), 1e9, device=d))
+        self._wall_slot = ((torch.arange(self.N, device=d) >= self._wall_base) &
+                           (torch.arange(self.N, device=d) < self.dump))
+        self._tr_cone_slot = (slot_emit == TR_CONE_EIDX)
+        self.b_redir = torch.zeros(B, self.N, device=d)     # 1 once the t=1s roll is done
 
         self._k = torch.arange(self.K, device=d).float()
         self._ebase = self._eidx.float() * self.SPE
         self._z9 = torch.zeros(B, 9, device=d)
         self._z9[:, 5] = 1.0
-        self._z18 = torch.zeros(B, 18, device=d)
         self._zeros2 = torch.zeros(B, 2, device=d)
         self._zeros1 = torch.zeros(B, device=d)
 
@@ -224,18 +300,62 @@ class DanmakuSim:
                                     self.e_swrate)
         self.e_swphase = torch.where(mbe, self._r(B, E, lo=0, hi=TAU), self.e_swphase)
 
+        self.en_active = torch.where(mb, torch.zeros_like(self.en_active), self.en_active)
+        self.en_cursor = torch.where(mb.squeeze(1), torch.zeros_like(self.en_cursor),
+                                     self.en_cursor)
+        self.it_active = torch.where(mb, torch.zeros_like(self.it_active), self.it_active)
+        mb1 = mb.squeeze(1)
+        self.it_cursor = torch.where(mb1, torch.zeros_like(self.it_cursor), self.it_cursor)
+        self.wall_cursor = torch.where(mb1, torch.zeros_like(self.wall_cursor), self.wall_cursor)
+
     def reset(self):
         self._spawn(torch.ones(self.B, 1, device=self.dev))
         return self._obs()
 
+    def _enemy_obs(self):
+        """[B,18] = 6 nearest active enemies: (rel_x/128, rel_y/128, hp/2)."""
+        B = self.B
+        # match env.py: only enemies that have entered the playfield are visible
+        vis = (self.en_active > 0.5) & (self.en_pos[..., 1] > -8.0) & \
+              (self.en_pos[..., 1] < PY_HI + 32.0)
+        ed = torch.where(vis, (self.en_pos - self.player[:, None, :]).norm(dim=2),
+                         torch.full((B, MAXE), 1e9, device=self.dev))
+        dk, ik = ed.topk(6, dim=1, largest=False)
+        rel = torch.gather(self.en_pos, 1, ik[:, :, None].expand(-1, -1, 2)) \
+            - self.player[:, None, :]
+        hpn = torch.gather(self.en_hp, 1, ik) / EN_HP
+        v = (dk < 1e8).float()
+        o = torch.zeros(B, 18, device=self.dev)
+        o[:, 0::3] = rel[..., 0] / 128.0 * v
+        o[:, 1::3] = rel[..., 1] / 128.0 * v
+        o[:, 2::3] = hpn.clamp(0.0, 1.0) * v
+        return o
+
+    def _item_obs(self):
+        """[B, M_ITEMS*3] = nearest active P items: (rel_x/128, rel_y/128, 0)."""
+        B = self.B
+        ia = self.it_active > 0.5
+        idd = torch.where(ia, (self.it_pos - self.player[:, None, :]).norm(dim=2),
+                          torch.full((B, IT_MAX), 1e9, device=self.dev))
+        dk, ik = idd.topk(M_ITEMS, dim=1, largest=False)
+        rel = torch.gather(self.it_pos, 1, ik[:, :, None].expand(-1, -1, 2)) \
+            - self.player[:, None, :]
+        v = (dk < 1e8).float()
+        o = torch.zeros(B, M_ITEMS * 3, device=self.dev)
+        o[:, 0::3] = rel[..., 0] / 128.0 * v
+        o[:, 1::3] = rel[..., 1] / 128.0 * v
+        o[:, 2::3] = 0.0                         # all items are P in the sim
+        return o
+
     def _obs(self):
         return self._obs_fn(self.player, self._zeros2, self._zeros1,
                             self.b_pos, self.b_vel, self.b_active,
-                            self._z9, self._z18)
+                            self._z9, self._enemy_obs(), self._item_obs())
 
     # ------------------------------------------------------------------ hot path
-    def _advance(self, mv, focus):
+    def _advance(self, mv, focus, shoot):
         B, E, K = self.B, self.E, self.K
+        d = self.dev
         # --- player ---
         norm = mv.norm(dim=1, keepdim=True).clamp(min=1e-6)
         spd = torch.where(focus > 0.5, torch.full_like(focus, SPEED_SLOW),
@@ -248,8 +368,9 @@ class DanmakuSim:
         # --- move bullets, cull off-screen + past lifetime ---
         self.b_pos = self.b_pos + self.b_vel
         self.b_age = self.b_age + 1.0
-        on = ((self.b_pos[..., 0] > -18) & (self.b_pos[..., 0] < PW + 18) &
-              (self.b_pos[..., 1] > -18) & (self.b_pos[..., 1] < PH + 18) &
+        m = torch.where(self._wall_slot, 64.0, 18.0)         # wall spawns further out
+        on = ((self.b_pos[..., 0] > -m) & (self.b_pos[..., 0] < PW + m) &
+              (self.b_pos[..., 1] > -m) & (self.b_pos[..., 1] < PH + m) &
               (self.b_age < self._slot_life))
         self.b_active = self.b_active * on.float()
 
@@ -307,15 +428,185 @@ class DanmakuSim:
         self.b_rad = self.b_rad.scatter(1, idxf, crad.reshape(B, E * K))
         self.b_active = self.b_active.scatter(1, idxf, emit.reshape(B, E * K).float())
         self.b_age = self.b_age.scatter(1, idxf, torch.zeros(B, E * K, device=self.dev))
+        self.b_redir = self.b_redir.scatter(1, idxf, torch.zeros(B, E * K, device=self.dev))
         self.b_active[:, self.dump] = 0.0
 
         self.cursor = torch.where(due, (self.cursor + self.e_nspawn) % self.SPE, self.cursor)
         self.e_ang = self.e_ang + due.float() * self.e_dang
 
-        # --- collision ---
+        # --- top-right CONE: one-shot 50% redirect at t=1s (360 deg) ---
+        tr_due = (self._tr_cone_slot[None, :] & (self.b_age >= TR_REDIR_AGE) &
+                  (self.b_redir < 0.5) & (self.b_active > 0.5))          # [B,N]
+        roll = torch.rand(B, self.N, generator=self.g, device=d) < 0.5
+        do_rd = tr_due & roll
+        rang = torch.rand(B, self.N, generator=self.g, device=d) * TAU
+        rspd = self.b_vel.norm(dim=2, keepdim=True)
+        rvel = torch.stack([torch.cos(rang), torch.sin(rang)], -1) * rspd
+        self.b_vel = torch.where(do_rd[:, :, None], rvel, self.b_vel)
+        self.b_redir = torch.where(tr_due, torch.ones_like(self.b_redir), self.b_redir)
+
+        # --- enemies: waves fly in, hover, leave ---
+        frs = self.frame.squeeze(1)                              # [B]
+        wave_due = ((frs % WAVE_PERIOD) < 1.0) & (frs > 1.0)     # [B]
+        NW = EN_PER_WAVE
+        ek = self._ek[None, :]                                   # [1,NW]
+        n_wave = self._ri(4, NW + 1, B, 1)                       # [B,1] -> 4,5,6
+        mkw = wave_due[:, None] & (ek < n_wave)                  # [B,NW]
+        edge = self._ri(0, 3, B, NW)
+        tx = self._r(B, NW, lo=PX_LO + 30, hi=PX_HI - 30)
+        sy = self._r(B, NW, lo=PY_LO + 20, hi=PY_LO + 170)
+        spx = torch.where(edge == 0, tx, torch.where(edge == 1,
+              torch.full_like(tx, -28.0), torch.full_like(tx, PW + 28.0)))
+        spy = torch.where(edge == 0, torch.full_like(sy, -28.0), sy)
+        spos = torch.stack([spx, spy], -1)                       # [B,NW,2]
+        stgt = torch.stack([self._r(B, NW, lo=PX_LO + 40, hi=PX_HI - 40),
+                            self._r(B, NW, lo=PY_LO + 40, hi=CY + 50)], -1)
+        v0 = stgt - spos
+        v0 = v0 / v0.norm(dim=2, keepdim=True).clamp(min=1e-3) * EN_FLY_SPEED
+        slot = ((self.en_cursor[:, None] + ek) % MAXE).long()    # [B,NW]
+        s2 = slot[:, :, None].expand(B, NW, 2)
+        wd = wave_due[:, None]                                   # [B,1] gate: only
+        wd2 = wd[:, :, None]                                     # touch slots on a wave
+        self.en_pos = torch.where(wd2, self.en_pos.scatter(1, s2, spos), self.en_pos)
+        self.en_tgt = torch.where(wd2, self.en_tgt.scatter(1, s2, stgt), self.en_tgt)
+        self.en_vel = torch.where(wd2, self.en_vel.scatter(1, s2, v0), self.en_vel)
+        self.en_hp = torch.where(wd, self.en_hp.scatter(
+            1, slot, torch.full((B, NW), EN_HP, device=d)), self.en_hp)
+        self.en_phase = torch.where(wd, self.en_phase.scatter(
+            1, slot, torch.zeros(B, NW, device=d)), self.en_phase)
+        self.en_active = torch.where(wd, self.en_active.scatter(
+            1, slot, mkw.float()), self.en_active)
+        self.en_cursor = torch.where(wave_due, (self.en_cursor + NW) % MAXE, self.en_cursor)
+
+        ea = self.en_active > 0.5
+        to_t = self.en_tgt - self.en_pos
+        dt = to_t.norm(dim=2)                                    # [B,MAXE]
+        arrived = ea & (self.en_phase < 0.5) & (dt < 6.0)
+        self.en_phase = torch.where(arrived, torch.ones_like(self.en_phase), self.en_phase)
+        self.en_timer = torch.where(arrived, torch.full_like(self.en_timer,
+                                    float(EN_HOVER_FRAMES)), self.en_timer)
+        hov = ea & (self.en_phase > 0.5) & (self.en_phase < 1.5)
+        self.en_timer = torch.where(hov, self.en_timer - 1.0, self.en_timer)
+        self.en_phase = torch.where(hov & (self.en_timer <= 0.0),
+                                    torch.full_like(self.en_phase, 2.0), self.en_phase)
+        v_fly = torch.where(dt[:, :, None] > 1e-3,
+                            to_t / dt[:, :, None].clamp(min=1e-3) * EN_FLY_SPEED,
+                            torch.zeros_like(to_t))
+        aw = self.en_pos - torch.tensor([CX, CY], device=d)
+        v_leave = torch.stack([torch.sign(aw[..., 0]) * 0.9,
+                               torch.full_like(aw[..., 1], EN_FLY_SPEED)], -1)
+        evel = torch.where(self.en_phase[:, :, None] < 0.5, v_fly,
+               torch.where(self.en_phase[:, :, None] < 1.5,
+                           torch.zeros_like(v_fly), v_leave))
+        self.en_pos = self.en_pos + evel * ea[:, :, None].float()
+        eoff = ((self.en_pos[..., 0] < -44) | (self.en_pos[..., 0] > PW + 44) |
+                (self.en_pos[..., 1] < -44) | (self.en_pos[..., 1] > PH + 44))
+        self.en_active = self.en_active * (~eoff).float() * (self.en_hp > 0.0).float()
+
+        # SHOOT auto-hits the nearest active, ON-SCREEN enemy for 1 dmg/s (no
+        # projectiles). No aim needed, but the enemy has to have flown in.
+        ea = self.en_active > 0.5
+        on_screen = ((self.en_pos[..., 0] > PX_LO) & (self.en_pos[..., 0] < PX_HI) &
+                     (self.en_pos[..., 1] > 0.0) & (self.en_pos[..., 1] < PY_HI))
+        shootable = ea & on_screen
+        ed = torch.where(shootable, (self.en_pos - self.player[:, None, :]).norm(dim=2),
+                         torch.full((B, MAXE), 1e9, device=d))
+        near_i = ed.argmin(dim=1)                                # [B]
+        near_d = ed.gather(1, near_i[:, None]).squeeze(1)
+        hp_b = self.en_hp.gather(1, near_i[:, None]).squeeze(1).clamp(min=0.0)
+        dmg = torch.minimum((near_d < 1e8).float() * shoot.squeeze(1) * EN_DPS, hp_b)  # [B]
+        self.en_hp = self.en_hp.scatter_add(1, near_i[:, None], -dmg[:, None])
+        hp_after = self.en_hp.gather(1, near_i[:, None]).squeeze(1)
+        killed = (hp_b > 0.0) & (hp_after <= 0.0)                # [B] nearest enemy just died
+        kpos = self.en_pos.gather(1, near_i[:, None, None].expand(-1, 1, 2)).squeeze(1)  # [B,2]
+
+        # --- P items: spawn on kill, fall under gravity, collect on touch ---
+        itk = self._itk[None, :]                                 # [1,IT_PER_KILL]
+        islot = ((self.it_cursor[:, None] + itk) % IT_MAX).long()  # [B,IT_PER_KILL]
+        is2 = islot[:, :, None].expand(B, IT_PER_KILL, 2)
+        iang = self._r(B, IT_PER_KILL, lo=-0.6, hi=0.6)
+        ipos = kpos[:, None, :].expand(B, IT_PER_KILL, 2)
+        ivel = torch.stack([torch.sin(iang) * 1.4,
+                            torch.full_like(iang, IT_POP_VY)], -1)
+        km = killed[:, None].expand(B, IT_PER_KILL)              # [B,IT_PER_KILL]
+        cur_ip = torch.gather(self.it_pos, 1, is2)
+        cur_iv = torch.gather(self.it_vel, 1, is2)
+        cur_ia = torch.gather(self.it_active, 1, islot)
+        self.it_pos = self.it_pos.scatter(1, is2, torch.where(km[:, :, None], ipos, cur_ip))
+        self.it_vel = self.it_vel.scatter(1, is2, torch.where(km[:, :, None], ivel, cur_iv))
+        self.it_active = self.it_active.scatter(
+            1, islot, torch.where(km, torch.ones_like(cur_ia), cur_ia))
+        self.it_cursor = torch.where(killed, (self.it_cursor + IT_PER_KILL) % IT_MAX,
+                                     self.it_cursor)
+
+        ia = self.it_active > 0.5
+        nv = self.it_vel.clone()
+        nv[..., 1] = (nv[..., 1] + IT_GRAVITY).clamp(max=IT_TERM_VY)
+        self.it_vel = torch.where(ia[:, :, None], nv, torch.zeros_like(self.it_vel))
+        self.it_pos = self.it_pos + self.it_vel * ia[:, :, None].float()
+        idist = (self.it_pos - self.player[:, None, :]).norm(dim=2)   # [B,IT_MAX]
+        got = ia & (idist < IT_COLLECT_R)
+        n_got = got.sum(dim=1).float()                           # [B]
+        it_off = self.it_pos[..., 1] > PY_HI + 24.0
+        self.it_active = self.it_active * (~got).float() * (~it_off).float()
+
+        # --- wall attack: a half-width curtain sweeps across every WALL_PERIOD ---
+        wall_due = ((frs % WALL_PERIOD) < 1.0) & (frs > 1.0)     # [B]
+        wk = self._walln[None, :]                                # [1,WALL_N]
+        wdir = self._ri(0, 4, B, 1)                              # 0 L>R 1 R>L 2 T>B 3 B>T
+        horiz = wdir <= 1.5                                      # curtain spans Y
+        half = torch.where(horiz, torch.full_like(wdir, PH * 0.5),
+                           torch.full_like(wdir, PW * 0.5))      # [B,1]
+        gap_first = self._ri(0, 2, B, 1) > 0.5
+        seg0 = torch.where(gap_first, half, torch.zeros_like(half))
+        perp = seg0 + (wk / (WALL_N - 1)) * half                 # [B,WALL_N] along spanned axis
+        woff = WALL_OFF   # off-screen; wall slots have a wide cull margin (telegraph)
+        wx = torch.where(wdir <= 1.5,
+                         torch.where(wdir < 0.5, torch.full_like(perp, -woff),
+                                     torch.full_like(perp, PW + woff)),
+                         perp)
+        wy = torch.where(wdir >= 1.5,
+                         torch.where(wdir < 2.5, torch.full_like(perp, -woff),
+                                     torch.full_like(perp, PH + woff)),
+                         perp)
+        z = torch.zeros_like(perp)
+        wvx = torch.where(wdir < 0.5, torch.full_like(perp, WALL_SPEED),
+              torch.where(wdir < 1.5, torch.full_like(perp, -WALL_SPEED), z))
+        wvy = torch.where((wdir > 1.5) & (wdir < 2.5), torch.full_like(perp, WALL_SPEED),
+              torch.where(wdir > 2.5, torch.full_like(perp, -WALL_SPEED), z))
+        wslot = (self._wall_base + (self.wall_cursor[:, None] + wk) % WALL_SLOTS).long()
+        ws2 = wslot[:, :, None].expand(B, WALL_N, 2)
+        wm = wall_due[:, None].expand(B, WALL_N)                 # [B,WALL_N]
+        wpos = torch.stack([wx, wy], -1)
+        wvel = torch.stack([wvx, wvy], -1)
+        cur_wp = torch.gather(self.b_pos, 1, ws2)
+        cur_wv = torch.gather(self.b_vel, 1, ws2)
+        cur_wa = torch.gather(self.b_active, 1, wslot)
+        cur_wr = torch.gather(self.b_rad, 1, wslot)
+        cur_wg = torch.gather(self.b_age, 1, wslot)
+        self.b_pos = self.b_pos.scatter(1, ws2, torch.where(wm[:, :, None], wpos, cur_wp))
+        self.b_vel = self.b_vel.scatter(1, ws2, torch.where(wm[:, :, None], wvel, cur_wv))
+        self.b_active = self.b_active.scatter(
+            1, wslot, torch.where(wm, torch.ones_like(cur_wa), cur_wa))
+        self.b_rad = self.b_rad.scatter(
+            1, wslot, torch.where(wm, torch.full_like(cur_wr, WALL_RAD), cur_wr))
+        self.b_age = self.b_age.scatter(
+            1, wslot, torch.where(wm, torch.zeros_like(cur_wg), cur_wg))
+        self.wall_cursor = torch.where(wall_due,
+                                       (self.wall_cursor + WALL_N) % WALL_SLOTS,
+                                       self.wall_cursor)
+
+        # --- collision (bullets + enemy bodies) ---
         dist = (self.b_pos - self.player[:, None, :]).norm(dim=2)
-        hit = ((self.b_active > 0.5) & (dist < self.b_rad + 2.0)).any(dim=1, keepdim=True)
+        bhitmask = (self.b_active > 0.5) & (dist < self.b_rad + 2.0)
+        hit = bhitmask.any(dim=1, keepdim=True)
+        wall_hit = (bhitmask & self._wall_slot[None, :]).any(dim=1, keepdim=True)
+        en_d = (self.en_pos - self.player[:, None, :]).norm(dim=2)
+        en_hit = (ea & (en_d < EN_RADIUS + 3.0)).any(dim=1, keepdim=True)
+        hit = hit | en_hit
         newly_dead = (self.alive > 0.5) & hit
+        self.death_wall = (newly_dead & wall_hit).squeeze(1).float()
+        self.death_enemy = (newly_dead & en_hit & ~wall_hit).squeeze(1).float()
         self.alive = self.alive * (~hit).float()
         self.frame = self.frame + 1.0
         done = newly_dead | (self.frame >= self.max_frames)
@@ -323,18 +614,27 @@ class DanmakuSim:
         rew = torch.where(newly_dead, torch.full_like(self.alive, self.death_rew),
               torch.where(alive_now, torch.full_like(self.alive, self.alive_rew),
                           torch.zeros_like(self.alive)))
+        rew = rew + (EN_DMG_REW * dmg + IT_REW * n_got)[:, None] * alive_now.float()
         return rew.squeeze(1), done.squeeze(1)
 
     def step(self, actions):
         a = actions.long()
         mv = _DIRS.to(self.dev)[a % 9]
         focus = ((a // 9) % 2).float()[:, None]
+        shoot = ((a // 18) % 2).float()[:, None]
         rew_acc = torch.zeros(self.B, device=self.dev)
         done_acc = torch.zeros(self.B, dtype=torch.bool, device=self.dev)
+        dw_acc = torch.zeros(self.B, device=self.dev)
+        de_acc = torch.zeros(self.B, device=self.dev)
         for _ in range(self.frame_skip):
-            rew, done = self._advance_c(mv, focus)
+            rew, done = self._advance_c(mv, focus, shoot)
+            newly = done.bool() & (~done_acc)
+            dw_acc = dw_acc + (self.death_wall > 0.5) * newly.float()
+            de_acc = de_acc + (self.death_enemy > 0.5) * newly.float()
             rew_acc = rew_acc + rew * (~done_acc).float()
             done_acc = done_acc | done.bool()
+        self.step_death_wall = dw_acc
+        self.step_death_enemy = de_acc
         if done_acc.any():
             self._spawn(done_acc[:, None].float())
         return self._obs(), rew_acc, done_acc

@@ -99,6 +99,25 @@ constexpr uintptr_t ENEMY_POS       = 0x2B0C;       // zFloat3
 constexpr uintptr_t ENEMY_LIFE      = 0x2BB8;       // int32
 constexpr uintptr_t ENEMY_MAXLIFE   = 0x2BBC;       // int32
 
+// --- zItemManager (static; verified live vs th-re-data) ---
+// Items enemies drop on death (P/point/cherry...) + spellcard-capture bonuses.
+// ItemManager::on_tick is called by BulletManager::on_tick (0x432990).
+constexpr uintptr_t ITEM_MANAGER      = 0x00575C70;  // struct zItemManager
+constexpr uintptr_t IM_ITEMS          = 0x00000000;  // zItem items[0x44C]
+constexpr uintptr_t IM_ITEM_STRIDE    = 0x00000288;  // sizeof(zItem) = 648
+constexpr uintptr_t IM_ITEM_MAX       = 0x44C;       // 1100 slots
+constexpr uintptr_t IM_NEXT_INDEX     = 0x000AE2E8;  // int32 spawn cursor (wraps at 0x44C)
+constexpr uintptr_t IM_ITEM_COUNT     = 0x000AE2EC;  // int32 live item count
+//   within a zItem (stride 0x288):
+constexpr uintptr_t ITEM_POS          = 0x24C;       // float x, y, z
+constexpr uintptr_t ITEM_VEL          = 0x258;       // float vx, vy, vz
+constexpr uintptr_t ITEM_TYPE         = 0x27C;       // uint8: 0 P-small 1 point
+                                                     // 2 P-big 3 bomb 4 full-power
+                                                     // 5 1up 6 star 7 cherry
+                                                     // 8 cherry-petal 9 cherry-bullet
+constexpr uintptr_t ITEM_IN_USE       = 0x27D;       // uint8 (slot active)
+constexpr uintptr_t ITEM_STATE        = 0x27F;       // uint8 (0 falling; changes on auto-collect)
+
 // --- zGui ---
 constexpr uintptr_t GUI_BOSS_PRESENT = 0x24;  // BOOL
 constexpr uintptr_t GUI_BOSS_HP_MAX  = 0x28;  // float (life-bar sprite size)
