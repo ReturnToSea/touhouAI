@@ -301,7 +301,9 @@ class Watcher:
             sc.blit(self.f7.render(lbl, True, (240, 180, 180) if not self.paused else (180, 240, 180)),
                     (b.x + 6, b.y + 2))
             pygame.display.flip()
-            self.clock.tick(12 if self.paused else 60)   # STOPPED: idle the render loop too
+            # sim only advances ~20/s, so 30 fps redraw is already smooth; STOPPED
+            # idles the render loop right down.
+            self.clock.tick(12 if self.paused else 30)
         th.join(timeout=1.0)
         pygame.quit()
 
