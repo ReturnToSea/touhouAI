@@ -60,20 +60,22 @@ Train a dodging policy in a **fully-vectorized made-up-danmaku sim** on the GPU,
 then drop it into the real game.
 
 - `sim/danmaku.py` — thousands of parallel episodes as batched tensors on an
-  RTX 5070 Ti. A fixed stage of procedural emitters (cones + sprays in every
-  corner — the top-right cone's bullets get one 50 % chance to snap to a random
-  heading after 1 s — a fast sweeping line, a bouncing ring emitter, and one
-  that orbits the perimeter), waves of 9–15 fly-in enemies (1 HP, lethal on
-  contact) that holding SHOOT auto-damages and that drop P items which raise a
-  power meter (→ more shot damage), and a solid half-width "curtain" of bullets
-  that sweeps across from a random edge every ~7 s. 180 s episode cap. Player
-  physics are measured from the real game (`sim/physics.json`).
+  RTX 5070 Ti. A fixed stage of procedural emitters (cone + spray in every
+  corner, placed *outside* the field — the top-right cone's bullets get one 50 %
+  chance to snap to a random heading after 1 s — a sweeping line, a bouncing
+  ring emitter, and one that orbits). Waves of 9–15 fly-in enemies (1 HP, lethal
+  on contact) that each fire 2 aimed bursts; **FRONT-ONLY shooting** (hits only
+  an enemy directly above, no auto-aim) so it must position to deal damage;
+  kills drop P items that raise a power meter (→ more damage). Every 45–60 s a
+  **spam phase**: roaming top-screen spawners rain pellets for 10 s while all
+  else pauses. **Real th07 bullet hitboxes** (pellet 2.0 / ball 3.0 px, player
+  1.8 — measured via `native/probe_bullets.py`). 240 s episode cap. Player
+  physics measured from the real game (`sim/physics.json`).
 - `sim/train.py --algo ppo|es` — PPO (or antithetic ES). The actor's architecture
   is identical to `native/policy.py MLPPolicy`, so the result loads straight into
   the real env.
-- `sim/hud.py <run>` — live survival-vs-steps curve. `train.py` also logs a
-  death-cause breakdown (`wall % / enemy %`) so it's clear what's killing the
-  policy.
+- `sim/hud.py <run>` — live survival-vs-steps curve + a death-cause split
+  (emitter / spam / enemy) so it's clear what's killing the policy.
 - `sim/watch_sim.py <best.pt> [--follow]` — watch the sim policy play, with the
   same overlay as `viz.py` plus items and a predicted-bullet-track macro view,
   reloading the checkpoint as it trains.
@@ -87,13 +89,15 @@ reactive dodging that neither live-PPO nor evolution produced across ~10 runs.
 (`env.reset()` only rewinds stage-1 snapshots, so a long-surviving policy
 crashes the game on the *next* reset — use `--episodes 1` for `--until-death`.)
 
-Since v12 the sim stage has been reworked several times (global map added then
-dropped, wall + P-item power meter, a realism redesign reverted). The current
-run `ppo_v21` transfers to ~105 s — a competent dodger that drifts to a corner
-and stalls. Two known sim gaps to close in v22: enemies don't shoot (so the
-policy crowds them and eats point-blank fire in the real game), and the wall
-curtain is wider than the perception window (so its gap can't be seen and
-dodged). See `sim/README.md` for the full status table.
+Since v12 the sim has been reworked many times (global map added then dropped,
+a wall attack added then removed, real bullet hitboxes, a spam phase, front-only
+shooting, enemy aimed bursts). `ppo_v22` (spam phase, real hitboxes) transferred
+to **368 s / 1.58 M** at only 82M steps. `ppo_v25` (+ front-only shot, 1000M
+steps) regressed to 159 s / 100 k — the front-only shot plus weak kill/P-item
+rewards made it stop engaging and just survive. `ppo_v26` (training now)
+rebalances the rewards, and `env.py` now reads the stage-1 midboss/boss from
+`EM_BOSSES[0]` (PCB doesn't put them in the enemy array) so front-only shooting
+can target them. See `sim/README.md` for the full status table.
 
 Needs a CUDA PyTorch venv (`.venv-cuda`, kept separate so the live-game venv
 stays untouched):
