@@ -41,6 +41,10 @@ RUNS = HERE.parent / "runs_sim"
 _u32 = ctypes.windll.user32
 
 
+class _Stalled(Exception):
+    """The in-game score froze while alive - an unadvanced dialogue. Drop it."""
+
+
 def _minimise_pid_windows(pid: int) -> None:
     """SW_SHOWMINNOACTIVE th07's windows - it keeps ticking in the background
     (no defocus pause in this config) and stays out of the way."""
@@ -106,12 +110,20 @@ def one_episode(env, pol, frame_skip, cap, hb=None):
         sc = int(s.score)
         score_stall = score_stall + 1 if sc == prev_score else 0
         prev_score = sc
+        # score frozen for ~50s while alive = the game stalled (an unadvanced
+        # in-game dialogue - the DLL auto-skips menus but not those). End here and
+        # report the survival time as of the freeze, not a fake full run.
+        if score_stall > 1000 and steps > 400:
+            at = (steps - score_stall) * frame_skip / 60.0
+            if hb:
+                hb(f"    STALLED at ~{at:.0f}s (score {sc} frozen, stage {s.stage}, "
+                   f"boss {s.boss_present}/{s.boss_hp_max:.0f}) - dropping (env bug, "
+                   f"needs DLL dialogue-skip)")
+            raise _Stalled(at)
         if hb and steps % 500 == 0:
             hb(f"    ... {steps} st  {fr/60:.0f}s  score {sc}  stage {s.stage}  "
-               f"lives {s.lives:.0f}  gm {s.gamemode}  "
-               f"boss {s.boss_present}({s.boss_hp:.0f}/{s.boss_hp_max:.0f})  "
-               f"player ({s.player_x:.0f},{s.player_y:.0f}) pstate {s.player_state}  "
-               f"{'SCORE-STALLED' if score_stall > 800 else ''}")
+               f"lives {s.lives:.0f}  boss {s.boss_present}({s.boss_hp:.0f}/{s.boss_hp_max:.0f})  "
+               f"player ({s.player_x:.0f},{s.player_y:.0f})")
     surv = steps * frame_skip / 60.0
     return surv, int(info.get("score", 0)), (surv >= cap - 1.0)
 
@@ -132,7 +144,7 @@ def main():
     ckpt = run_dir / args.checkpoint
     print(f"transfer daemon: {args.run}  <- {args.checkpoint}   -> {out.name}", flush=True)
 
-    n = 0
+    n = n_stall = 0
     while True:
         if not ckpt.exists():
             print(f"waiting for {ckpt} ...", flush=True)
@@ -153,6 +165,9 @@ def main():
             _append_row(out, [time.time(), steps, surv, score, float(censored)])
             print(f"[{n:4d}]  {steps/1e6:6.1f}M steps   {surv:6.1f}s{'+' if censored else ' '}  "
                   f"score {score:>9d}   ({time.time() - t0:.0f}s wall)", flush=True)
+        except _Stalled:
+            n_stall += 1
+            print(f"    (dropped - {n_stall} stalled of {n + n_stall} total)", flush=True)
         except Exception as e:
             print(f"episode failed: {type(e).__name__}: {e}", flush=True)
             time.sleep(5)
