@@ -70,7 +70,12 @@ def main():
     ap.add_argument("--max-ep-seconds", type=float, default=180.0)
     ap.add_argument("--name", default="ppo_real_dll")
     ap.add_argument("--warmstart", type=Path, default=None)
-    ap.add_argument("--lr", type=float, default=1e-4)
+    ap.add_argument("--lr", type=float, default=5e-5,
+                    help="fine-tuning a warm-started actor - keep low")
+    ap.add_argument("--critic-warmup", type=int, default=1_000_000,
+                    help="steps to train ONLY the critic (actor frozen) - a "
+                    "warm-started actor + random critic otherwise dips hard")
+    ap.add_argument("--anneal-lr", action="store_true")
     ap.add_argument("--gamma", type=float, default=0.995)
     ap.add_argument("--lam", type=float, default=0.95)
     ap.add_argument("--clip", type=float, default=0.2)
@@ -139,7 +144,14 @@ def main():
                 gae = delta + args.gamma * args.lam * nonterm * gae
                 adv[t] = gae
             ret = adv + val
+            ev = 1.0 - (ret - val).var() / (ret.var() + 1e-8)   # critic health
         adv = (adv - adv.mean()) / (adv.std() + 1e-8)
+
+        warming = total < args.critic_warmup      # train ONLY the critic
+        if args.anneal_lr and not warming:
+            lr_now = args.lr * max(0.1, 1.0 - total / args.steps)
+            for g in opt.param_groups:
+                g["lr"] = lr_now
 
         bo = o.reshape(-1, OBS_DIM); ba = a.reshape(-1)
         blp = logp_old.reshape(-1); badv = adv.reshape(-1)
@@ -148,16 +160,20 @@ def main():
         for _ in range(args.epochs):
             for s in range(0, n, args.minibatch):
                 idx = torch.randint(0, n, (args.minibatch,))
-                lg = ac.actor(bo[idx])
-                lp = torch.log_softmax(lg, -1).gather(-1, ba[idx][:, None]).squeeze(-1)
-                ratio = (lp - blp[idx]).exp()
-                pg = -torch.min(ratio * badv[idx],
-                                torch.clamp(ratio, 1 - args.clip, 1 + args.clip) * badv[idx]).mean()
                 v = ac.critic(bo[idx]).squeeze(-1)
                 vcl = bval[idx] + (v - bval[idx]).clamp(-args.clip, args.clip)
                 vl = 0.5 * torch.max((v - bret[idx]) ** 2, (vcl - bret[idx]) ** 2).mean()
-                ent = -(torch.log_softmax(lg, -1) * torch.softmax(lg, -1)).sum(-1).mean()
-                loss = pg + args.vf_coef * vl - args.ent_coef * ent
+                if warming:
+                    loss = vl
+                    ent = torch.zeros(())
+                else:
+                    lg = ac.actor(bo[idx])
+                    lp = torch.log_softmax(lg, -1).gather(-1, ba[idx][:, None]).squeeze(-1)
+                    ratio = (lp - blp[idx]).exp()
+                    pg = -torch.min(ratio * badv[idx],
+                                    torch.clamp(ratio, 1 - args.clip, 1 + args.clip) * badv[idx]).mean()
+                    ent = -(torch.log_softmax(lg, -1) * torch.softmax(lg, -1)).sum(-1).mean()
+                    loss = pg + args.vf_coef * vl - args.ent_coef * ent
                 opt.zero_grad(set_to_none=True)
                 loss.backward()
                 nn.utils.clip_grad_norm_(ac.parameters(), 0.5)
@@ -166,10 +182,12 @@ def main():
         ml = float(np.mean(recent_len[-200:])) if recent_len else 0.0
         surv_s = ml * args.frame_skip / 60.0
         sps = total / (time.perf_counter() - t0)
+        tag = "critic-warmup " if warming else ""
         print(f"upd {upd:4d}  {total/1e6:6.2f}M  {sps:6.0f}/s  collect {collect_s:4.1f}s  "
-              f"surv {surv_s:6.1f}s  ep_ends {ep_ends:3d}  ent {ent.item():.2f}  "
-              f"ret {np.mean(recent_ret[-200:]) if recent_ret else 0:.0f}", flush=True)
-        hist.append((time.perf_counter() - t0, total, surv_s, float(ent.item())))
+              f"{tag}surv {surv_s:6.1f}s  ep_ends {ep_ends:3d}  ent {float(ent):.2f}  "
+              f"ev {float(ev):+.2f}  ret {np.mean(recent_ret[-200:]) if recent_ret else 0:.0f}",
+              flush=True)
+        hist.append((time.perf_counter() - t0, total, surv_s, float(ent), float(ev)))
         np.save(run / "history.npy", np.array(hist))
 
         if upd % 8 == 0:
