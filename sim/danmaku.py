@@ -549,43 +549,46 @@ class DanmakuSim:
         self.player = torch.stack([self.player[:, 0].clamp(PX_LO, PX_HI),
                                    self.player[:, 1].clamp(PY_LO, PY_HI)], 1)
 
-        # --- v27: resolve per-bullet MOTION PROFILE for emitter slots ----------
-        # b_vel is DERIVED each frame from (spawn heading + speed, motion type,
-        # param, age). Non-linear on purpose - breaks the obs's straight-line
-        # march so the policy reacts instead of trusting the prediction.
-        age = self.b_age.float()                                   # [B,N]
-        mt = self.b_mtype.float()
-        mp = self.b_mp.float()
-        h0 = self.b_head0
-        s0 = self.b_spd0
-        accel_f = (1.0 + mp * age).clamp(max=3.0)
-        decel_f = (1.0 - mp * age).clamp(min=0.35)
-        pulse_f = 1.0 + 0.5 * torch.sin(age * mp)
-        _fz_a, _fz_b = FREEZE_T0, FREEZE_T0 + FREEZE_STOP
+        # --- v27: resolve per-bullet MOTION PROFILE for the emitter slots ------
+        # b_vel for emitter slots is DERIVED each frame from (spawn heading +
+        # speed, motion type, param, age). Non-linear on purpose - breaks the
+        # obs's straight-line march so the policy reacts to real state instead of
+        # trusting the prediction. Sliced to [:, :SB] (spam / enemy bursts keep
+        # their own straight b_vel) to keep the transient memory down.
+        SB = self._spam_base
+        age = self.b_age[:, :SB].float()                           # [B,SB]
+        mt = self.b_mtype[:, :SB].float()
+        mp = self.b_mp[:, :SB].float()
+        s0 = self.b_spd0[:, :SB]
+        _fz_b = FREEZE_T0 + FREEZE_STOP
         _fz_c = _fz_b + FREEZE_HOLD
-        freeze_f = torch.where(age < _fz_a, torch.ones_like(age),
-                   torch.where(age < _fz_b, ((_fz_b - age) / FREEZE_STOP).clamp(0.0, 1.0),
-                   torch.where(age < _fz_c, torch.zeros_like(age), torch.ones_like(age))))
-        spd = s0 * torch.where(mt == M_ACCEL, accel_f,
-                  torch.where(mt == M_DECEL, decel_f,
-                  torch.where(mt == M_PULSE, pulse_f,
-                  torch.where(mt == M_FREEZE, freeze_f, torch.ones_like(age)))))
-        # heading: SLITHER oscillates, ARC turns, HOMING steers toward the player
+        spd_fac = torch.where(mt == M_ACCEL, (1.0 + mp * age).clamp(max=3.0),
+                  torch.where(mt == M_DECEL, (1.0 - mp * age).clamp(min=0.35),
+                  torch.where(mt == M_PULSE, 1.0 + 0.5 * torch.sin(age * mp),
+                  torch.where(mt == M_FREEZE,
+                              ((_fz_b - age) / FREEZE_STOP).clamp(0.0, 1.0)
+                              + (age >= _fz_c).float(),
+                              torch.ones_like(age)))))
+        spd = s0 * spd_fac.clamp(0.0, 3.0)
+        # heading: SLITHER oscillates, ARC turns, HOMING steers at the player
         # then locks, FREEZE re-aims at the player once when the hold ends.
-        rel = self.player[:, None, :] - self.b_pos                 # [B,N,2]
+        rel = self.player[:, None, :] - self.b_pos[:, :SB]         # [B,SB,2]
         tgt_h = torch.atan2(rel[..., 1], rel[..., 0])
-        fz_redir = ((mt == M_FREEZE) & (age >= _fz_c) & (self.b_redir < 0.5)
-                    & (self.b_active > 0.5))
-        self.b_head0 = torch.where(fz_redir, tgt_h, self.b_head0)
-        self.b_redir = torch.where(fz_redir, torch.ones_like(self.b_redir), self.b_redir)
-        h0 = self.b_head0
+        h0 = self.b_head0[:, :SB]
+        fz_redir = ((mt == M_FREEZE) & (age >= _fz_c) & (self.b_redir[:, :SB] < 0.5)
+                    & (self.b_active[:, :SB] > 0.5))
+        h0 = torch.where(fz_redir, tgt_h, h0)
+        self.b_head0 = torch.cat([h0, self.b_head0[:, SB:]], dim=1)
+        self.b_redir = torch.cat([torch.where(fz_redir, torch.ones_like(h0),
+                                              self.b_redir[:, :SB].float()).half(),
+                                  self.b_redir[:, SB:]], dim=1)
         dh = torch.remainder(tgt_h - h0 + math.pi, TAU) - math.pi
         home_h = h0 + dh.clamp(-0.7, 0.7) * (mp * torch.clamp(age, max=HOMING_FRAMES))
         head = torch.where(mt == M_SLITHER, h0 + SLITHER_AMP * torch.sin(age * mp),
                torch.where(mt == M_ARC, h0 + mp * age,
                torch.where(mt == M_HOMING, home_h, h0)))
         mvel = torch.stack([spd * torch.cos(head), spd * torch.sin(head)], -1)
-        self.b_vel = torch.where(self._emit_slot[None, :, None], mvel, self.b_vel)
+        self.b_vel = torch.cat([mvel, self.b_vel[:, SB:]], dim=1)
 
         # --- move bullets (spam pellets get a 2x burst for their first 0.2 s),
         #     cull off-screen + past lifetime ---
