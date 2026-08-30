@@ -91,6 +91,7 @@ def one_episode(env, pol, frame_skip, cap, hb=None):
     info = {"score": 0}
     t0 = time.time()
     prev_frame, stall = -1, 0
+    prev_score, score_stall = 0, 0
     while not done:
         a = int(pol.act(obs))
         obs, _, term, trunc, info = env.step(a)
@@ -101,8 +102,16 @@ def one_episode(env, pol, frame_skip, cap, hb=None):
         prev_frame = fr
         if stall > 600:
             raise RuntimeError(f"game frame counter stuck at step {steps}")
+        s = env.h.s
+        sc = int(s.score)
+        score_stall = score_stall + 1 if sc == prev_score else 0
+        prev_score = sc
         if hb and steps % 500 == 0:
-            hb(f"    ... {steps} steps ({fr/60:.0f}s in-game, {time.time()-t0:.0f}s wall)")
+            hb(f"    ... {steps} st  {fr/60:.0f}s  score {sc}  stage {s.stage}  "
+               f"lives {s.lives:.0f}  gm {s.gamemode}  "
+               f"boss {s.boss_present}({s.boss_hp:.0f}/{s.boss_hp_max:.0f})  "
+               f"player ({s.player_x:.0f},{s.player_y:.0f}) pstate {s.player_state}  "
+               f"{'SCORE-STALLED' if score_stall > 800 else ''}")
     surv = steps * frame_skip / 60.0
     return surv, int(info.get("score", 0)), (surv >= cap - 1.0)
 
