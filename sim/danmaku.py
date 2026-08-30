@@ -126,17 +126,18 @@ SPAM_FIRE_FRAMES = 600      # 10 s of firing
 SPAM_COOLDOWN = 180         # 3 s before normal fire resumes (most pellets gone by then)
 SPAM_N0 = 3                 # spawners in the first phase; +1 each phase
 SPAM_MAX = 6               # slot / state cap (a 180 s episode sees ~3 phases: 3, 4, 5)
-SPAM_SLOTS = 3000           # pellet pool: with the fired-count cursor + a 1.0 px/f
-                            # min speed, even the slowest pellet completes its fall
-                            # before its ring slot recycles (up to ~5 spawners)
+SPAM_SLOTS = 3400           # pellet pool: with the fired-count cursor + a 1.0 px/f
+                            # min speed + downward-only emission, the slowest pellet
+                            # completes its fall before its ring slot recycles
 SPAM_FIRE_EVERY = 12        # 5 attacks / s
 SPAM_PER_ATTACK = 20        # pellets per spawner per attack
-SPAM_RING_R = 18.0          # pellets spawn on this ring around the spawner (fits 20 no-overlap)
+SPAM_RING_R = 32.0          # pellets spawn on this ring (fits 20 over a 150 deg fan)
+SPAM_ARC = 2.6             # downward fan width, radians (~150 deg) - no up-going pellets
 SPAM_BASE_SPD = 2.0         # pellet speed = U(0.5, 2.0) * this  -> range 1.0 .. 4.0
 SPAM_BOOST_FRAMES = 12      # first 0.2 s at 2x the chosen speed
 SPAM_SPAWNER_VX = 0.75      # spawner drift speed (px/f), x only
 SPAM_SEG = 128.0            # reverse direction after drifting ~1/3 of the stage
-SPAM_Y = 100.0              # ~80% up the screen; per-spawner +-offset, no y motion
+SPAM_Y = 28.0               # near the TOP of the stage; small +-offset, no y motion
 _PELLET_HB = TH07_BULLETS["pellet"]["hitbox"]
 _BALL_HB = TH07_BULLETS["ball"]["hitbox"]
 
@@ -169,8 +170,8 @@ class DanmakuSim:
         self.b_pos = torch.full((B, self.N, 2), 1e4, device=d)
         self.b_vel = torch.zeros(B, self.N, 2, device=d)
         self.b_active = torch.zeros(B, self.N, device=d)
-        self.b_rad = torch.zeros(B, self.N, device=d)
-        self.b_age = torch.zeros(B, self.N, device=d)      # frames since spawn
+        # b_rad dropped: bullet hitbox is a per-SLOT constant -> self._slot_rad[N]
+        self.b_age = torch.zeros(B, self.N, device=d, dtype=torch.float16)   # frames since spawn
         self.cursor = torch.zeros(B, E, device=d)
 
         self.e_pos = torch.zeros(B, E, 2, device=d)
@@ -183,7 +184,6 @@ class DanmakuSim:
         self.e_phase = torch.zeros(B, E, device=d)
         self.e_nspawn = torch.ones(B, E, device=d) * 8
         self.e_spread = torch.zeros(B, E, device=d)        # CONE per-bullet fan
-        self.e_rad = torch.ones(B, E, device=d) * 3.0
         self.e_swctr = torch.zeros(B, E, device=d)         # LINE sweep centre / amp / rate
         self.e_swamp = torch.zeros(B, E, device=d)
         self.e_swrate = torch.zeros(B, E, device=d)
@@ -248,7 +248,17 @@ class DanmakuSim:
                            (torch.arange(self.N, device=d) < self._en_base))
         self._en_slot = ((torch.arange(self.N, device=d) >= self._en_base) &
                          (torch.arange(self.N, device=d) < self.dump))
-        self.b_redir = torch.zeros(B, self.N, device=d)     # 1 once the t=1s roll is done
+        self.b_redir = torch.zeros(B, self.N, device=d, dtype=torch.float16)  # TR-cone redirect flag
+
+        # per-slot bullet hitbox (radius): emitter slots use their emitter's type,
+        # spam slots = pellet, enemy-burst slots = ball. Constant across the batch.
+        self._slot_rad = torch.full((self.N,), _BALL_HB, device=d)
+        _em = torch.arange(self.N, device=d) < self._spam_base
+        self._slot_rad = torch.where(
+            _em, self._R_hitbox[slot_emit.clamp(max=E - 1)], self._slot_rad)
+        self._slot_rad = torch.where(self._spam_slot,
+                                     torch.full((self.N,), _PELLET_HB, device=d),
+                                     self._slot_rad)
 
         self._k = torch.arange(self.K, device=d).float()
         self._ebase = self._eidx.float() * self.SPE
@@ -351,8 +361,6 @@ class DanmakuSim:
         spread = torch.where(is_spray, self._r(B, E, lo=1.6, hi=2.5),
                              self._r(B, E, lo=0.09, hi=0.20))
         self.e_spread = torch.where(mbe, spread, self.e_spread)
-        # bullet radius = the real th07 hitbox for this emitter's bullet type
-        self.e_rad = torch.where(mbe, self._R_hitbox[None, :].expand(B, E), self.e_rad)
         self.e_ang = torch.where(mbe, self._r(B, E, lo=0, hi=TAU), self.e_ang)
         dang = torch.where(is_bring, torch.full((B, E), 0.06, device=d),
                            self._r(B, E, lo=-0.25, hi=0.25))
@@ -477,7 +485,7 @@ class DanmakuSim:
         act_k = spk < self.spam_n[:, None]                           # [B,SPAM_MAX] live spawners
         denom = (self.spam_n[:, None] - 1.0).clamp(min=1.0)
         x0 = PW * 0.20 + PW * 0.60 * spk / denom                     # evenly spread in x
-        y0 = SPAM_Y + self._r(B, SPAM_MAX, lo=-14.0, hi=14.0)
+        y0 = SPAM_Y + self._r(B, SPAM_MAX, lo=-6.0, hi=10.0)   # stay near the top
         dir0 = torch.where(self._r(B, SPAM_MAX) > 0.5, 1.0, -1.0)
         t3 = trig[:, None]
         self.sp_x = torch.where(t3, x0, self.sp_x)
@@ -500,15 +508,16 @@ class DanmakuSim:
         self.sp_x = nx.clamp(PX_LO + 8.0, PX_HI - 8.0)
         self.spam_t = torch.where(in_phase, self.spam_t + 1.0, self.spam_t)
 
-        # fire: SPAM_PER_ATTACK pellets/spawner every SPAM_FIRE_EVERY frames, on an
-        # evenly-spaced ring (+ jitter so they don't overlap), moving radially out,
-        # each at U(0.5, 2.0) x the base speed
+        # fire: SPAM_PER_ATTACK pellets/spawner every SPAM_FIRE_EVERY frames, evenly
+        # spread over a DOWNWARD ~150 deg fan (no up-going pellets), + small jitter
+        # so they don't overlap, each at U(0.5, 2.0) x the base speed
         fire_due = firing & ((self.spam_t % SPAM_FIRE_EVERY) < 1.0) & (self.spam_t > 0.5)
         NB = SPAM_MAX * SPAM_PER_ATTACK
         jj = self._spj[None, None, :]                                # [1,1,SPAM_PER_ATTACK]
-        rot = self._r(B, SPAM_MAX, 1, lo=0.0, hi=TAU)
-        jit = self._r(B, SPAM_MAX, SPAM_PER_ATTACK, lo=-0.28, hi=0.28)
-        sang = rot + (jj + jit) * (TAU / SPAM_PER_ATTACK)
+        wob = self._r(B, SPAM_MAX, 1, lo=-0.20, hi=0.20)             # small per-attack rotation
+        jit = self._r(B, SPAM_MAX, SPAM_PER_ATTACK, lo=-0.05, hi=0.05)
+        sang = (math.pi * 0.5) + wob + (jj + jit - (SPAM_PER_ATTACK - 1) * 0.5) * (
+            SPAM_ARC / (SPAM_PER_ATTACK - 1))                        # centre = straight down
         sspd = SPAM_BASE_SPD * self._r(B, SPAM_MAX, SPAM_PER_ATTACK, lo=0.5, hi=2.0)
         sdir = torch.stack([torch.cos(sang), torch.sin(sang)], -1)   # [B,SPAM_MAX,SPAM_PER_ATTACK,2]
         sp_pos = torch.stack([self.sp_x, self.sp_y], -1)            # [B,SPAM_MAX,2]
@@ -524,10 +533,9 @@ class DanmakuSim:
         si2 = idx_s[:, :, None].expand(B, NB, 2)
         self.b_pos = self.b_pos.scatter(1, si2, sbpos.reshape(B, NB, 2))
         self.b_vel = self.b_vel.scatter(1, si2, sbvel.reshape(B, NB, 2))
-        self.b_rad = self.b_rad.scatter(1, idx_s, torch.full((B, NB), _PELLET_HB, device=d))
         self.b_active = self.b_active.scatter(1, idx_s, semit.reshape(B, NB).float())
-        self.b_age = self.b_age.scatter(1, idx_s, torch.zeros(B, NB, device=d))
-        self.b_redir = self.b_redir.scatter(1, idx_s, torch.zeros(B, NB, device=d))
+        self.b_age = self.b_age.scatter(1, idx_s, torch.zeros(B, NB, device=d, dtype=torch.float16))
+        self.b_redir = self.b_redir.scatter(1, idx_s, torch.zeros(B, NB, device=d, dtype=torch.float16))
         self.b_active[:, self.dump] = 0.0
         # advance the ring by the pellets ACTUALLY fired (active spawners only) so
         # inactive-spawner slots don't burn ring space -> slow pellets live longer
@@ -576,7 +584,6 @@ class DanmakuSim:
 
         cpos = epos[:, :, None, :].expand(B, E, K, 2)
         cvel = torch.stack([spd_e * torch.cos(ang), spd_e * torch.sin(ang)], -1)
-        crad = self.e_rad[:, :, None].expand(B, E, K)
 
         raw = self._ebase[None, :, None] + (self.cursor[:, :, None] + kk) % self.SPE
         idx = torch.where(emit, raw, torch.full_like(raw, float(self.dump))).long()
@@ -585,10 +592,11 @@ class DanmakuSim:
                                         cpos.reshape(B, E * K, 2))
         self.b_vel = self.b_vel.scatter(1, idxf[:, :, None].expand(B, E * K, 2),
                                         cvel.reshape(B, E * K, 2))
-        self.b_rad = self.b_rad.scatter(1, idxf, crad.reshape(B, E * K))
         self.b_active = self.b_active.scatter(1, idxf, emit.reshape(B, E * K).float())
-        self.b_age = self.b_age.scatter(1, idxf, torch.zeros(B, E * K, device=self.dev))
-        self.b_redir = self.b_redir.scatter(1, idxf, torch.zeros(B, E * K, device=self.dev))
+        self.b_age = self.b_age.scatter(
+            1, idxf, torch.zeros(B, E * K, device=self.dev, dtype=torch.float16))
+        self.b_redir = self.b_redir.scatter(
+            1, idxf, torch.zeros(B, E * K, device=self.dev, dtype=torch.float16))
         self.b_active[:, self.dump] = 0.0
 
         self.cursor = torch.where(due, (self.cursor + self.e_nspawn) % self.SPE, self.cursor)
@@ -685,10 +693,9 @@ class DanmakuSim:
         ei2 = eidx[:, :, None].expand(B, ENB, 2)
         self.b_pos = self.b_pos.scatter(1, ei2, ebpos.reshape(B, ENB, 2))
         self.b_vel = self.b_vel.scatter(1, ei2, ebvel.reshape(B, ENB, 2))
-        self.b_rad = self.b_rad.scatter(1, eidx, torch.full((B, ENB), _BALL_HB, device=d))
         self.b_active = self.b_active.scatter(1, eidx, ebe.reshape(B, ENB).float())
-        self.b_age = self.b_age.scatter(1, eidx, torch.zeros(B, ENB, device=d))
-        self.b_redir = self.b_redir.scatter(1, eidx, torch.zeros(B, ENB, device=d))
+        self.b_age = self.b_age.scatter(1, eidx, torch.zeros(B, ENB, device=d, dtype=torch.float16))
+        self.b_redir = self.b_redir.scatter(1, eidx, torch.zeros(B, ENB, device=d, dtype=torch.float16))
         self.b_active[:, self.dump] = 0.0
         self.en_bcursor = (self.en_bcursor + eburst.float().sum(1) * EN_BURST_N) % EN_SLOTS
 
@@ -753,7 +760,8 @@ class DanmakuSim:
         # --- collision (bullets + enemy bodies) ---
         # th07 uses an AABB overlap; circular approx: dist < bullet_hitbox + PLAYER_HB
         dist = (self.b_pos - self.player[:, None, :]).norm(dim=2)
-        bhit = ((self.b_active > 0.5) & (dist < self.b_rad + PLAYER_HB)).any(dim=1, keepdim=True)
+        bhit = ((self.b_active > 0.5) &
+                (dist < self._slot_rad[None, :] + PLAYER_HB)).any(dim=1, keepdim=True)
         en_d = (self.en_pos - self.player[:, None, :]).norm(dim=2)
         en_hit = (ea & (en_d < EN_RADIUS + 3.0)).any(dim=1, keepdim=True)
         hit = bhit | en_hit

@@ -190,7 +190,7 @@ class Watcher:
         cx, cy = self._cx, self._cy
         act = s.b_active[0].numpy() > 0.5
         bpos = s.b_pos[0].numpy()[act]
-        brad = s.b_rad[0].numpy()[act]
+        brad = s._slot_rad.numpy()[act]        # per-slot hitbox radius
         obs = self.obs[0].numpy()
         esc = obs[HEAD_DIM:HEAD_DIM + NDIRS]
         grid = obs[HEAD_DIM + NDIRS:HEAD_DIM + NDIRS + GCELLS].reshape(GRID, GRID)
