@@ -96,11 +96,25 @@ def one_episode(env, pol, frame_skip, cap, hb=None):
     t0 = time.time()
     prev_frame, stall = -1, 0
     prev_score, score_stall = 0, 0
+    prev_ppos, ppos_stall = (0.0, 0.0), 0
+    force_shoot = 0
     while not done:
         a = int(pol.act(obs))
+        # the DLL auto-skips menus but not in-game dialogue (e.g. post-boss). If
+        # the policy stops pressing shoot after a kill, the dialogue never
+        # advances - player + score freeze. Detect that and mash shoot to skip it.
+        if score_stall > 150 and ppos_stall > 150:
+            force_shoot = 90
+        if force_shoot > 0:
+            a = (a % 18) + 18
+            force_shoot -= 1
         obs, _, term, trunc, info = env.step(a)
         steps += 1
         done = term or trunc
+        s = env.h.s
+        ppos = (round(s.player_x, 1), round(s.player_y, 1))
+        ppos_stall = ppos_stall + 1 if ppos == prev_ppos else 0
+        prev_ppos = ppos
         fr = info.get("frame", -1)
         stall = stall + 1 if fr == prev_frame else 0
         prev_frame = fr
@@ -111,19 +125,20 @@ def one_episode(env, pol, frame_skip, cap, hb=None):
         score_stall = score_stall + 1 if sc == prev_score else 0
         prev_score = sc
         surv_now = steps * frame_skip / 60.0
-        # "alive a long time but score barely moved" = the game stalled on an
-        # unadvanced in-game dialogue (DLL auto-skips menus, not those). A real
-        # long run has a big score. Drop it as an env bug.
-        if surv_now > 220.0 and sc < 90000 and score_stall > 1500:
-            at = (steps - score_stall) * frame_skip / 60.0
+        # score AND player both frozen for ~45s despite the shoot-mash above = a
+        # genuinely stuck game (dialogue that won't advance). Drop it - it's an
+        # env bug, not a policy result. The real fix is a DLL dialogue-skip.
+        if score_stall > 900 and ppos_stall > 900 and surv_now > 150.0:
+            at = (steps - max(score_stall, ppos_stall)) * frame_skip / 60.0
             if hb:
-                hb(f"    STALLED at ~{at:.0f}s (survived {surv_now:.0f}s but score only "
-                   f"{sc}, stage {s.stage}) - dropping (needs DLL dialogue-skip)")
+                hb(f"    STUCK at ~{at:.0f}s (score {sc} + player frozen, stage {s.stage}, "
+                   f"boss {s.boss_present}/{s.boss_hp_max:.0f}) - dropping (needs DLL dialogue-skip)")
             raise _Stalled(at)
         if hb and steps % 500 == 0:
             hb(f"    ... {steps} st  {fr/60:.0f}s  score {sc}  stage {s.stage}  "
                f"lives {s.lives:.0f}  boss {s.boss_present}({s.boss_hp:.0f}/{s.boss_hp_max:.0f})  "
-               f"player ({s.player_x:.0f},{s.player_y:.0f})")
+               f"player ({s.player_x:.0f},{s.player_y:.0f})"
+               + ("  [force-shoot]" if force_shoot > 0 else ""))
     surv = steps * frame_skip / 60.0
     return surv, int(info.get("score", 0)), (surv >= cap - 1.0)
 
