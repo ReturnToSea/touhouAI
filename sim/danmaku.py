@@ -58,11 +58,11 @@ TH07_BULLETS = {
     "ball":   dict(hitbox=3.0, draw=7.5),   # medium round - aimed shots, Letty orbs
 }
 
-# fixed stage: every corner gets a CONE + a SPRAY (placed IN the corner so
-# there's no safe pocket behind them); a fast sweeping LINE bottom-right;
-# one bouncing dense-ring emitter + one that orbits the perimeter.
-# each entry: (behaviour, x, y, bullet-type-name)
-_CORNERS = [(20.0, 26.0), (364.0, 26.0), (20.0, 410.0), (364.0, 410.0)]
+# fixed stage: every corner gets a CONE + a SPRAY, placed OUTSIDE the playfield
+# so their fire comes IN from the corner and there's no safe pocket to camp;
+# a fast sweeping LINE bottom-right; one bouncing dense-ring emitter + one that
+# orbits the perimeter.  each entry: (behaviour, x, y, bullet-type-name)
+_CORNERS = [(-14.0, -14.0), (398.0, -14.0), (-14.0, 462.0), (398.0, 462.0)]
 ROSTER = []
 for _cx, _cy in _CORNERS:
     ROSTER += [(E_CONE, _cx, _cy, "ball"), (E_SPRAY, _cx, _cy, "ball")]
@@ -119,10 +119,10 @@ SPAM_FIRE_FRAMES = 600      # 10 s of firing
 SPAM_COOLDOWN = 180         # 3 s before normal fire resumes (most pellets gone by then)
 SPAM_N0 = 3                 # spawners in the first phase; +1 each phase
 SPAM_MAX = 6               # slot / state cap (a 180 s episode sees ~3 phases: 3, 4, 5)
-SPAM_SLOTS = 1400           # shared pellet pool for the phase (no life cap; ring recycles)
+SPAM_SLOTS = 2000           # shared pellet pool for the phase (no life cap; ring recycles)
 SPAM_FIRE_EVERY = 12        # 5 attacks / s
-SPAM_PER_ATTACK = 10        # pellets per spawner per attack
-SPAM_RING_R = 10.0          # pellets spawn on this ring around the spawner
+SPAM_PER_ATTACK = 20        # pellets per spawner per attack
+SPAM_RING_R = 18.0          # pellets spawn on this ring around the spawner (fits 20 no-overlap)
 SPAM_BASE_SPD = 1.6         # pellet speed = U(0.5, 2.0) * this
 SPAM_BOOST_FRAMES = 12      # first 0.2 s at 2x the chosen speed
 SPAM_SPAWNER_VX = 0.75      # spawner drift speed (px/f), x only
