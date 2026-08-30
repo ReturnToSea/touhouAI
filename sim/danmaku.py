@@ -126,9 +126,11 @@ SPAM_FIRE_FRAMES = 600      # 10 s of firing
 SPAM_COOLDOWN = 180         # 3 s before normal fire resumes (most pellets gone by then)
 SPAM_N0 = 3                 # spawners in the first phase; +1 each phase
 SPAM_MAX = 6               # slot / state cap (a 180 s episode sees ~3 phases: 3, 4, 5)
-SPAM_SLOTS = 3400           # pellet pool: with the fired-count cursor + a 1.0 px/f
-                            # min speed + downward-only emission, the slowest pellet
-                            # completes its fall before its ring slot recycles
+SPAM_SLOTS = 1600           # pellet pool. free-slot allocation (reuse inactive /
+                            # least-threatening slots) + the past-player cull keep
+                            # this ~= peak SIMULTANEOUS live count, not a ring lap
+SPAM_PAST_DY = 70.0        # cull a spam pellet once it's this far below the player
+SPAM_PAST_Y = 300.0       # ...and in the lower field (guards over-cull when high)
 SPAM_FIRE_EVERY = 12        # 5 attacks / s
 SPAM_PER_ATTACK = 20        # pellets per spawner per attack
 SPAM_RING_R = 32.0          # pellets spawn on this ring (fits 20 over a 150 deg fan)
@@ -213,8 +215,7 @@ class DanmakuSim:
         self.spam_t = torch.zeros(B, device=d)                # frames into the current phase
         self.spam_next = torch.zeros(B, device=d)             # frame the next phase starts
         self.spam_n = torch.full((B,), float(SPAM_N0), device=d)   # spawners this episode
-        self.spam_cursor = torch.zeros(B, device=d)           # into the SPAM_SLOTS pool
-        self.en_bcursor = torch.zeros(B, device=d)            # into the EN_SLOTS pool
+        self.en_bcursor = torch.zeros(B, device=d)            # ring into the EN_SLOTS pool
         self._enj = torch.arange(EN_BURST_N, device=d).float()
         self.sp_x = torch.zeros(B, SPAM_MAX, device=d)
         self.sp_y = torch.zeros(B, SPAM_MAX, device=d)
@@ -385,7 +386,6 @@ class DanmakuSim:
         self.spam_phase = torch.where(mb1, torch.zeros_like(self.spam_phase), self.spam_phase)
         self.spam_t = torch.where(mb1, torch.zeros_like(self.spam_t), self.spam_t)
         self.spam_n = torch.where(mb1, torch.full_like(self.spam_n, float(SPAM_N0)), self.spam_n)
-        self.spam_cursor = torch.where(mb1, torch.zeros_like(self.spam_cursor), self.spam_cursor)
         self.en_bcursor = torch.where(mb1, torch.zeros_like(self.en_bcursor), self.en_bcursor)
         self.spam_next = torch.where(
             mb1, self._r(B, lo=float(SPAM_PERIOD_LO), hi=float(SPAM_PERIOD_HI)), self.spam_next)
@@ -458,7 +458,13 @@ class DanmakuSim:
         on = ((self.b_pos[..., 0] > -18) & (self.b_pos[..., 0] < PW + 18) &
               (self.b_pos[..., 1] > -18) & (self.b_pos[..., 1] < PH + 18) &
               (self.b_age < self._slot_life))
-        self.b_active = self.b_active * on.float()
+        # spam pellets that have fallen well past the player (lower field, below
+        # by SPAM_PAST_DY) can never threaten it again and aren't in the danger
+        # grid -> cull them so their pool slot frees up
+        past = (self._spam_slot[None, :] &
+                (self.b_pos[..., 1] > self.player[:, 1:2] + SPAM_PAST_DY) &
+                (self.b_pos[..., 1] > SPAM_PAST_Y))
+        self.b_active = self.b_active * on.float() * (~past).float()
 
         # --- moving emitters: [-2] bounces the interior, [-1] orbits the edge ---
         self.e_pos = self.e_pos + self.e_bvel               # e_bvel is 0 except the bouncer
@@ -526,10 +532,16 @@ class DanmakuSim:
         semit = (fire_due[:, None, None] & act_k[:, :, None]).expand(
             B, SPAM_MAX, SPAM_PER_ATTACK)                           # [B,SPAM_MAX,SPAM_PER_ATTACK]
 
-        sar = torch.arange(NB, device=d)[None, :]
-        raw_s = self._spam_base + (self.spam_cursor[:, None] + sar) % SPAM_SLOTS
+        # free-slot allocation: write into the NB lowest-priority spam slots -
+        # inactive first, then pellets already below the player, then (only if the
+        # pool is genuinely full) the least-threatening live ones. No ring cursor.
+        sb, eb = self._spam_base, self._en_base
+        harmless = (self.b_pos[:, sb:eb, 1] > self.player[:, 1:2]).float()   # [B,SPAM_SLOTS]
+        score = self.b_active[:, sb:eb] - 0.5 * harmless
+        free = torch.topk(score, NB, dim=1, largest=False).indices           # [B,NB] local idx
+        raw_s = sb + free
         idx_s = torch.where(semit.reshape(B, NB), raw_s,
-                            torch.full_like(raw_s, float(self.dump))).long()
+                            torch.full_like(raw_s, self.dump)).long()
         si2 = idx_s[:, :, None].expand(B, NB, 2)
         self.b_pos = self.b_pos.scatter(1, si2, sbpos.reshape(B, NB, 2))
         self.b_vel = self.b_vel.scatter(1, si2, sbvel.reshape(B, NB, 2))
@@ -537,11 +549,6 @@ class DanmakuSim:
         self.b_age = self.b_age.scatter(1, idx_s, torch.zeros(B, NB, device=d, dtype=torch.float16))
         self.b_redir = self.b_redir.scatter(1, idx_s, torch.zeros(B, NB, device=d, dtype=torch.float16))
         self.b_active[:, self.dump] = 0.0
-        # advance the ring by the pellets ACTUALLY fired (active spawners only) so
-        # inactive-spawner slots don't burn ring space -> slow pellets live longer
-        fired_ct = self.spam_n * float(SPAM_PER_ATTACK)              # [B]
-        self.spam_cursor = torch.where(fire_due, (self.spam_cursor + fired_ct) % SPAM_SLOTS,
-                                       self.spam_cursor)
 
         # phase transitions (from this frame's phase, before the change)
         pph = self.spam_phase
