@@ -127,7 +127,7 @@ class Th07Env(_Base):
 
     def __init__(self, frame_skip: int = 3, max_seconds: float = 90.0,
                  warmup: int = 90, render: bool = False, mute: bool = True,
-                 hard_reset: bool = False):
+                 hard_reset: bool = False, dll_obs: bool = True):
         super().__init__()
         self.frame_skip = frame_skip
         self.max_steps = int(max_seconds * 60 / frame_skip)
@@ -136,6 +136,10 @@ class Th07Env(_Base):
         # uses the engine-level Stage 1 reload instead of the snapshot restore -
         # the snapshot can't rewind a run that got deep into a boss.
         self._hard_reset_default = hard_reset
+        # dll_obs=True: read the 236-d observation the DLL builds in C (shm.step_obs)
+        # instead of rebuilding it in Python every step (the training bottleneck).
+        # set False to force the Python builder (parity testing).
+        self._dll_obs = dll_obs
 
         # the DLL reads these at load time from the child's environment
         if render:
@@ -191,6 +195,14 @@ class Th07Env(_Base):
             self.h._mm, dtype=np.float32, count=S.MAX_BULLETS * 4,
             offset=S.Shm.bullets.offset,
         ).reshape(S.MAX_BULLETS, 4)
+        # zero-copy view of the DLL-built observation
+        self._obs_view = np.frombuffer(
+            self.h._mm, dtype=np.float32, count=OBS_DIM,
+            offset=S.Shm.step_obs.offset,
+        )
+        if self._dll_obs and self.h.s.version < 6:
+            print("[Th07Env] DLL is pre-v6 (no step_obs) - falling back to Python obs")
+            self._dll_obs = False
         self._prev_bpos = np.full((S.MAX_BULLETS, 2), -9999.0, np.float32)
         self._prev_ppos = np.full(2, -9999.0, np.float32)
         self._reset_bookkeeping()
@@ -259,6 +271,13 @@ class Th07Env(_Base):
         return False, 0.0
 
     def _obs(self) -> np.ndarray:
+        """The observation. Prefer the DLL's C-built copy (shm.step_obs); fall
+        back to the Python builder if dll_obs is off or the DLL is too old."""
+        if self._dll_obs:
+            return self._obs_view.astype(np.float32).copy()
+        return self._obs_python()
+
+    def _obs_python(self) -> np.ndarray:
         """Build the observation via the shared batched builder (native/obs.py),
         so the real env and the danmaku sim see bit-identical inputs."""
         s = self.h.s

@@ -11,13 +11,14 @@
 namespace th07 {
 
 constexpr uint32_t SHM_MAGIC   = 0x37304854;  // 'TH07'
-constexpr uint32_t SHM_VERSION = 5;
+constexpr uint32_t SHM_VERSION = 6;
 
 constexpr int   MAX_BULLETS = 2048;   // >= the 1025 pool slots
 constexpr int   MAX_ENEMIES = 64;
 constexpr float INACTIVE    = -9999.0f;  // sentinel for an empty bullet slot
 
-constexpr int   OBS_DIM     = 212;   // 16 head + 9 escape dirs + 13*13 grid + 6*3 enemies
+constexpr int   OBS_DIM     = 236;   // 16 head + 9 escape + 13*13 grid + 6*3 enemies + 8*3 items
+                                     // (mirror native/obs.py OBS_DIM)
 constexpr int   N_ACTIONS   = 36;
 constexpr int   MAX_HIDDEN  = 256;   // per-layer hidden cap for the in-DLL MLP
 constexpr int   MAX_WEIGHTS = 1 << 17;  // 128k float32 = 512 KB flat param buffer
@@ -96,6 +97,15 @@ struct Shm {
     float    ep_boss_dmg;        // sum of per-frame (hp lost / hp_max); ~1 per phase
     float    ep_x_dev;           // mean (player_x/W - 0.5)^2 over the episode
     float    dbg_obs[OBS_DIM];   // DLL writes the episode's first build_obs() here
+
+    // DLL builds the full 236-d observation in C (mirror of native/obs.py) and
+    // writes it here after every ST_STEP - the Python env reads it directly
+    // instead of rebuilding from bullets[]/enemies[]/pymem (the per-step Python
+    // obs build was the real-game training bottleneck). step_obs_frame tags which
+    // logic frame it belongs to.
+    float    step_obs[OBS_DIM];
+    uint32_t step_obs_frame;
+    uint32_t _pad_obs;
 
     Bullet   bullets[MAX_BULLETS];
     Enemy    enemies[MAX_ENEMIES];

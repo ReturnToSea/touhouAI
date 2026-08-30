@@ -9,7 +9,7 @@ import time
 SHM_MAGIC = 0x37304854
 MAX_BULLETS = 2048
 MAX_ENEMIES = 64
-OBS_DIM = 212  # 16 head + 9 escape dirs + 13*13 danger grid + 6*3 enemies (mirror th07_shm.h)
+OBS_DIM = 236  # 16 head + 9 escape + 13*13 grid + 6*3 enemies + 8*3 items (mirror th07_shm.h)
 N_ACTIONS = 36
 MAX_WEIGHTS = 1 << 17
 
@@ -87,6 +87,9 @@ class Shm(ctypes.Structure):
         ("ep_boss_dmg", ctypes.c_float),
         ("ep_x_dev", ctypes.c_float),
         ("dbg_obs", ctypes.c_float * OBS_DIM),
+        ("step_obs", ctypes.c_float * OBS_DIM),   # DLL-built obs, read verbatim by env
+        ("step_obs_frame", ctypes.c_uint32),
+        ("_pad_obs", ctypes.c_uint32),
         ("bullets", Bullet * MAX_BULLETS),
         ("enemies", Enemy * MAX_ENEMIES),
         ("weights", ctypes.c_float * MAX_WEIGHTS),

@@ -136,12 +136,16 @@ constexpr int   NDIRS       = 9;
 constexpr int   K_NEAREST   = 128;      // grid + escape use only the K nearest bullets
                                         // (must match native/obs.py K_NEAREST)
 constexpr float DIR_SPEED   = 4.0f;      // measured unfocused player move speed (px/frame)
+constexpr float DIR_SPEED_FOCUS = 1.6f;  // focused move speed (obs.py v28: escape scan
+                                         // uses this when the player is focused)
 constexpr float DIR_HORIZON = 20.0f;     // escape look-ahead (frames)
 constexpr float DIR_HIT_R2  = 7.0f * 7.0f;
 // measured player movement bounds (sim/physics.json)
 constexpr float PX_LO = 8.0f, PX_HI = 376.0f, PY_LO = 16.0f, PY_HI = 432.0f;
 constexpr int   M_ENEMIES   = 6;
-static_assert(OBS_DIM == HEAD_DIM + NDIRS + GCELLS + M_ENEMIES * 3, "OBS_DIM mismatch");
+constexpr int   M_ITEMS     = 8;         // nearest on-field items (P-drops etc.)
+static_assert(OBS_DIM == HEAD_DIM + NDIRS + GCELLS + M_ENEMIES * 3 + M_ITEMS * 3,
+              "OBS_DIM mismatch");
 
 // {dx,dy}: index 0 = stay still, then the 8 compass dirs (matches A_DIRS /
 // env.py _DIRS ordering used by decode_action).
@@ -275,11 +279,12 @@ static void build_obs(float* o, int frame_skip) {
     // the frame the path leaves the playfield. normalised by DIR_HORIZON
     // (1 = safe the whole look-ahead).
     float* od = o + HEAD_DIM;
+    const float dir_speed = focus ? DIR_SPEED_FOCUS : DIR_SPEED;   // obs.py v28
     for (int dd = 0; dd < NDIRS; ++dd) {
         float ndx = OBS_DIRS[dd][0], ndy = OBS_DIRS[dd][1];
         float L = sqrtf(ndx * ndx + ndy * ndy);
         float pmx = 0.f, pmy = 0.f;
-        if (L > 0.f) { pmx = ndx / L * DIR_SPEED; pmy = ndy / L * DIR_SPEED; }
+        if (L > 0.f) { pmx = ndx / L * dir_speed; pmy = ndy / L * dir_speed; }
         float safe_t = DIR_HORIZON;
         if (pmx > 0.f)      { float tw = (PX_HI - px) / pmx; if (tw < safe_t) safe_t = tw; }
         else if (pmx < 0.f) { float tw = (PX_LO - px) / pmx; if (tw < safe_t) safe_t = tw; }
@@ -315,22 +320,68 @@ static void build_obs(float* o, int frame_skip) {
     o[14] = (bt && bt_max > 0.f) ? (bt_hp / bt_max) : 0.f;
     o[15] = 0.f;
 
-    // ---- enemies (6 * 3): nearest on-screen, [rel/128, life/maxlife] ----
+    // insertion-sort a (dist2, x, y, hpf) candidate into the K nearest (mirror
+    // of env.py's cand.sort(key=dist2)[:K]).
+    struct Cand { float d2, x, y, v; };
+    auto push_near = [](Cand* arr, int& n, int K, float d2, float x, float y, float v) {
+        if (n == K && d2 >= arr[K - 1].d2) return;
+        int j = (n < K) ? n++ : K - 1;
+        for (; j > 0 && arr[j - 1].d2 > d2; --j) arr[j] = arr[j - 1];
+        arr[j] = { d2, x, y, v };
+    };
+
+    // ---- enemies (6 * 3): NEAREST on-field, [rel/128, life/maxlife] ----
+    // matches env.py: EM_BOSSES[0] (Cirno/Letty live there, not in EM_ENEMIES)
+    // folded in as a normal enemy, then all sorted by distance.
     float* oe = o + HEAD_DIM + NDIRS + GCELLS;
     for (int i = 0; i < M_ENEMIES * 3; ++i) oe[i] = 0.f;
+    Cand en[M_ENEMIES]; int en_n = 0;
+    {
+        uintptr_t bptr = rd<uintptr_t>(ENEMY_MANAGER + EM_BOSSES);   // &EM_BOSSES[0]
+        if (bptr > 0x00400000 && bptr < 0x7FFFFFFF) {
+            float bx = rd<float>(bptr + ENEMY_POS), by = rd<float>(bptr + ENEMY_POS + 4);
+            int32_t bl = rd<int32_t>(bptr + ENEMY_LIFE), bml = rd<int32_t>(bptr + ENEMY_MAXLIFE);
+            if (bx > -64.f && bx < 448.f && by > -80.f && by < 520.f && bml >= 1 && bml <= 1000000)
+                push_near(en, en_n, M_ENEMIES, (bx - px) * (bx - px) + (by - py) * (by - py),
+                          bx, by, (float)bl / (float)bml);
+        }
+    }
     int32_t ec = rd<int32_t>(ENEMY_MANAGER + EM_ENEMY_COUNT);
     if (ec < 0 || ec > 480) ec = 0;
-    int filled = 0;
-    for (int i = 0; i < ec && filled < M_ENEMIES; ++i) {
+    for (int i = 0; i < ec && i < MAX_ENEMIES; ++i) {
         uintptr_t e = ENEMY_MANAGER + EM_ENEMIES + (uintptr_t)i * EM_ENEMY_STRIDE;
         float ex = rd<float>(e + ENEMY_POS), ey = rd<float>(e + ENEMY_POS + 4);
-        if (ey < -8.f || ey > PLAYFIELD_H + 32.f) continue;
+        if (ey < -8.f || ey > 480.f) continue;
         int32_t life = rd<int32_t>(e + ENEMY_LIFE), ml = rd<int32_t>(e + ENEMY_MAXLIFE);
         if (ml < 1) ml = 1;
-        oe[filled * 3 + 0] = (ex - px) / 128.f;
-        oe[filled * 3 + 1] = (ey - py) / 128.f;
-        oe[filled * 3 + 2] = (float)life / (float)ml;
-        ++filled;
+        push_near(en, en_n, M_ENEMIES, (ex - px) * (ex - px) + (ey - py) * (ey - py),
+                  ex, ey, (float)life / (float)ml);
+    }
+    for (int k = 0; k < en_n; ++k) {
+        oe[k * 3 + 0] = (en[k].x - px) / 128.f;
+        oe[k * 3 + 1] = (en[k].y - py) / 128.f;
+        oe[k * 3 + 2] = fminf(fmaxf(en[k].v, 0.f), 1.f);
+    }
+
+    // ---- items (8 * 3): NEAREST on-field, [rel/128, rel/128, type/9] ----
+    // matches env.py _item_arrays: scan all IM_ITEM_MAX slots, in_use, y in
+    // [-16, 464], sort by distance.
+    float* oi = o + HEAD_DIM + NDIRS + GCELLS + M_ENEMIES * 3;
+    for (int i = 0; i < M_ITEMS * 3; ++i) oi[i] = 0.f;
+    Cand it[M_ITEMS]; int it_n = 0;
+    for (int i = 0; i < (int)IM_ITEM_MAX; ++i) {
+        uintptr_t s = ITEM_MANAGER + (uintptr_t)i * IM_ITEM_STRIDE;
+        if (rd<uint8_t>(s + ITEM_IN_USE) == 0) continue;
+        float ix = rd<float>(s + ITEM_POS), iy = rd<float>(s + ITEM_POS + 4);
+        if (iy < -16.f || iy > 464.f) continue;
+        uint8_t typ = rd<uint8_t>(s + ITEM_TYPE);
+        push_near(it, it_n, M_ITEMS, (ix - px) * (ix - px) + (iy - py) * (iy - py),
+                  ix, iy, (float)typ);
+    }
+    for (int k = 0; k < it_n; ++k) {
+        oi[k * 3 + 0] = (it[k].x - px) / 128.f;
+        oi[k * 3 + 1] = (it[k].y - py) / 128.f;
+        oi[k * 3 + 2] = it[k].v / 9.f;
     }
 }
 
@@ -391,6 +442,15 @@ static void restore_snapshot() {
     if (g_recorder)
         memcpy(g_recorder, g_snap_rec, REC_SZ);
     g_shm->frame = 0;
+}
+
+// Build the full 236-d obs in C and publish it to shm for the Python env to read
+// verbatim (skips the per-step Python obs rebuild). frame_skip scales bullet/
+// player velocity; post-reset the bullet history is cleared so velocity reads 0
+// and the exact value doesn't matter.
+static void write_step_obs() {
+    build_obs(g_shm->step_obs, g_shm->repeat ? (int)g_shm->repeat : 3);
+    g_shm->step_obs_frame = g_shm->frame;
 }
 
 // ---- observation --------------------------------------------------------------
@@ -506,6 +566,7 @@ static int __fastcall hooked_do_tick(void* self, void* edx) {
             }
             s->tick_status = r;
             capture_obs();
+            write_step_obs();
             s->done = 1;
             s->state = ST_IDLE;
             return 0;
@@ -552,7 +613,9 @@ static int __fastcall hooked_do_tick(void* self, void* edx) {
 
         case ST_RESET: {
             if (s->have_snapshot) restore_snapshot();
+            reset_bullet_hist();          // fresh velocity baseline (matches env.reset())
             capture_obs();
+            write_step_obs();
             s->done = 1;
             s->state = ST_IDLE;
             return 0;
@@ -590,6 +653,7 @@ static int __fastcall hooked_do_tick(void* self, void* edx) {
             reset_bullet_hist();
             s->nav_frames = (nav >= MAXF && !saw_reload) ? -1 : nav;
             capture_obs();
+            write_step_obs();
             s->done = 1;
             s->state = ST_IDLE;
             return 0;
