@@ -41,3 +41,6 @@ data/
 .idea/
 .DS_Store
 Thumbs.db
+
+# --- Third-party tools (downloaded binaries) ---
+tools/thprac/
