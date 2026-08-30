@@ -24,7 +24,8 @@ import torch
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 sys.path.insert(0, str(HERE.parent / "native"))
-from danmaku import DanmakuSim, E_CONE, E_SPRAY, E_LINE, E_BRING, PLAYER_HB  # noqa: E402
+from danmaku import (DanmakuSim, E_CONE, E_SPRAY, E_LINE, E_BRING, PLAYER_HB,  # noqa: E402
+                     SHOOT_ALIGN_DX)
 
 # per-source bullet colours (used outside the danger box; inside stays red)
 _SRC_COL = {"cone": "#4fa3ff", "spray": "#2f6fd0", "line": "#e6e6e6",
@@ -220,6 +221,29 @@ class Watcher:
         cv.create_rectangle(cx(0), cy(0), cx(PW), cy(PH), outline="#22262e")
         cv.create_rectangle(cx(PX_LO), cy(PY_LO), cx(PX_HI), cy(PY_HI), outline="#333a44")
 
+        # emitter origins: a diamond per ACTIVE emitter, coloured by its (per-
+        # episode) behaviour, tagged with its motion profile, + a stub toward the
+        # stage centre (its base aim). So the stage layout is legible each episode.
+        _ET = {E_CONE: "cone", E_SPRAY: "spray", E_LINE: "line", E_BRING: "bring"}
+        _MT = {0: "", 1: "acc", 2: "dec", 3: "snake", 4: "arc", 5: "home",
+               6: "puls", 7: "freeze"}
+        e_pos = s.e_pos[0].cpu().numpy()
+        e_on = s.e_on[0].cpu().numpy() > 0.5
+        e_type = s.e_type[0].cpu().numpy()
+        e_mt = s.e_mtype[0].cpu().numpy()
+        for e in range(s.E):
+            if not e_on[e]:
+                continue
+            ex, ey = float(e_pos[e, 0]), float(e_pos[e, 1])
+            ec = _SRC_COL.get(_ET.get(int(round(e_type[e])), "cone"), "#4fa3ff")
+            X, Y, r = cx(ex), cy(ey), 6
+            cv.create_line(X, Y, cx(192), cy(224), fill="#2b3038", width=1)
+            cv.create_polygon(X, Y - r, X + r, Y, X, Y + r, X - r, Y,
+                              fill=ec, outline="#0a0b0e")
+            tag = _MT.get(int(round(e_mt[e])), "")
+            cv.create_text(X, Y - r - 6, fill=ec, font=("Consolas", 7),
+                           text=f"{_ET.get(int(round(e_type[e])),'?')[:2]}{('·'+tag) if tag else ''}")
+
         # macro view (toggle G): predicted bullet tracks - each active bullet's
         # near-future path drawn as a faint line, so walls / dense streams read
         # as clear bands without washing the whole field red.
@@ -278,7 +302,7 @@ class Watcher:
         # FRONT-ONLY SHOT column: the shot only hits an enemy within +-26px of
         # the player's x and above it. Filled band up the screen; bright when
         # SHOOT is held. This is exactly the region the policy can damage.
-        ALIGN = 26.0
+        ALIGN = SHOOT_ALIGN_DX
         shooting = (a // 18) % 2
         fill_c = "#6b6320" if shooting else "#33321c"
         cv.create_rectangle(cx(px - ALIGN), cy(0), cx(px + ALIGN), cy(py),

@@ -462,7 +462,11 @@ class DanmakuSim:
 
         # LINE sweep: aim oscillates between "up toward top-right" and "left
         # toward bottom-left"  (centre ~ -135deg, amplitude ~ +-50deg)
-        self.e_swctr = torch.where(mbe, torch.full((B, E), -2.36, device=d), self.e_swctr)
+        # LINE sweep centre = aim toward the stage centre from THIS emitter's
+        # (per-episode, jittered) position, so a LINE that rolled onto any corner
+        # still sweeps across the field instead of firing off the near edge.
+        sw_ctr = torch.atan2(CY - self.e_pos[..., 1], CX - self.e_pos[..., 0])
+        self.e_swctr = torch.where(mbe, sw_ctr, self.e_swctr)
         self.e_swamp = torch.where(mbe, self._r(B, E, lo=0.75, hi=1.05), self.e_swamp)
         self.e_swrate = torch.where(mbe, self._r(B, E, lo=0.035, hi=0.075) * (0.7 + diff),
                                     self.e_swrate)
