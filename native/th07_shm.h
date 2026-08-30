@@ -31,6 +31,8 @@ enum ShmState : uint32_t {
     ST_SNAPSHOT = 4,  // capture the current game state as the reset point
     ST_AUTONAV  = 5,  // tap Shoot through the menus until gamemode==2
     ST_EVAL     = 6,  // reset + run a whole episode with the in-DLL MLP policy
+    ST_HARD_RESET = 7,  // engine-level "Give Up and Retry": reload Stage 1 in
+                        // place (no pause menu, no process relaunch)
 };
 
 #pragma pack(push, 4)

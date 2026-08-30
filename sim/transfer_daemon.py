@@ -1,9 +1,11 @@
 """Real-game transfer monitor. Runs alongside sim/train.py as a SEPARATE process
 (CPU .venv, not .venv-cuda) - it does not touch training.
 
-Loops: read the current train step count -> launch a headless th07 -> load the
-latest checkpoint -> play one episode to death -> record (wallclock, steps,
-survival, score) -> append to runs_sim/<run>/realtransfer.npy -> repeat.
+Loops: read the current train step count -> load the latest checkpoint -> play
+one episode to death -> record (wallclock, steps, survival, score) -> append to
+runs_sim/<run>/realtransfer.npy -> repeat. One persistent th07 process: each
+episode resets via the engine's own "Give Up and Retry" (env.reset(hard=True),
+~0.2s) instead of a relaunch. Rebuilt on error or every REBUILD_EVERY episodes.
 
 The hud plots the smoothed survival vs steps next to the sim curve. If the real
 line diverges DOWN from the sim curve as steps rise, that's sim overfitting
@@ -12,8 +14,9 @@ line diverges DOWN from the sim curve as steps rise, that's sim overfitting
     .venv\\Scripts\\python sim\\transfer_daemon.py ppo_v27
     .venv\\Scripts\\python sim\\transfer_daemon.py ppo_v27 --checkpoint best.pt --show
 
-th07 keeps ticking with its window minimised (no defocus pause in this config),
-so the game windows are minimised out of the way. --show leaves them on-screen.
+th07 launches without stealing focus (SW_SHOWNOACTIVATE) and its window is then
+minimised out of the way; it keeps ticking in the background. --show leaves it
+on-screen.
 """
 from __future__ import annotations
 
@@ -88,8 +91,8 @@ def _append_row(path: Path, row) -> None:
     tmp.replace(path)
 
 
-def one_episode(env, pol, frame_skip, cap, hb=None):
-    obs, _ = env.reset()
+def one_episode(env, pol, frame_skip, cap, hb=None, hard=False):
+    obs, _ = env.reset(options={"hard": True} if hard else None)
     steps = 0
     done = False
     info = {"score": 0}
@@ -171,43 +174,61 @@ def main():
     ckpt = run_dir / args.checkpoint
     print(f"transfer daemon: {args.run}  <- {args.checkpoint}   -> {out.name}", flush=True)
 
+    # One persistent game process. Each episode is an engine-level "Give Up and
+    # Retry" (env.reset(hard=True)) - no relaunch, no force-tab-out. The process
+    # is only rebuilt on an exception or every REBUILD_EVERY episodes (belt-and-
+    # braces against any slow state leak across in-place reloads).
+    REBUILD_EVERY = 40
     n = n_stall = 0
+    env = None
+    ep_on_env = 0
     while True:
         if not ckpt.exists():
             print(f"waiting for {ckpt} ...", flush=True)
             time.sleep(20)
             continue
         steps = _train_steps(run_dir)
-        env = None
         try:
             pol = MLPPolicy.load(ckpt)
-            env = Th07Env(frame_skip=args.frame_skip, max_seconds=args.cap + 5,
-                          render=False)
-            if not args.show:
-                _minimise_pid_windows(env.pid)
+            if env is not None and ep_on_env >= REBUILD_EVERY:
+                try:
+                    env.close()
+                except Exception:
+                    pass
+                env = None
+            if env is None:
+                _killall.killall()
+                env = Th07Env(frame_skip=args.frame_skip, max_seconds=args.cap + 5,
+                              render=False)
+                ep_on_env = 0
+                if not args.show:
+                    _minimise_pid_windows(env.pid)
             t0 = time.time()
-            surv, score, censored = one_episode(env, pol, args.frame_skip, args.cap,
-                                                hb=lambda m: print(m, flush=True))
+            surv, score, censored = one_episode(
+                env, pol, args.frame_skip, args.cap,
+                hb=lambda m: print(m, flush=True), hard=(ep_on_env > 0))
             n += 1
+            ep_on_env += 1
             _append_row(out, [time.time(), steps, surv, score, float(censored)])
             print(f"[{n:4d}]  {steps/1e6:6.1f}M steps   {surv:6.1f}s{'+' if censored else ' '}  "
                   f"score {score:>9d}   ({time.time() - t0:.0f}s wall)", flush=True)
         except _Stalled:
             n_stall += 1
+            ep_on_env += 1
             print(f"    (dropped - {n_stall} stalled of {n + n_stall} total)", flush=True)
         except Exception as e:
             print(f"episode failed: {type(e).__name__}: {e}", flush=True)
-            time.sleep(5)
-        finally:
             try:
                 if env is not None:
                     env.close()
             except Exception:
                 pass
+            env = None
             try:
                 _killall.killall()
             except Exception:
                 pass
+            time.sleep(5)
         time.sleep(args.settle)
 
 

@@ -456,7 +456,7 @@ static void capture_obs() {
 // ---- hooks ------------------------------------------------------------------
 static inline bool driving() {
     return g_shm && (g_shm->state == ST_STEP || g_shm->state == ST_AUTONAV ||
-                     g_shm->state == ST_EVAL);
+                     g_shm->state == ST_EVAL || g_shm->state == ST_HARD_RESET);
 }
 
 static uint16_t __cdecl hooked_read_input(void) {
@@ -552,6 +552,43 @@ static int __fastcall hooked_do_tick(void* self, void* edx) {
 
         case ST_RESET: {
             if (s->have_snapshot) restore_snapshot();
+            capture_obs();
+            s->done = 1;
+            s->state = ST_IDLE;
+            return 0;
+        }
+
+        case ST_HARD_RESET: {
+            // Engine-level "Give Up and Retry" - no pause menu, no relaunch.
+            // Force the stage number to 1 first (so a death deep in stage 2+
+            // still comes back to stage 1), then write the supervisor
+            // transition-request word. The WinMain loop consumes it, rebuilds
+            // the stage (~24f) + runs a ~15f fade. We tick through that and a
+            // short warmup. Unlike ST_RESET we do NOT touch the replay recorder
+            // - the retry runs the engine's own stage init, which re-creates it
+            // clean (restoring a stale head here corrupts the fresh object).
+            constexpr int32_t WARM = 90;      // frames into the fresh stage
+            wr<int32_t>(GAME_MANAGER + GM_STAGE, 1);
+            wr<int32_t>(SUPERVISOR + SV_RETRY_MODE, SV_RETRY_VAL);
+            int nav = 0;
+            const int MAXF = 1800;
+            bool saw_reload = false;
+            int32_t last_tmr = rd<int32_t>(GAME_MANAGER + GM_STAGE_TIMER);
+            for (; nav < MAXF; ++nav) {
+                s->action = 0;
+                wr<uint8_t>(FRAMESKIP_BYTE, 0);
+                if (orig_do_tick(self, edx) != 0) break;
+                int32_t tmr = rd<int32_t>(GAME_MANAGER + GM_STAGE_TIMER);
+                int gm  = rd<int32_t>(SUPERVISOR + SV_GAMEMODE);
+                int stg = rd<int32_t>(GAME_MANAGER + GM_STAGE);
+                if (!saw_reload && tmr < last_tmr && tmr < 30) saw_reload = true;
+                last_tmr = tmr;
+                if (saw_reload && gm == 2 && stg == 1 && tmr >= WARM) break;
+            }
+            s->action = 0;
+            s->frame = 0;
+            reset_bullet_hist();
+            s->nav_frames = (nav >= MAXF && !saw_reload) ? -1 : nav;
             capture_obs();
             s->done = 1;
             s->state = ST_IDLE;

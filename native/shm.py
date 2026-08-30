@@ -13,7 +13,8 @@ OBS_DIM = 212  # 16 head + 9 escape dirs + 13*13 danger grid + 6*3 enemies (mirr
 N_ACTIONS = 36
 MAX_WEIGHTS = 1 << 17
 
-ST_IDLE, ST_STEP, ST_FREE, ST_RESET, ST_SNAPSHOT, ST_AUTONAV, ST_EVAL = range(7)
+(ST_IDLE, ST_STEP, ST_FREE, ST_RESET, ST_SNAPSHOT, ST_AUTONAV, ST_EVAL,
+ ST_HARD_RESET) = range(8)
 
 # input bits (confirmed against the game)
 SHOOT, BOMB, SLOW, SKIP = 0x01, 0x02, 0x04, 0x08
@@ -169,6 +170,18 @@ class Hook:
             if self._cmd(ST_RESET, timeout, poll=0.001):
                 return True
         return False
+
+    def hard_reset(self, timeout: float = 30.0) -> bool:
+        """Engine-level Stage 1 reload via the supervisor retry word (writes
+        SUPERVISOR+0x158 = 10, same as the pause menu's "Give Up and Retry").
+
+        Works from anywhere - including deep in a boss fight, where the
+        snapshot restore can't rewind - so one game process can run many
+        episodes without a relaunch. Slower than reset(): it ticks through the
+        ~40-frame teardown + fade + a 90-frame warmup (~1s wall)."""
+        if not self._cmd(ST_HARD_RESET, timeout, poll=0.001):
+            return False
+        return self.s.nav_frames >= 0
 
     # --- in-DLL episode eval: blocking + split (for the island orchestrator) ---
     def eval_start(self, weights, h1: int, h2: int, frame_skip: int = 3,

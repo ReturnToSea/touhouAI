@@ -364,13 +364,21 @@ class Th07Env(_Base):
 
     def reset(self, *, seed=None, options=None):
         super().reset(seed=seed)
-        if not self.h.reset():
+        # options={"hard": True} -> engine-level Stage 1 reload (Give Up &
+        # Retry). Rewinds from anywhere (deep boss fights included) so one game
+        # process serves many episodes; ~1s vs the snapshot restore's instant.
+        hard = bool(options and options.get("hard"))
+        ok = self.h.hard_reset() if hard else self.h.reset()
+        if not ok:
             s = self.h.s
             if s.crash_code:
                 raise RuntimeError(
                     f"game crashed: exc {s.crash_code:#x} at eip {s.crash_eip:#x}, "
                     f"{'wrote' if s.crash_rw else 'read'} {s.crash_addr:#x}")
-            raise RuntimeError("hook reset timed out (game not responding)")
+            raise RuntimeError(
+                f"hook {'hard_' if hard else ''}reset timed out (game not responding)")
+        self._prev_bpos[:] = -9999.0
+        self._prev_ppos[:] = -9999.0
         self._reset_bookkeeping()
         return self._obs(), {}
 

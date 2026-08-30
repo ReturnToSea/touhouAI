@@ -60,6 +60,12 @@ constexpr uintptr_t STAGE_NUM      = 0x01347FC8;
 // --- Supervisor ---
 constexpr uintptr_t SV_CALC_COUNT  = 0x150; // int32 loop counter
 constexpr uintptr_t SV_GAMEMODE    = 0x154; // uint32 (2 == in a run)
+// Writing SV_RETRY_VAL here is exactly what the pause-menu "Give Up and Retry ->
+// Yes" does: the WinMain loop consumes it, tears the stage down + rebuilds it
+// (~24f) then runs a ~15f fade, and clears it back to 2. Verified by
+// native/probe_write.py (score resets, stage stays/forces to 1).
+constexpr uintptr_t SV_RETRY_MODE  = 0x158; // int32 transition-request word
+constexpr int32_t   SV_RETRY_VAL   = 10;
 
 // --- zPlayer ---
 constexpr uintptr_t PL_POS_X       = 0x0930; // float (y +4, z +8)
@@ -71,6 +77,7 @@ constexpr uintptr_t PL_VEL_X       = 0x0948; // D3DXVECTOR3 velocity (after hitb
 // --- zGameManager ---
 constexpr uintptr_t GM_GLOBALS_PTR = 0x0008; // zGlobals*
 constexpr uintptr_t GM_DIFFICULTY  = 0x0010; // int32
+constexpr uintptr_t GM_STAGE_TIMER = 0x95E8; // int32 per-stage frame counter (-> 0 on (re)load)
 constexpr uintptr_t GM_STAGE       = 0x95EC; // int32
 constexpr uintptr_t GM_CHERRY_MAX  = 0x9618;
 constexpr uintptr_t GM_CHERRY      = 0x961C;
