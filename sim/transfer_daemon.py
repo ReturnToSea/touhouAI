@@ -110,15 +110,15 @@ def one_episode(env, pol, frame_skip, cap, hb=None):
         sc = int(s.score)
         score_stall = score_stall + 1 if sc == prev_score else 0
         prev_score = sc
-        # score frozen for ~50s while alive = the game stalled (an unadvanced
-        # in-game dialogue - the DLL auto-skips menus but not those). End here and
-        # report the survival time as of the freeze, not a fake full run.
-        if score_stall > 1000 and steps > 400:
+        surv_now = steps * frame_skip / 60.0
+        # "alive a long time but score barely moved" = the game stalled on an
+        # unadvanced in-game dialogue (DLL auto-skips menus, not those). A real
+        # long run has a big score. Drop it as an env bug.
+        if surv_now > 220.0 and sc < 90000 and score_stall > 1500:
             at = (steps - score_stall) * frame_skip / 60.0
             if hb:
-                hb(f"    STALLED at ~{at:.0f}s (score {sc} frozen, stage {s.stage}, "
-                   f"boss {s.boss_present}/{s.boss_hp_max:.0f}) - dropping (env bug, "
-                   f"needs DLL dialogue-skip)")
+                hb(f"    STALLED at ~{at:.0f}s (survived {surv_now:.0f}s but score only "
+                   f"{sc}, stage {s.stage}) - dropping (needs DLL dialogue-skip)")
             raise _Stalled(at)
         if hb and steps % 500 == 0:
             hb(f"    ... {steps} st  {fr/60:.0f}s  score {sc}  stage {s.stage}  "
