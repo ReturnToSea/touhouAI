@@ -132,8 +132,19 @@ def one_episode(env, pol, frame_skip, cap, hb=None):
         if score_stall > 900 and ppos_stall > 900 and surv_now > 150.0:
             at = (steps - max(score_stall, ppos_stall)) * frame_skip / 60.0
             if hb:
-                hb(f"    STUCK at ~{at:.0f}s (score {sc} + player frozen, stage {s.stage}, "
-                   f"boss {s.boss_present}/{s.boss_hp_max:.0f}) - dropping (needs DLL dialogue-skip)")
+                f0 = int(s.frame)
+                dump = []
+                for _ in range(4):
+                    env.step(0)
+                    s = env.h.s
+                    dump.append(f"f={s.frame} pst={s.player_state} lives={s.lives:.1f} "
+                                f"bombs={s.bombs:.1f} pos=({s.player_x:.0f},{s.player_y:.0f}) "
+                                f"gm={s.gamemode} stg={s.stage} tick={s.tick_status} "
+                                f"boss={s.boss_present}/{s.boss_hp:.0f}/{s.boss_hp_max:.0f} "
+                                f"score={s.score} cherry={s.cherry}")
+                hb(f"    STUCK at ~{at:.0f}s - dropping. state over 4 steps:")
+                for d in dump:
+                    hb("      " + d)
             raise _Stalled(at)
         if hb and steps % 500 == 0:
             hb(f"    ... {steps} st  {fr/60:.0f}s  score {sc}  stage {s.stage}  "
