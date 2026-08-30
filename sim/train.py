@@ -32,7 +32,14 @@ from policy import MLPPolicy, N_ACTIONS  # noqa: E402
 
 class RunningMeanStd(nn.Module):
     """Welford running mean/var over the batch axis. Buffers so it saves/loads
-    and moves with the module. Standard obs/return normalisation (rl_games / SB3)."""
+    and moves with the module. Used for RETURN normalisation only (train-time
+    GAE scaling). NOT obs normalisation - v28 tried that and it destroyed real
+    transfer: our obs is already hand-scaled to ~[-1,1] in obs.py, so features
+    that are constant in the sim (o[15]==0, empty item slots, wall cells) got
+    var~0 -> the export folded 1e4x weights into the first layer -> on real obs
+    those features aren't exactly the sim mean, so the preactivation exploded
+    and tanh saturated. Same sim curve as v27, 15x worse transfer (15-40s vs
+    200-500s)."""
 
     def __init__(self, shape):
         super().__init__()
@@ -82,31 +89,23 @@ class ActorCritic(nn.Module):
         self.hidden = tuple(hidden)
         self.actor = mlp([OBS_DIM, *hidden, N_ACTIONS], out_gain=0.01)   # == MLPPolicy.net
         self.critic = mlp([OBS_DIM, 128, 128, 1], out_gain=1.0)
-        self.obs_rms = RunningMeanStd(OBS_DIM)     # v28: obs normalisation
 
     def forward(self, o):
-        o = self.obs_rms.norm(o)
         return self.actor(o), self.critic(o).squeeze(-1)
 
     @torch.no_grad()
     def act(self, o, greedy=False):
-        logits = self.actor(self.obs_rms.norm(o))
+        logits = self.actor(o)
         if greedy:
             return logits.argmax(-1)
         return torch.distributions.Categorical(logits=logits).sample()
 
     def export_mlp(self):
-        """Fold the current obs normalisation into the actor's first Linear, so
-        the exported net is a plain MLP that runs on RAW obs - transfer / watch /
-        deathcam load it unchanged."""
+        """Export the actor as a plain MLPPolicy (identical weights). The obs is
+        already normalised by construction in obs.py, so there is nothing to
+        fold - transfer / watch / deathcam load this unchanged."""
         pol = MLPPolicy(hidden=self.hidden)
-        sd = {k: v.clone() for k, v in self.actor.state_dict().items()}
-        m = self.obs_rms.mean
-        inv = 1.0 / self.obs_rms.std                 # [OBS_DIM]
-        W0 = sd["0.weight"]                           # [h, OBS_DIM]
-        sd["0.bias"] = sd["0.bias"] - (W0 * inv) @ m
-        sd["0.weight"] = W0 * inv
-        pol.net.load_state_dict(sd)
+        pol.net.load_state_dict(self.actor.state_dict())
         return pol
 
 
@@ -143,7 +142,7 @@ def train_ppo(args, sim, dev, run):
         de = torch.zeros((), device=dev)
         nd = torch.zeros((), device=dev)
         for i in range(n_dec):
-            a = ac.actor(ac.obs_rms.norm(o)).argmax(-1)
+            a = ac.actor(o).argmax(-1)
             o, _, done = eval_sim.step(a)
             el = el + 1.0
             df = done.float()
@@ -219,8 +218,7 @@ def train_ppo(args, sim, dev, run):
         total += T * B
         upd += 1
 
-        ac.obs_rms.update(o_buf)                          # v28: obs normalisation stats
-        r_use = r_buf / ret_rms.std                       # v28: normalised rewards
+        r_use = r_buf / ret_rms.std                       # v28: reward normalisation (train-only)
         with torch.no_grad():
             _, last_v = ac(obs)
             adv = torch.zeros(T, B, device=dev)
