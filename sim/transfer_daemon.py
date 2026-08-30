@@ -73,6 +73,8 @@ def _append_row(path: Path, row) -> None:
     if path.exists():
         try:
             old = np.load(path)
+            if old.ndim == 2 and old.shape[1] < row.shape[1]:   # pad old (pre-censored col)
+                old = np.hstack([old, np.zeros((len(old), row.shape[1] - old.shape[1]))])
             row = np.vstack([old, row])
         except Exception:
             pass
@@ -82,7 +84,7 @@ def _append_row(path: Path, row) -> None:
     tmp.replace(path)
 
 
-def one_episode(env, pol, frame_skip, hb=None):
+def one_episode(env, pol, frame_skip, cap, hb=None):
     obs, _ = env.reset()
     steps = 0
     done = False
@@ -99,11 +101,10 @@ def one_episode(env, pol, frame_skip, hb=None):
         prev_frame = fr
         if stall > 600:
             raise RuntimeError(f"game frame counter stuck at step {steps}")
-        if time.time() - t0 > 1200:
-            raise RuntimeError(f"episode wall-time > 20 min at step {steps} ({fr} f)")
         if hb and steps % 500 == 0:
             hb(f"    ... {steps} steps ({fr/60:.0f}s in-game, {time.time()-t0:.0f}s wall)")
-    return steps * frame_skip / 60.0, int(info.get("score", 0))
+    surv = steps * frame_skip / 60.0
+    return surv, int(info.get("score", 0)), (surv >= cap - 1.0)
 
 
 def main():
@@ -112,7 +113,8 @@ def main():
     ap.add_argument("--checkpoint", default="last.pt")
     ap.add_argument("--frame-skip", type=int, default=3)
     ap.add_argument("--show", action="store_true", help="leave game windows on-screen")
-    ap.add_argument("--max-seconds", type=float, default=36000.0)
+    ap.add_argument("--cap", type=float, default=400.0,
+                    help="in-game seconds to cap each episode at (censored past this)")
     ap.add_argument("--settle", type=float, default=3.0, help="pause between episodes (s)")
     args = ap.parse_args()
 
@@ -131,17 +133,17 @@ def main():
         env = None
         try:
             pol = MLPPolicy.load(ckpt)
-            env = Th07Env(frame_skip=args.frame_skip, max_seconds=args.max_seconds,
+            env = Th07Env(frame_skip=args.frame_skip, max_seconds=args.cap + 5,
                           render=False)
             if not args.show:
                 _minimise_pid_windows(env.pid)
             t0 = time.time()
-            surv, score = one_episode(env, pol, args.frame_skip,
-                                      hb=lambda m: print(m, flush=True))
+            surv, score, censored = one_episode(env, pol, args.frame_skip, args.cap,
+                                                hb=lambda m: print(m, flush=True))
             n += 1
-            _append_row(out, [time.time(), steps, surv, score])
-            print(f"[{n:4d}]  {steps/1e6:6.1f}M steps   {surv:6.1f}s   score {score:>9d}   "
-                  f"({time.time() - t0:.0f}s wall)", flush=True)
+            _append_row(out, [time.time(), steps, surv, score, float(censored)])
+            print(f"[{n:4d}]  {steps/1e6:6.1f}M steps   {surv:6.1f}s{'+' if censored else ' '}  "
+                  f"score {score:>9d}   ({time.time() - t0:.0f}s wall)", flush=True)
         except Exception as e:
             print(f"episode failed: {type(e).__name__}: {e}", flush=True)
             time.sleep(5)
