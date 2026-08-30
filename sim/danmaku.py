@@ -44,6 +44,29 @@ E_OFF, E_CONE, E_LINE, E_BRING, E_SPRAY = 0, 1, 2, 3, 4
 #  BRING : dense ring. last emitter ORBITS the perimeter; the one before it
 #          bounces around the interior.
 
+# --- per-bullet MOTION PROFILES (v27 domain randomisation) --------------------
+# Every bullet carries a motion type + one param, rolled per emitter per episode.
+# These deliberately BREAK the straight-line assumption baked into the obs
+# (native/obs.py marches every bullet as constant-velocity) so the policy has to
+# react to real bullet state instead of trusting the marched prediction - the
+# fix for ppo_v26's overfit to the old fixed straight-line stage.
+M_STRAIGHT, M_ACCEL, M_DECEL, M_SLITHER, M_ARC, M_HOMING, M_PULSE, M_FREEZE = range(8)
+#  ACCEL   : speed ramps up   (spd0 -> up to 3x over its life)
+#  DECEL   : speed ramps down to a 0.35x floor, then cruises
+#  SLITHER : heading oscillates sinusoidally (snaking bullets)
+#  ARC     : heading turns at a constant rate (spiralling bullets)
+#  HOMING  : steers toward the player for the first ~50 f, then locks
+#  PULSE   : speed oscillates (fast-slow-fast) with no heading change
+#  FREEZE  : the Perfect-Freeze primitive - cruise, decelerate to a full stop,
+#            hold, then re-fire toward the player's position at that moment
+_MOTION_POOL = [M_STRAIGHT, M_STRAIGHT, M_ACCEL, M_DECEL, M_SLITHER,
+                M_ARC, M_HOMING, M_PULSE, M_FREEZE]        # STRAIGHT weighted 2x
+FREEZE_T0 = 48.0        # frames of cruise before the freeze decel starts
+FREEZE_STOP = 20.0      # frames to decelerate to 0
+FREEZE_HOLD = 22.0      # frames held at rest before the redirect
+SLITHER_AMP = 0.55     # rad, peak heading swing
+HOMING_FRAMES = 50.0
+
 # orbit path for the last BRING emitter (an ellipse hugging the playfield edge)
 ORBIT_RX, ORBIT_RY, ORBIT_W = 170.0, 196.0, 0.0105   # ~10 s per lap
 
@@ -58,16 +81,30 @@ TH07_BULLETS = {
     "ball":   dict(hitbox=3.0, draw=7.5),   # medium round - aimed shots, Letty orbs
 }
 
-# fixed stage: every corner gets a CONE + a SPRAY, placed OUTSIDE the playfield
-# so their fire comes IN from the corner and there's no safe pocket to camp;
-# a fast sweeping LINE bottom-right; one bouncing dense-ring emitter + one that
-# orbits the perimeter.  each entry: (behaviour, x, y, bullet-type-name)
+# stage skeleton: home positions for the emitter slots. v27: this is only the
+# DEFAULT layout used for slot sizing. Per EPISODE every emitter re-rolls its
+# behaviour (CONE / SPRAY / LINE / BRING), its motion profile, a position jitter
+# along one axis, and whether it fires at all (a random EMIT_ACTIVE_* of the
+# pool). Plus per-episode: an archetype (sparse-fast / dense-slow / mixed) and
+# brief "sparse windows". So the policy sees millions of stage variants, not one
+# - the fix for ppo_v26's memorisation of the single fixed straight-line stage.
 _CORNERS = [(-14.0, -14.0), (398.0, -14.0), (-14.0, 462.0), (398.0, 462.0)]
 ROSTER = []
 for _cx, _cy in _CORNERS:
     ROSTER += [(E_CONE, _cx, _cy, "ball"), (E_SPRAY, _cx, _cy, "ball")]
 ROSTER.append((E_LINE, 350.0, 412.0, "ball"))
 ROSTER += [(E_BRING, CX, CY, "ball"), (E_BRING, CX, CY, "ball")]  # [-2] bounces, [-1] orbits
+N_CORNER_EMIT = 8                          # ROSTER[0:8] are the corner CONE/SPRAY pairs
+EMIT_ACTIVE_LO, EMIT_ACTIVE_HI = 4, 10     # how many of the pool fire per episode
+JIT_AXIS = 40.0                            # +-px emitter position jitter (one axis/episode)
+# behaviour re-roll pool for the 8 corner slots (LINE and the 2 BRING keep their
+# roles; a corner can become any of these). weighted toward CONE/SPRAY.
+_EMIT_POOL = [E_CONE, E_CONE, E_SPRAY, E_SPRAY, E_LINE, E_BRING]
+
+# sparse windows: per episode, brief spells where MOST emitters go quiet so the
+# policy learns the isolated-bullet sidestep and that "safe" is a real state.
+SPARSE_PERIOD_LO, SPARSE_PERIOD_HI = 720, 1800
+SPARSE_LEN_LO, SPARSE_LEN_HI = 75, 210
 
 # --- enemies ---
 # v16: big waves fly in from off-screen every 12 s, hover ~6 s, leave. 1 HP each;
@@ -84,9 +121,10 @@ EN_RADIUS = 13.0            # v26: 9 -> 13, a caution bias (body contact is deat
 EN_FLY_SPEED = 2.6
 EN_HOVER_FRAMES = 360        # 6 s
 EN_DPS = 1.0 / 45.0          # base dmg/frame at power 0 (1 HP -> 0.75 s to kill)
-EN_DMG_REW = 0.35           # v26: 0.10 -> 0.35, so it hunts enemies instead of camping
+EN_DMG_REW = 0.22          # v27: 0.35 -> 0.22 (v26 locked at ~35% enemy deaths - overshot)
 PWR_STAND_REW = 0.0015     # per frame, x power_frac: makes held power lastingly worth it
-SHOOT_ALIGN_DX = 26.0       # front-only shot: enemy must be within this |dx|
+SHOOT_ALIGN_DX = 15.0       # v27: 26 -> 15. real shot is narrow; the wide window
+                            # taught "hit from the edge" -> a miss on the real game
 
 # enemy aimed bursts: 2 per hover, snapshot-aimed at the player (no tracking)
 EN_BURST_AT = (270.0, 120.0)   # fire when the (down-counting) hover timer crosses these
@@ -108,12 +146,6 @@ IT_GRAVITY = 0.10            # px/frame^2 downward
 IT_TERM_VY = 3.0             # terminal fall speed
 IT_COLLECT_R = 14.0
 IT_REW = 0.60              # reward per P item (v16 0.15 -> 0.30 -> v26 0.60)
-
-# top-right CONE (ROSTER emitter index 2): one-shot 50% chance at t=1s to
-# redirect anywhere in 360 deg, same speed. Those bullets get a 5 s life cap.
-TR_CONE_EIDX = 2
-TR_REDIR_AGE = 60.0
-TR_CONE_LIFE = 300.0
 
 # --- "spam" phase: every ~45-60 s, N roaming spawners near the top of the screen
 # blanket the field with pellets for 10 s, then a 3 s cooldown. ALL other fire +
@@ -175,9 +207,21 @@ class DanmakuSim:
         self.b_active = torch.zeros(B, self.N, device=d)
         # b_rad dropped: bullet hitbox is a per-SLOT constant -> self._slot_rad[N]
         self.b_age = torch.zeros(B, self.N, device=d, dtype=torch.float16)   # frames since spawn
+        # v27 per-bullet motion state (emitter slots only): spawn heading + speed,
+        # a motion-profile id and one param. b_vel is DERIVED from these each frame
+        # for emitter bullets (spam / enemy bursts keep straight b_vel).
+        self.b_head0 = torch.zeros(B, self.N, device=d)
+        self.b_spd0 = torch.zeros(B, self.N, device=d)
+        self.b_mtype = torch.zeros(B, self.N, device=d, dtype=torch.float16)
+        self.b_mp = torch.zeros(B, self.N, device=d, dtype=torch.float16)
         self.cursor = torch.zeros(B, E, device=d)
 
         self.e_pos = torch.zeros(B, E, 2, device=d)
+        self.e_type = torch.zeros(B, E, device=d)          # v27: per-episode behaviour
+        self.e_on = torch.ones(B, E, device=d)             # v27: per-episode active mask
+        self.e_jitxy = torch.zeros(B, E, 2, device=d)      # v27: per-episode position jitter
+        self.e_mtype = torch.zeros(B, E, device=d)         # v27: per-episode motion profile
+        self.e_mp = torch.zeros(B, E, device=d)            # v27: motion param
         self.e_bvel = torch.zeros(B, E, 2, device=d)       # bounce velocity (BRING[-2])
         self.e_oa = torch.zeros(B, E, device=d)            # orbit angle (BRING[-1])
         self.e_speed = torch.zeros(B, E, device=d)
@@ -191,6 +235,12 @@ class DanmakuSim:
         self.e_swamp = torch.zeros(B, E, device=d)
         self.e_swrate = torch.zeros(B, E, device=d)
         self.e_swphase = torch.zeros(B, E, device=d)
+        self.arche = torch.zeros(B, 1, device=d)           # v27: episode archetype 0/1/2
+        # v27 sparse windows: brief spells where most emitters go quiet
+        self.sparse_phase = torch.zeros(B, device=d)       # 0 normal / 1 sparse
+        self.sparse_t = torch.zeros(B, device=d)
+        self.sparse_next = torch.zeros(B, device=d)
+        self.sparse_len = torch.zeros(B, device=d)
 
         # enemies
         self.en_pos = torch.full((B, MAXE, 2), 1e4, device=d)
@@ -236,21 +286,20 @@ class DanmakuSim:
         self._eidx = torch.arange(E, device=d)
         self._is_orbit = (self._eidx == E - 1).float()     # last BRING orbits the edge
 
-        # per-slot bullet lifetime: BRING (slow moving emitters) and the
-        # redirecting top-right CONE get a 5 s (300 f) cap or the screen fills.
+        # per-slot bullet lifetime: v27 - emitter bullets get a flat 8 s cap
+        # (slow / bouncing / arcing / frozen bullets would otherwise pile up).
         slot_emit = torch.arange(self.N, device=d) // self.SPE
-        _capped = ((slot_emit < E) &
-                   ((self._R_type[slot_emit.clamp(max=E - 1)] == E_BRING) |
-                    (slot_emit == TR_CONE_EIDX)))
-        self._slot_life = torch.where(_capped,
-                                      torch.full((self.N,), 300.0, device=d),
+        _is_emit_slot = torch.arange(self.N, device=d) < self._spam_base
+        self._slot_life = torch.where(_is_emit_slot,
+                                      torch.full((self.N,), 480.0, device=d),
                                       torch.full((self.N,), 1e9, device=d))
-        self._tr_cone_slot = (slot_emit == TR_CONE_EIDX)
         self._spam_slot = ((torch.arange(self.N, device=d) >= self._spam_base) &
                            (torch.arange(self.N, device=d) < self._en_base))
         self._en_slot = ((torch.arange(self.N, device=d) >= self._en_base) &
                          (torch.arange(self.N, device=d) < self.dump))
-        self.b_redir = torch.zeros(B, self.N, device=d, dtype=torch.float16)  # TR-cone redirect flag
+        self._emit_slot = (torch.arange(self.N, device=d) < self._spam_base)  # [N]
+        self._slot_emit_ix = slot_emit.clamp(max=E - 1)                       # [N] which emitter
+        self.b_redir = torch.zeros(B, self.N, device=d, dtype=torch.float16)  # M_FREEZE: redirected flag
 
         # per-slot bullet hitbox (radius): emitter slots use their emitter's type,
         # spam slots = pellet, enemy-burst slots = ball. Constant across the batch.
@@ -302,12 +351,57 @@ class DanmakuSim:
         B, E, d = self.B, self.E, self.dev
         mb = m > 0.5
         mbe = mb.expand(B, E)
-        is_line = (self._R_type == E_LINE)[None, :].expand(B, E)     # [B,E]
-        is_bring = (self._R_type == E_BRING)[None, :].expand(B, E)
-        is_cone = (self._R_type == E_CONE)[None, :].expand(B, E)
-        is_spray = (self._R_type == E_SPRAY)[None, :].expand(B, E)
-        is_orbit = (self._eidx == E - 1)[None, :].expand(B, E)       # last BRING orbits
+
+        # ---- v27: re-roll the STAGE per episode ---------------------------------
+        is_orbit = (self._eidx == E - 1)[None, :].expand(B, E)       # last slot orbits
+        is_line_slot = (self._eidx == E - 3)[None, :].expand(B, E)   # slot E-3 stays LINE
+        # corner slots (0 .. E-3 exclusive) re-roll their behaviour; LINE + the 2
+        # BRING keep their slot roles.
+        pool = torch.tensor(_EMIT_POOL, device=d)
+        rolled = pool[self._ri(0, len(_EMIT_POOL), B, E).long()]      # [B,E]
+        new_type = torch.where(is_orbit | (self._eidx == E - 2)[None, :].expand(B, E),
+                               torch.full((B, E), float(E_BRING), device=d),
+                    torch.where(is_line_slot, torch.full((B, E), float(E_LINE), device=d),
+                                rolled.float()))
+        self.e_type = torch.where(mbe, new_type, self.e_type)
+        is_line = new_type == E_LINE
+        is_bring = new_type == E_BRING
+        is_spray = new_type == E_SPRAY
         is_bounce = is_bring & ~is_orbit
+
+        # per-episode active mask: a random EMIT_ACTIVE_* subset fires
+        n_act = self._ri(EMIT_ACTIVE_LO, EMIT_ACTIVE_HI, B, 1)       # [B,1]
+        perm_rank = torch.argsort(torch.argsort(self._r(B, E), dim=1), dim=1)
+        new_on = (perm_rank < n_act).float()
+        self.e_on = torch.where(mbe, new_on, self.e_on)
+
+        # per-episode position jitter along ONE axis (kept so corner emitters stay
+        # outside the field: jitter is signed toward "more outside" for corners)
+        jamt = self._r(B, E, lo=-JIT_AXIS, hi=JIT_AXIS)
+        jx = self._r(B, E) > 0.5
+        jit = torch.stack([torch.where(jx, jamt, torch.zeros_like(jamt)),
+                           torch.where(jx, torch.zeros_like(jamt), jamt)], -1)
+        self.e_jitxy = torch.where(mbe[:, :, None], jit, self.e_jitxy)
+
+        # per-episode motion profile (CONE/SPRAY/LINE roll; BRING stays straight)
+        mpool = torch.tensor(_MOTION_POOL, device=d)
+        mt = mpool[self._ri(0, len(_MOTION_POOL), B, E).long()].float()
+        mt = torch.where(is_bring, torch.zeros_like(mt), mt)         # M_STRAIGHT
+        self.e_mtype = torch.where(mbe, mt, self.e_mtype)
+        e_mp = torch.where(mt == M_ACCEL, self._r(B, E, lo=0.010, hi=0.030),
+               torch.where(mt == M_DECEL, self._r(B, E, lo=0.010, hi=0.024),
+               torch.where(mt == M_SLITHER, self._r(B, E, lo=0.06, hi=0.16),
+               torch.where(mt == M_ARC, self._r(B, E, lo=-0.028, hi=0.028),
+               torch.where(mt == M_HOMING, self._r(B, E, lo=0.006, hi=0.018),
+               torch.where(mt == M_PULSE, self._r(B, E, lo=0.05, hi=0.13),
+                           self._r(B, E, lo=0.1, hi=0.3)))))))
+        self.e_mp = torch.where(mbe, e_mp, self.e_mp)
+
+        # per-episode archetype: 0 fast+sparse, 1 slow+dense, 2 mixed
+        arche = self._ri(0, 3, B, 1)
+        self.arche = torch.where(mb, arche, self.arche)
+        a_spd = torch.where(arche == 0, 1.15, torch.where(arche == 1, 0.85, 1.0))
+        a_prd = torch.where(arche == 0, 1.35, torch.where(arche == 1, 0.8, 1.0))   # x fire period
 
         # spawn lower-centre (like real Touhou)
         px = self._r(B, 1, lo=PX_LO + 50, hi=PX_HI - 50)
@@ -315,18 +409,17 @@ class DanmakuSim:
         self.player = torch.where(mb, torch.cat([px, py], 1), self.player)
         self.frame = torch.where(mb, torch.zeros_like(self.frame), self.frame)
         self.alive = torch.where(mb, torch.ones_like(self.alive), self.alive)
-        # per-episode bullet-speed variation (NOT a curriculum - the stage is
-        # always the full stage; this just keeps episodes from being identical)
         diff = 0.2 + 0.8 * self._r(B, 1)
         self.diff = torch.where(mb, diff, self.diff)
-        dsc = 0.75 + 0.55 * diff                                     # bullet-speed mult ~0.9..1.2
+        dsc = (0.75 + 0.55 * diff) * a_spd                           # bullet-speed mult
 
         self.b_active = torch.where(mb, torch.zeros_like(self.b_active), self.b_active)
         self.cursor = torch.where(mb, torch.zeros_like(self.cursor), self.cursor)
 
-        # static emitters: roster positions. bouncing one: random interior start
-        # + fixed-speed random heading. orbiting one: random start angle.
-        self.e_pos = torch.where(mbe[:, :, None], self._R_xy.expand(B, E, 2), self.e_pos)
+        # emitter positions: home + per-episode jitter; bouncers get a random
+        # interior start, the orbiter rides the perimeter ellipse.
+        home = self._R_xy.expand(B, E, 2) + self.e_jitxy
+        self.e_pos = torch.where(mbe[:, :, None], home, self.e_pos)
         bstart = torch.stack([self._r(B, E, lo=CX - 60, hi=CX + 60),
                               self._r(B, E, lo=CY - 60, hi=CY + 60)], -1)
         self.e_pos = torch.where((mbe & is_bounce)[:, :, None], bstart, self.e_pos)
@@ -337,24 +430,21 @@ class DanmakuSim:
                                               self.e_bvel))
         self.e_oa = torch.where(mbe & is_orbit, self._r(B, E, lo=0, hi=TAU), self.e_oa)
 
-        # per-type tunables. BRING (the moving emitters) are FULLY FIXED:
-        # bullet speed 0.24 (~1/3 of before), period 33 (~half the fire rate),
-        # 9 shots, radius 3.2 - no per-episode variation.
         speed = torch.where(is_line, self._r(B, E, lo=3.0, hi=4.0) * dsc,
-                torch.where(is_bring, torch.full((B, E), 0.24, device=d),
+                torch.where(is_bring, self._r(B, E, lo=0.20, hi=0.34),
                 torch.where(is_spray, self._r(B, E, lo=1.8, hi=2.8) * dsc,
                             self._r(B, E, lo=2.1, hi=3.0) * dsc)))
         self.e_speed = torch.where(mbe, speed, self.e_speed)
 
         period = torch.where(is_line, self._ri(5, 9, B, E),
-                 torch.where(is_bring, torch.full((B, E), 33.0, device=d),
-                 torch.where(is_spray, self._ri(26, 44, B, E),
-                             self._ri(28, 48, B, E))))
-        self.e_period = torch.where(mbe, period, self.e_period)
+                 torch.where(is_bring, self._ri(28, 40, B, E),
+                 torch.where(is_spray, self._ri(24, 46, B, E),
+                             self._ri(26, 50, B, E)))) * a_prd
+        self.e_period = torch.where(mbe, period.clamp(min=3.0), self.e_period)
         self.e_phase = torch.where(mbe, torch.floor(self._r(B, E) * period), self.e_phase)
 
         nsp = torch.where(is_line, torch.ones(B, E, device=d),
-              torch.where(is_bring, torch.full((B, E), 9.0, device=d),
+              torch.where(is_bring, self._ri(7, 12, B, E),
               torch.where(is_spray, self._ri(4, 8, B, E),
                           self._ri(3, 6, B, E))))
         self.e_nspawn = torch.where(mbe, nsp, self.e_nspawn)
@@ -364,7 +454,7 @@ class DanmakuSim:
                              self._r(B, E, lo=0.09, hi=0.20))
         self.e_spread = torch.where(mbe, spread, self.e_spread)
         self.e_ang = torch.where(mbe, self._r(B, E, lo=0, hi=TAU), self.e_ang)
-        dang = torch.where(is_bring, torch.full((B, E), 0.06, device=d),
+        dang = torch.where(is_bring, self._r(B, E, lo=-0.10, hi=0.10),
                            self._r(B, E, lo=-0.25, hi=0.25))
         self.e_dang = torch.where(mbe, dang, self.e_dang)
 
@@ -390,6 +480,15 @@ class DanmakuSim:
         self.en_bcursor = torch.where(mb1, torch.zeros_like(self.en_bcursor), self.en_bcursor)
         self.spam_next = torch.where(
             mb1, self._r(B, lo=float(SPAM_PERIOD_LO), hi=float(SPAM_PERIOD_HI)), self.spam_next)
+
+        # v27 sparse-window schedule
+        self.sparse_phase = torch.where(mb1, torch.zeros_like(self.sparse_phase), self.sparse_phase)
+        self.sparse_t = torch.where(mb1, torch.zeros_like(self.sparse_t), self.sparse_t)
+        self.sparse_next = torch.where(
+            mb1, self._r(B, lo=float(SPARSE_PERIOD_LO), hi=float(SPARSE_PERIOD_HI)),
+            self.sparse_next)
+        self.sparse_len = torch.where(
+            mb1, self._r(B, lo=float(SPARSE_LEN_LO), hi=float(SPARSE_LEN_HI)), self.sparse_len)
 
     def reset(self):
         self._spawn(torch.ones(self.B, 1, device=self.dev))
@@ -449,6 +548,44 @@ class DanmakuSim:
         self.player = self.player + moving * mv / norm * spd
         self.player = torch.stack([self.player[:, 0].clamp(PX_LO, PX_HI),
                                    self.player[:, 1].clamp(PY_LO, PY_HI)], 1)
+
+        # --- v27: resolve per-bullet MOTION PROFILE for emitter slots ----------
+        # b_vel is DERIVED each frame from (spawn heading + speed, motion type,
+        # param, age). Non-linear on purpose - breaks the obs's straight-line
+        # march so the policy reacts instead of trusting the prediction.
+        age = self.b_age.float()                                   # [B,N]
+        mt = self.b_mtype.float()
+        mp = self.b_mp.float()
+        h0 = self.b_head0
+        s0 = self.b_spd0
+        accel_f = (1.0 + mp * age).clamp(max=3.0)
+        decel_f = (1.0 - mp * age).clamp(min=0.35)
+        pulse_f = 1.0 + 0.5 * torch.sin(age * mp)
+        _fz_a, _fz_b = FREEZE_T0, FREEZE_T0 + FREEZE_STOP
+        _fz_c = _fz_b + FREEZE_HOLD
+        freeze_f = torch.where(age < _fz_a, torch.ones_like(age),
+                   torch.where(age < _fz_b, ((_fz_b - age) / FREEZE_STOP).clamp(0.0, 1.0),
+                   torch.where(age < _fz_c, torch.zeros_like(age), torch.ones_like(age))))
+        spd = s0 * torch.where(mt == M_ACCEL, accel_f,
+                  torch.where(mt == M_DECEL, decel_f,
+                  torch.where(mt == M_PULSE, pulse_f,
+                  torch.where(mt == M_FREEZE, freeze_f, torch.ones_like(age)))))
+        # heading: SLITHER oscillates, ARC turns, HOMING steers toward the player
+        # then locks, FREEZE re-aims at the player once when the hold ends.
+        rel = self.player[:, None, :] - self.b_pos                 # [B,N,2]
+        tgt_h = torch.atan2(rel[..., 1], rel[..., 0])
+        fz_redir = ((mt == M_FREEZE) & (age >= _fz_c) & (self.b_redir < 0.5)
+                    & (self.b_active > 0.5))
+        self.b_head0 = torch.where(fz_redir, tgt_h, self.b_head0)
+        self.b_redir = torch.where(fz_redir, torch.ones_like(self.b_redir), self.b_redir)
+        h0 = self.b_head0
+        dh = torch.remainder(tgt_h - h0 + math.pi, TAU) - math.pi
+        home_h = h0 + dh.clamp(-0.7, 0.7) * (mp * torch.clamp(age, max=HOMING_FRAMES))
+        head = torch.where(mt == M_SLITHER, h0 + SLITHER_AMP * torch.sin(age * mp),
+               torch.where(mt == M_ARC, h0 + mp * age,
+               torch.where(mt == M_HOMING, home_h, h0)))
+        mvel = torch.stack([spd * torch.cos(head), spd * torch.sin(head)], -1)
+        self.b_vel = torch.where(self._emit_slot[None, :, None], mvel, self.b_vel)
 
         # --- move bullets (spam pellets get a 2x burst for their first 0.2 s),
         #     cull off-screen + past lifetime ---
@@ -565,17 +702,32 @@ class DanmakuSim:
             self.spam_next)
         spam_gate = (self.spam_phase > 0.5)[:, None]                 # [B,1] pause normal fire
 
+        # --- v27 sparse windows: brief spells where emitters go quiet ----------
+        sp_trig = (self.sparse_phase < 0.5) & (frs >= self.sparse_next)
+        self.sparse_phase = torch.where(sp_trig, torch.ones_like(self.sparse_phase),
+                                        self.sparse_phase)
+        self.sparse_t = torch.where(sp_trig, torch.zeros_like(self.sparse_t), self.sparse_t)
+        in_sparse = self.sparse_phase > 0.5
+        self.sparse_t = torch.where(in_sparse, self.sparse_t + 1.0, self.sparse_t)
+        sp_end = in_sparse & (self.sparse_t >= self.sparse_len)
+        self.sparse_phase = torch.where(sp_end, torch.zeros_like(self.sparse_phase),
+                                        self.sparse_phase)
+        self.sparse_next = torch.where(
+            sp_end, frs + self._r(B, lo=float(SPARSE_PERIOD_LO), hi=float(SPARSE_PERIOD_HI)),
+            self.sparse_next)
+        quiet_gate = (spam_gate.squeeze(1) | in_sparse)[:, None]     # [B,1]
+
         # --- emitters fire ---
         fr = self.frame                                     # [B,1]
-        due = (((fr % self.e_period) == self.e_phase) & (self._R_type[None, :] > 0)
-               & ~spam_gate)
+        due = (((fr % self.e_period) == self.e_phase) & (self.e_on > 0.5)
+               & ~quiet_gate)
         kk = self._k[None, None, :]                         # [1,1,K]
         nsp = self.e_nspawn[:, :, None]                     # [B,E,1]
         emit = due[:, :, None] & (kk < nsp)                 # [B,E,K]
 
         epos = self.e_pos
         spd_e = self.e_speed[:, :, None]
-        typ = self._R_type[None, :, None]                   # [1,E,1]
+        typ = self.e_type[:, :, None]                       # [B,E,1] per-episode behaviour
 
         spr = self.e_spread[:, :, None]
         base_aim = torch.atan2(CY - epos[:, :, 1:2], CX - epos[:, :, 0:1])   # [B,E,1]
@@ -592,6 +744,9 @@ class DanmakuSim:
 
         cpos = epos[:, :, None, :].expand(B, E, K, 2)
         cvel = torch.stack([spd_e * torch.cos(ang), spd_e * torch.sin(ang)], -1)
+        c_mt = self.e_mtype[:, :, None].expand(B, E, K)         # motion profile per bullet
+        c_mp = self.e_mp[:, :, None].expand(B, E, K)
+        c_sp = self.e_speed[:, :, None].expand(B, E, K)
 
         raw = self._ebase[None, :, None] + (self.cursor[:, :, None] + kk) % self.SPE
         idx = torch.where(emit, raw, torch.full_like(raw, float(self.dump))).long()
@@ -600,6 +755,10 @@ class DanmakuSim:
                                         cpos.reshape(B, E * K, 2))
         self.b_vel = self.b_vel.scatter(1, idxf[:, :, None].expand(B, E * K, 2),
                                         cvel.reshape(B, E * K, 2))
+        self.b_head0 = self.b_head0.scatter(1, idxf, ang.expand(B, E, K).reshape(B, E * K))
+        self.b_spd0 = self.b_spd0.scatter(1, idxf, c_sp.reshape(B, E * K))
+        self.b_mtype = self.b_mtype.scatter(1, idxf, c_mt.reshape(B, E * K).half())
+        self.b_mp = self.b_mp.scatter(1, idxf, c_mp.reshape(B, E * K).half())
         self.b_active = self.b_active.scatter(1, idxf, emit.reshape(B, E * K).float())
         self.b_age = self.b_age.scatter(
             1, idxf, torch.zeros(B, E * K, device=self.dev, dtype=torch.float16))
@@ -609,17 +768,6 @@ class DanmakuSim:
 
         self.cursor = torch.where(due, (self.cursor + self.e_nspawn) % self.SPE, self.cursor)
         self.e_ang = self.e_ang + due.float() * self.e_dang
-
-        # --- top-right CONE: one-shot 50% redirect at t=1s (360 deg) ---
-        tr_due = (self._tr_cone_slot[None, :] & (self.b_age >= TR_REDIR_AGE) &
-                  (self.b_redir < 0.5) & (self.b_active > 0.5))          # [B,N]
-        roll = torch.rand(B, self.N, generator=self.g, device=d) < 0.5
-        do_rd = tr_due & roll
-        rang = torch.rand(B, self.N, generator=self.g, device=d) * TAU
-        rspd = self.b_vel.norm(dim=2, keepdim=True)
-        rvel = torch.stack([torch.cos(rang), torch.sin(rang)], -1) * rspd
-        self.b_vel = torch.where(do_rd[:, :, None], rvel, self.b_vel)
-        self.b_redir = torch.where(tr_due, torch.ones_like(self.b_redir), self.b_redir)
 
         # --- enemies: waves fly in, hover, leave ---
         wave_due = ((frs % WAVE_PERIOD) < 1.0) & (frs > 1.0) & ~spam_gate.squeeze(1)  # [B]

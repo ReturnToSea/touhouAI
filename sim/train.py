@@ -124,7 +124,7 @@ def train_ppo(args, sim, dev, run):
 
     ep_ret = torch.zeros(B, device=dev)
     ep_len = torch.zeros(B, device=dev)
-    hist, best = [], -1e9
+    hist, best, last_snap_M = [], -1e9, 0
     total, upd, t0 = 0, 0, time.perf_counter()
     recent_len, recent_ret = [], []
     next_log = 1_000_000            # cheap status line every ~1M steps
@@ -224,6 +224,13 @@ def train_ppo(args, sim, dev, run):
                 best = score
                 ac.export_mlp().save(run / "best.pt")
             ac.export_mlp().save(run / "last.pt")
+            # timestamped snapshots every ~40M steps - sim greedy score does NOT
+            # track real-game transfer (ppo_v26 got WORSE on the real game while
+            # its sim median rose), so keep a trail to transfer-test and pick from.
+            snap_M = int(total / 1e6)
+            if snap_M - last_snap_M >= 40:
+                last_snap_M = snap_M
+                ac.export_mlp().save(run / f"snap_{snap_M:04d}M.pt")
             np.save(run / "history.npy", np.array(hist))
 
 
