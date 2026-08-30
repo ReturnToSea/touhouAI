@@ -21,6 +21,8 @@ from pathlib import Path
 import numpy as np
 import torch
 
+torch.set_num_threads(1)   # B=1 sim - default OMP threads thrash all cores for ~nothing
+
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 sys.path.insert(0, str(HERE.parent / "native"))

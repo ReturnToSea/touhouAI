@@ -23,6 +23,9 @@ import time
 from pathlib import Path
 
 import numpy as np
+import torch
+
+torch.set_num_threads(1)   # B=1 policy forward - default 12 OMP threads just thrash
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent / "native"))

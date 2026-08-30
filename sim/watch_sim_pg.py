@@ -21,6 +21,8 @@ import numpy as np
 import pygame
 import torch
 
+torch.set_num_threads(1)   # B=1 sim - default OMP threads thrash all cores for ~nothing
+
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 sys.path.insert(0, str(HERE.parent / "native"))
@@ -232,12 +234,14 @@ class Watcher:
         return n
 
     def _sim_loop(self):
+        target_dt = self.sim.frame_skip / 60.0   # one step == this much real time
         while self.running:
+            t0 = time.perf_counter()
             if getattr(self, "_reset_req", False):
                 self._reset_req = False
                 self.obs = self.sim.reset()
             if self.paused:
-                time.sleep(0.03)
+                time.sleep(0.10)              # STOPPED: ~no CPU
                 continue
             if self.args.follow and time.time() - self.last_load > 3:
                 self._load()
@@ -253,6 +257,11 @@ class Watcher:
             snap = self._snapshot()
             with self.lock:
                 self.snap = snap
+            # pace to real time - no reason to sim faster than the game runs, and
+            # the sleep hands the core back
+            lag = target_dt - (time.perf_counter() - t0)
+            if lag > 0:
+                time.sleep(lag)
 
     # ------------------------------------------------------------------ loop
     def run(self):
@@ -263,10 +272,14 @@ class Watcher:
         self.snap = self._snapshot()
         th = threading.Thread(target=self._sim_loop, daemon=True)
         th.start()
+        self._btn = pygame.Rect(self.W - 300, 4, 128, 18)   # start/stop button
         while self.running:
             for ev in pygame.event.get():
                 if ev.type == pygame.QUIT:
                     self.running = False
+                elif ev.type == pygame.MOUSEBUTTONDOWN and ev.button == 1:
+                    if self._btn.collidepoint(ev.pos):
+                        self.paused = not self.paused
                 elif ev.type == pygame.KEYDOWN:
                     if ev.key == pygame.K_ESCAPE:
                         self.running = False
@@ -281,8 +294,14 @@ class Watcher:
             with self.lock:
                 snap = self.snap
             self._draw(snap)
+            b = self._btn
+            pygame.draw.rect(sc := self.screen, (60, 26, 30) if not self.paused else (26, 46, 30), b)
+            pygame.draw.rect(sc, (120, 90, 90) if not self.paused else (90, 120, 90), b, 1)
+            lbl = "|| STOPPED  (click)" if self.paused else ">  running  (click)"
+            sc.blit(self.f7.render(lbl, True, (240, 180, 180) if not self.paused else (180, 240, 180)),
+                    (b.x + 6, b.y + 2))
             pygame.display.flip()
-            self.clock.tick(60)
+            self.clock.tick(12 if self.paused else 60)   # STOPPED: idle the render loop too
         th.join(timeout=1.0)
         pygame.quit()
 

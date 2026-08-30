@@ -159,7 +159,11 @@ class Hud:
             return
         xmax = max(r["steps"][-1] for r in runs) / 1e6 or 1.0
         def _mx(r):
-            return np.nanmax(r["p90"]) if not np.all(np.isnan(r["p90"])) else r["surv"].max()
+            m = np.nanmax(r["p90"]) if not np.all(np.isnan(r["p90"])) else r["surv"].max()
+            if r.get("rt_surv") is not None and len(r["rt_surv"]):
+                # 90th pct of real-game episodes, so one lucky run doesn't blow the scale
+                m = max(m, float(np.percentile(r["rt_surv"], 90)))
+            return m
         ymax = max(2.0, max(_mx(r) for r in runs)) * 1.1
         x0, x1, y0, y1 = PL, W - PR, H - PB, PT
 
