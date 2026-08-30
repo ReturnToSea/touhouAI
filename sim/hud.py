@@ -171,11 +171,10 @@ class Hud:
         xmax = max(r["steps"][-1] for r in runs) / 1e6 or 1.0
         def _mx(r):
             m = np.nanmax(r["p90"]) if not np.all(np.isnan(r["p90"])) else r["surv"].max()
-            if r.get("rt_surv") is not None and len(r["rt_surv"]):
-                # 90th pct of real-game episodes, so one lucky run doesn't blow the scale
-                m = max(m, float(np.percentile(r["rt_surv"], 90)))
+            if r.get("rt_hi") is not None and len(r["rt_hi"]):
+                m = max(m, float(np.max(r["rt_hi"])))   # the drawn "best" line must fit
             return m
-        ymax = max(2.0, max(_mx(r) for r in runs)) * 1.1
+        ymax = max(2.0, max(_mx(r) for r in runs)) * 1.06
         x0, x1, y0, y1 = PL, W - PR, H - PB, PT
 
         def X(v):
@@ -220,14 +219,16 @@ class Hud:
                                        outline="", fill="#5a2a3a")
                 if r.get("rt_x") is not None and len(r["rt_x"]) >= 2:
                     rx = r["rt_x"]
-                    for key, col, wdt in (("rt_lo", "#8a5c6a", 1), ("rt_hi", "#8a5c6a", 1),
-                                          ("rt_md", "#ff5c8a", 2)):
-                        pts = [co for s, y in zip(rx, r[key])
-                               for co in (X(s), Y(min(y, ymax)))]
-                        cv.create_line(*pts, fill=col, width=wdt, smooth=True)
-                    cv.create_text(X(rx[-1]), Y(min(r["rt_md"][-1], ymax)) - 8,
+                    for key, col, wdt, dash in (("rt_hi", "#ffc2d6", 1, (2, 2)),
+                                                ("rt_lo", "#9a5470", 1, (2, 2)),
+                                                ("rt_md", "#ff5c8a", 2, ())):
+                        v = r[key]
+                        pts = [co for s, y in zip(rx, v) for co in (X(s), Y(min(y, ymax)))]
+                        cv.create_line(*pts, fill=col, width=wdt, smooth=True, dash=dash)
+                    cv.create_text(X(rx[-1]) - 3, Y(min(r["rt_md"][-1], ymax)) - 9,
                                    anchor="e", fill="#ff5c8a", font=("Consolas", 8),
-                                   text="real game (worst/med/best)")
+                                   text=f"real  {r['rt_lo'][-1]:.0f}/{r['rt_md'][-1]:.0f}/"
+                                        f"{r['rt_hi'][-1]:.0f}s")
         cv.create_text((x0 + x1) / 2, PT, fill="#9aa4b4", font=("Consolas", 9),
                        text="sim: p90 (—) median (··)    real game: median (—) worst/best (thin)   vs steps")
 
