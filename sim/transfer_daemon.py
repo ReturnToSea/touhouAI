@@ -164,8 +164,11 @@ def main():
     ap.add_argument("--checkpoint", default="last.pt")
     ap.add_argument("--frame-skip", type=int, default=3)
     ap.add_argument("--show", action="store_true", help="leave game windows on-screen")
-    ap.add_argument("--cap", type=float, default=400.0,
-                    help="in-game seconds to cap each episode at (censored past this)")
+    ap.add_argument("--cap", type=float, default=1800.0,
+                    help="in-game seconds to cap each episode at (censored past this). "
+                    "High by design - we want each run to go until death / stage clear; "
+                    "this only exists so a genuinely hung episode can't block the loop "
+                    "forever (the stall detectors are the real backstop).")
     ap.add_argument("--settle", type=float, default=3.0, help="pause between episodes (s)")
     args = ap.parse_args()
 
