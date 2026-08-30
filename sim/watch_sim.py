@@ -229,15 +229,14 @@ class Watcher:
                             outline="#3fa7ff", width=1, dash=(3, 3))
 
         # bullets: b_rad is the real th07 hitbox (2-3 px), sprite is ~2.4x that.
-        # near the player -> sprite + bright hitbox dot; far away -> one cheap dot
-        # (keeps the draw fast when a spam phase floods the field).
+        # all drawn at real sprite size; near the player also gets a bright hitbox
+        # dot. far ones = one flat oval (skip the stipple + dot) so a spam flood
+        # still draws fast.
         if len(bpos):
             nearm = (np.abs(bpos[:, 0] - px) < box) & (np.abs(bpos[:, 1] - py) < box)
-            far = bpos[~nearm]
-            if len(far) > 500:                       # spam phase - subsample the far dots
-                far = far[:: (len(far) // 500 + 1)]
-            for (bx, by) in far:
-                cv.create_oval(cx(bx) - 1.6, cy(by) - 1.6, cx(bx) + 1.6, cy(by) + 1.6,
+            for (bx, by), r in zip(bpos[~nearm], brad[~nearm]):
+                spr = max(2.2, r * 2.4 * SCALE)
+                cv.create_oval(cx(bx) - spr, cy(by) - spr, cx(bx) + spr, cy(by) + spr,
                                fill="#5b6472", outline="")
             for (bx, by), r in zip(bpos[nearm], brad[nearm]):
                 spr = max(2.5, r * 2.4 * SCALE)
