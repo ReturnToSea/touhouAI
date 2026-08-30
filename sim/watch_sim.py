@@ -259,17 +259,24 @@ class Watcher:
             cv.create_text(cx(PW / 2), cy(6), fill="#ff9c33", font=("Consolas", 10, "bold"),
                            text=lab)
 
-        # front-only shot column: the shot only hits an enemy within +-26px of
-        # the player's x and above it (teaches "position under the target").
+        # FRONT-ONLY SHOT column: the shot only hits an enemy within +-26px of
+        # the player's x and above it. Filled band up the screen; bright when
+        # SHOOT is held. This is exactly the region the policy can damage.
         ALIGN = 26.0
-        cv.create_line(cx(px - ALIGN), cy(0), cx(px - ALIGN), cy(py), fill="#3a3a22", dash=(2, 4))
-        cv.create_line(cx(px + ALIGN), cy(0), cx(px + ALIGN), cy(py), fill="#3a3a22", dash=(2, 4))
+        shooting = (a // 18) % 2
+        fill_c = "#6b6320" if shooting else "#33321c"
+        cv.create_rectangle(cx(px - ALIGN), cy(0), cx(px + ALIGN), cy(py),
+                            fill=fill_c, outline="", stipple="gray25")
+        cv.create_line(cx(px - ALIGN), cy(0), cx(px - ALIGN), cy(py),
+                       fill="#ffe14d" if shooting else "#5a5533", dash=(3, 3))
+        cv.create_line(cx(px + ALIGN), cy(0), cx(px + ALIGN), cy(py),
+                       fill="#ffe14d" if shooting else "#5a5533", dash=(3, 3))
 
-        # enemies (magenta = active), hp bar above; line to the one being shot
+        # enemies (magenta = active), hp bar above; ring + line on the one in the
+        # column that the shot is actually hitting
         en_act = s.en_active[0].numpy() > 0.5
         en_pos = s.en_pos[0].numpy()
         en_hp = s.en_hp[0].numpy()
-        shooting = (a // 18) % 2
         near_i, near_d = -1, 1e9
         for k in range(len(en_act)):
             if not en_act[k]:
@@ -283,9 +290,13 @@ class Watcher:
             hpf = max(0.0, min(1.0, en_hp[k] / 2.0))
             cv.create_rectangle(cx(ex) - 10, cy(ey) - 16, cx(ex) - 10 + 20 * hpf, cy(ey) - 13,
                                 fill="#66ff88", outline="")
-        if shooting and near_i >= 0:
+        if near_i >= 0:
             ex, ey = en_pos[near_i]
-            cv.create_line(cx(px), cy(py), cx(ex), cy(ey), fill="#ffe14d", width=2)
+            col = "#ffe14d" if shooting else "#7a7440"
+            cv.create_oval(cx(ex) - 12, cy(ey) - 12, cx(ex) + 12, cy(ey) + 12,
+                           outline=col, width=2)
+            if shooting:
+                cv.create_line(cx(px), cy(py), cx(ex), cy(ey), fill="#ffe14d", width=3)
 
         # P items (falling) + the collect radius
         it_act = s.it_active[0].numpy() > 0.5
