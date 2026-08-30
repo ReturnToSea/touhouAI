@@ -478,6 +478,13 @@ static int __fastcall hooked_do_tick(void* self, void* edx) {
     Shm* s = g_shm;
     s->alive = 1;
 
+    // Window::do_tick starts with `if ([this+8] == 0) return 0;` - a "run a
+    // logic frame now" gate the WinMain loop normally toggles. Headless it can
+    // stick at 0 around boss transitions (Cirno defeat), freezing all game logic
+    // while our frame counter keeps ticking. Force it on whenever we're driving.
+    if (self && s->state != ST_FREE && s->state != ST_IDLE)
+        *(volatile int32_t*)((char*)self + 8) = 1;
+
     switch (s->state) {
         case ST_FREE: {
             int r = orig_do_tick(self, edx);
