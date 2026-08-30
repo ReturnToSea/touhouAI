@@ -49,15 +49,24 @@ class _Stalled(Exception):
 
 
 def _minimise_pid_windows(pid: int) -> None:
-    """SW_SHOWMINNOACTIVE th07's windows - it keeps ticking in the background
-    (no defocus pause in this config) and stays out of the way."""
+    """SW_SHOWMINNOACTIVE th07's real window - it keeps ticking in the
+    background (no defocus pause in this config) and stays out of the way.
+
+    Skip the per-process hidden helper windows (class "IME" / title "Default
+    IME", and "MSCTFIME UI"): ShowWindow'ing those drops a stray minimised-
+    caption stub in the bottom-left of the screen."""
     want = ctypes.c_ulong(pid)
+    _SKIP = {"IME", "MSCTFIME UI"}
 
     @ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
     def cb(hwnd, _):
         p = ctypes.c_ulong()
         _u32.GetWindowThreadProcessId(hwnd, ctypes.byref(p))
-        if p.value == want.value:
+        if p.value != want.value:
+            return True
+        buf = ctypes.create_unicode_buffer(64)
+        _u32.GetClassNameW(hwnd, buf, 64)
+        if buf.value not in _SKIP:
             _u32.ShowWindow(hwnd, 7)   # SW_SHOWMINNOACTIVE
         return True
 
