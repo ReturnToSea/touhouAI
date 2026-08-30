@@ -24,7 +24,11 @@ import torch
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 sys.path.insert(0, str(HERE.parent / "native"))
-from danmaku import DanmakuSim  # noqa: E402
+from danmaku import DanmakuSim, E_CONE, E_SPRAY, E_LINE, E_BRING  # noqa: E402
+
+# per-source bullet colours (used outside the danger box; inside stays red)
+_SRC_COL = {"cone": "#4fa3ff", "spray": "#2f6fd0", "line": "#e6e6e6",
+           "bring": "#c07fff", "spam": "#ff9c33", "enemy": "#4fe08a"}
 from obs import (HEAD_DIM, NDIRS, GCELLS, GRID, GRID_CELL,  # noqa: E402
                  PX_LO, PX_HI, PY_LO, PY_HI, OBS_DIRS)
 from policy import MLPPolicy  # noqa: E402
@@ -62,6 +66,7 @@ class Watcher:
                 pass
         self._hist = None
         self._hist_mt = 0.0
+        self._slot_col = self._build_slot_colours()
         self._load()
         self.obs = self.sim.reset()
         self.paused = False
@@ -102,6 +107,20 @@ class Watcher:
             print(f"loaded {p}  hidden={self.pol.hidden}  (mtime {time.ctime(m)})")
         except Exception as e:
             print("load failed:", e)
+
+    def _build_slot_colours(self):
+        """[N] hex colour per bullet slot, keyed by its source (emitter type /
+        spam pool / enemy-burst pool). Slot ranges are fixed."""
+        s = self.sim
+        col = np.full(s.N, _SRC_COL["cone"], dtype=object)
+        etype = {E_CONE: "cone", E_SPRAY: "spray", E_LINE: "line", E_BRING: "bring"}
+        rt = s._R_type.cpu().numpy()
+        for i in range(s._spam_base):
+            e = int(rt[min(i // s.SPE, s.E - 1)])
+            col[i] = _SRC_COL[etype.get(e, "cone")]
+        col[s._spam_base:s._en_base] = _SRC_COL["spam"]
+        col[s._en_base:s.dump] = _SRC_COL["enemy"]
+        return col
 
     def _reset(self):
         self.obs = self.sim.reset()
@@ -191,6 +210,7 @@ class Watcher:
         act = s.b_active[0].numpy() > 0.5
         bpos = s.b_pos[0].numpy()[act]
         brad = s._slot_rad.numpy()[act]        # per-slot hitbox radius
+        bcol = self._slot_col[act]             # per-source colour
         obs = self.obs[0].numpy()
         esc = obs[HEAD_DIM:HEAD_DIM + NDIRS]
         grid = obs[HEAD_DIM + NDIRS:HEAD_DIM + NDIRS + GCELLS].reshape(GRID, GRID)
@@ -228,16 +248,16 @@ class Watcher:
         cv.create_rectangle(cx(px - box), cy(py - box), cx(px + box), cy(py + box),
                             outline="#3fa7ff", width=1, dash=(3, 3))
 
-        # bullets: b_rad is the real th07 hitbox (2-3 px), sprite is ~2.4x that.
-        # all drawn at real sprite size; near the player also gets a bright hitbox
-        # dot. far ones = one flat oval (skip the stipple + dot) so a spam flood
-        # still draws fast.
+        # bullets: sprite drawn at ~2.4x the real hitbox. FAR bullets are coloured
+        # by source (blue cone, dark-blue spray, white line, violet bring, orange
+        # spam, green enemy-burst); bullets INSIDE the danger box turn red + get a
+        # bright hitbox dot.
         if len(bpos):
             nearm = (np.abs(bpos[:, 0] - px) < box) & (np.abs(bpos[:, 1] - py) < box)
-            for (bx, by), r in zip(bpos[~nearm], brad[~nearm]):
+            for (bx, by), r, c in zip(bpos[~nearm], brad[~nearm], bcol[~nearm]):
                 spr = max(2.2, r * 2.4 * SCALE)
                 cv.create_oval(cx(bx) - spr, cy(by) - spr, cx(bx) + spr, cy(by) + spr,
-                               fill="#5b6472", outline="")
+                               fill=c, outline="")
             for (bx, by), r in zip(bpos[nearm], brad[nearm]):
                 spr = max(2.5, r * 2.4 * SCALE)
                 hb = max(1.2, r * SCALE)
@@ -353,6 +373,17 @@ class Watcher:
         for i, ln in enumerate(lines):
             cv.create_text(x, 32 + i * 16, anchor="nw", fill="#9fd0ff" if i == 0 else "#c8ccd4",
                            font=("Consolas", 9), text=ln)
+
+        # bullet-source legend (bottom of the right gutter)
+        ly = 24 + 16 * len(lines) + 24
+        for name, c in (("cone", "cone"), ("spray", "spray"), ("line", "line"),
+                        ("bounce/orbit", "bring"), ("spam", "spam"), ("enemy", "enemy"),
+                        ("in danger box", None)):
+            col = "#ff4d4d" if c is None else _SRC_COL[c]
+            cv.create_oval(x + 2, ly + 3, x + 12, ly + 13, fill=col, outline="")
+            cv.create_text(x + 20, ly + 8, anchor="w", fill="#c8ccd4",
+                           font=("Consolas", 9), text=name)
+            ly += 16
 
 
 def main():
