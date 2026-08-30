@@ -210,18 +210,44 @@ class Th07Env(_Base):
         self._prev_bpos = np.where(live[:, None], xy, -9999.0)
         return xy, vel, live
 
+    # PCB stores the stage-1 MIDBOSS (Cirno) and the BOSS (Letty) as a zEnemy*
+    # in EM_BOSSES[0] - NOT in the EM_ENEMIES array - so they're invisible unless
+    # we read the pointer directly. (&EM_BOSSES[0] = ENEMY_MANAGER + 0x954598.)
+    _EM_BOSSES0 = 0x009A9B00 + 0x00954598
+    _E_POS, _E_LIFE, _E_ML = 0x2B0C, 0x2BB8, 0x2BBC
+
+    def _boss(self):
+        """(x, y, life, maxlife) of the EM_BOSSES[0] enemy, or None."""
+        pm = getattr(self, "_pm", None)
+        if pm is None:
+            return None
+        try:
+            import struct
+            ptr = struct.unpack_from("<I", pm.read_bytes(self._EM_BOSSES0, 4), 0)[0]
+            if not (0x00400000 < ptr < 0x7FFFFFFF):
+                return None
+            bs = pm.read_bytes(ptr, 0x2C00)
+            x, y = struct.unpack_from("<ff", bs, self._E_POS)
+            life = struct.unpack_from("<i", bs, self._E_LIFE)[0]
+            ml = struct.unpack_from("<i", bs, self._E_ML)[0]
+            if not (-64 < x < 448 and -80 < y < 520) or ml < 1 or ml > 1_000_000:
+                return None
+            return float(x), float(y), int(life), int(ml)
+        except Exception:
+            return None
+
     def _big_target(self):
-        """(present, hp_fraction) of the stage boss (GUI bar) or, before it
-        appears, the midboss - an on-screen enemy with maxlife >= 200."""
+        """(present, hp_fraction) of the stage boss / midboss."""
         s = self.h.s
         if s.boss_present and s.boss_hp_max > 1:
             return True, float(s.boss_hp / s.boss_hp_max)
+        b = self._boss()
+        if b is not None:
+            return True, b[2] / max(b[3], 1)
         best_ml, best_life = 0, 0
         for i in range(min(s.enemy_count, S.MAX_ENEMIES)):
             e = s.enemies[i]
-            if e.y < -8 or e.y > 480:
-                continue
-            if e.maxlife >= 200 and e.maxlife > best_ml:
+            if -8 <= e.y <= 480 and e.maxlife >= 200 and e.maxlife > best_ml:
                 best_ml, best_life = e.maxlife, e.life
         if best_ml:
             return True, best_life / best_ml
@@ -257,18 +283,24 @@ class Th07Env(_Base):
             1.0 if bt_present else 0.0, float(bt_frac),
         ]], dtype=torch.float32)
 
-        enemies = torch.zeros(1, M_ENEMIES * 3)
-        filled = 0
+        # NEAREST M_ENEMIES (matches the sim, which topk's nearest-6), and the
+        # EM_BOSSES[0] midboss/boss is folded in as a normal enemy.
+        cand = []
+        bt = self._boss()
+        if bt is not None:
+            bx, by, bl, bml = bt
+            cand.append(((bx - px) ** 2 + (by - py) ** 2, bx, by, bl / max(bml, 1)))
         for i in range(min(s.enemy_count, S.MAX_ENEMIES)):
-            if filled >= M_ENEMIES:
-                break
             e = s.enemies[i]
             if e.y < -8 or e.y > 480:
                 continue
-            ml = max(e.maxlife, 1)
-            enemies[0, filled * 3:filled * 3 + 3] = torch.tensor(
-                [(e.x - px) / 128.0, (e.y - py) / 128.0, e.life / ml])
-            filled += 1
+            cand.append(((e.x - px) ** 2 + (e.y - py) ** 2,
+                         e.x, e.y, e.life / max(e.maxlife, 1)))
+        cand.sort(key=lambda c: c[0])
+        enemies = torch.zeros(1, M_ENEMIES * 3)
+        for k, (_, ex, ey, hpf) in enumerate(cand[:M_ENEMIES]):
+            enemies[0, k * 3:k * 3 + 3] = torch.tensor(
+                [(ex - px) / 128.0, (ey - py) / 128.0, min(max(hpf, 0.0), 1.0)])
 
         items = self._item_arrays(px, py)      # [1, M_ITEMS*3]
 

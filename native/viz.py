@@ -140,6 +140,27 @@ class Viz:
                 np.maximum.at(g, (cy[m], cx[m]), 1.0 - t / GRID_HORIZON)
         return g
 
+    _EM_BOSSES0 = 0x009A9B00 + 0x00954598
+
+    def _boss(self):
+        """(x, y, life, maxlife) of EM_BOSSES[0] (midboss/boss), or None."""
+        if self.pm is None:
+            return None
+        try:
+            import struct
+            ptr = struct.unpack_from("<I", self.pm.read_bytes(self._EM_BOSSES0, 4), 0)[0]
+            if not (0x00400000 < ptr < 0x7FFFFFFF):
+                return None
+            bs = self.pm.read_bytes(ptr, 0x2C00)
+            x, y = struct.unpack_from("<ff", bs, 0x2B0C)
+            life = struct.unpack_from("<i", bs, 0x2BB8)[0]
+            ml = struct.unpack_from("<i", bs, 0x2BBC)[0]
+            if not (-64 < x < 448 and -80 < y < 520) or ml < 1 or ml > 1_000_000:
+                return None
+            return float(x), float(y), int(life), int(ml)
+        except Exception:
+            return None
+
     def _items(self):
         """[(x, y, type), ...] active on-field items from the live ItemManager."""
         if self.pm is None:
@@ -218,6 +239,15 @@ class Viz:
             big = e.maxlife >= 200
             cv.create_rectangle(cx(e.x) - 5, cy(e.y) - 5, cx(e.x) + 5, cy(e.y) + 5,
                                 outline="#ff9c33" if big else "#ffd23f", width=2)
+
+        # EM_BOSSES[0] (Cirno / Letty) - NOT in the enemy array; cyan box + HP
+        bt = self._boss()
+        if bt is not None:
+            bx, by, bl, bml = bt
+            cv.create_rectangle(cx(bx) - 9, cy(by) - 9, cx(bx) + 9, cy(by) + 9,
+                                outline="#3fe0ff", width=3)
+            cv.create_text(cx(bx), cy(by) - 16, fill="#3fe0ff", font=("Consolas", 9),
+                           text=f"BOSS {bl}/{bml}")
 
         # items (P = pink, point = blue, cherry = pale) + collect radius
         items = self._items()
