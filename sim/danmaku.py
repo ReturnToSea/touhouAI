@@ -400,7 +400,7 @@ class DanmakuSim:
         # per-episode archetype: 0 fast+sparse, 1 slow+dense, 2 mixed
         arche = self._ri(0, 3, B, 1)
         self.arche = torch.where(mb, arche, self.arche)
-        a_spd = torch.where(arche == 0, 1.15, torch.where(arche == 1, 0.85, 1.0))
+        a_spd = torch.where(arche == 0, 1.10, torch.where(arche == 1, 0.90, 1.0))
         a_prd = torch.where(arche == 0, 1.35, torch.where(arche == 1, 0.8, 1.0))   # x fire period
 
         # spawn lower-centre (like real Touhou)
@@ -430,7 +430,7 @@ class DanmakuSim:
                                               self.e_bvel))
         self.e_oa = torch.where(mbe & is_orbit, self._r(B, E, lo=0, hi=TAU), self.e_oa)
 
-        speed = torch.where(is_line, self._r(B, E, lo=3.0, hi=4.0) * dsc,
+        speed = torch.where(is_line, self._r(B, E, lo=2.6, hi=3.6) * dsc,
                 torch.where(is_bring, self._r(B, E, lo=0.20, hi=0.34),
                 torch.where(is_spray, self._r(B, E, lo=1.8, hi=2.8) * dsc,
                             self._r(B, E, lo=2.1, hi=3.0) * dsc)))
@@ -568,14 +568,18 @@ class DanmakuSim:
         s0 = self.b_spd0[:, :SB]
         _fz_b = FREEZE_T0 + FREEZE_STOP
         _fz_c = _fz_b + FREEZE_HOLD
-        spd_fac = torch.where(mt == M_ACCEL, (1.0 + mp * age).clamp(max=3.0),
+        spd_fac = torch.where(mt == M_ACCEL, (1.0 + mp * age).clamp(max=1.8),
                   torch.where(mt == M_DECEL, (1.0 - mp * age).clamp(min=0.35),
                   torch.where(mt == M_PULSE, 1.0 + 0.5 * torch.sin(age * mp),
                   torch.where(mt == M_FREEZE,
                               ((_fz_b - age) / FREEZE_STOP).clamp(0.0, 1.0)
                               + (age >= _fz_c).float(),
                               torch.ones_like(age)))))
-        spd = s0 * spd_fac.clamp(0.0, 3.0)
+        # hard ceiling on the FINAL speed (~1.6x player unfocused) - bounds the
+        # base x diff x archetype x motion-profile stack to a realistic range
+        # (real th07: stage-1 ~2 px/f, hardest stages ~6). No floor: FREEZE
+        # bullets must reach speed 0 during their stop.
+        spd = (s0 * spd_fac).clamp(max=6.5)
         # heading: SLITHER oscillates, ARC turns, HOMING steers at the player
         # then locks, FREEZE re-aims at the player once when the hold ends.
         rel = self.player[:, None, :] - self.b_pos[:, :SB]         # [B,SB,2]
