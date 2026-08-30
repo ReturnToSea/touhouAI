@@ -67,10 +67,27 @@ def load(name):
         surv = dec * FS / 60.0
         ret = h[:, -1]
         ent = nan
+    # real-game transfer daemon: rows [wallclock, train_steps, survival_s, score]
+    rt_steps = rt_surv = rt_sm = None
+    rp = d / "realtransfer.npy"
+    if rp.exists():
+        try:
+            rt = np.load(rp)
+            if rt.ndim == 2 and len(rt):
+                order = np.argsort(rt[:, 1])
+                rt_steps, rt_surv = rt[order, 1], rt[order, 2]
+                w = min(15, len(rt_surv))                       # rolling-mean window
+                if w >= 2:
+                    k = np.ones(w) / w
+                    rt_sm = np.convolve(rt_surv, k, mode="valid")
+        except Exception:
+            pass
+
     return dict(name=name, algo=algo, meta=meta, wall=wall, steps=steps,
                surv=surv, ret=ret, ent=ent, dcap=nan,
                med=med, p90=p90, f60=f60, f120=f120, f180=f180,
-               wallf=wallf, enemyf=enemyf)
+               wallf=wallf, enemyf=enemyf,
+               rt_steps=rt_steps, rt_surv=rt_surv, rt_sm=rt_sm)
 
 
 class Hud:
@@ -126,6 +143,12 @@ class Hud:
                 lines.append(
                     f"    greedy survival {r['surv'][-1]:5.1f}s (best {r['surv'].max():4.1f})"
                     + (f"   ent {r['ent'][-1]:.2f}" if not np.isnan(r['ent'][-1]) else ""))
+            if r.get("rt_surv") is not None and len(r["rt_surv"]):
+                rv = r["rt_surv"]
+                recent = rv[-15:]
+                lines.append(
+                    f"    real game: {np.mean(recent):5.1f}s avg / {np.median(recent):5.1f}s med "
+                    f"(last {len(recent)})   best {rv.max():.0f}s   n={len(rv)}")
         self.txt.config(text="\n".join(lines))
 
     def _plot(self, runs):
@@ -171,8 +194,26 @@ class Hud:
             yv = r["p90"][-1] if has_pct else r["surv"][-1]
             cv.create_text(X(sm[-1]), Y(yv) - 8, anchor="e",
                            fill=c, font=("Consolas", 8), text=lab)
+
+            # real-game transfer daemon: faint dots per episode + a bold smoothed
+            # line. If this diverges DOWN from the sim p90 as steps rise -> the
+            # sim is overfitting (ppo_v26 failure mode), visible live.
+            if r.get("rt_steps") is not None and len(r["rt_steps"]):
+                rs = r["rt_steps"] / 1e6
+                for s, y in zip(rs, r["rt_surv"]):
+                    if 0 <= y <= ymax * 1.05:
+                        cv.create_oval(X(s) - 1, Y(y) - 1, X(s) + 1, Y(y) + 1,
+                                       outline="", fill="#ff5c8a")
+                if r.get("rt_sm") is not None and len(r["rt_sm"]) >= 2:
+                    off = len(rs) - len(r["rt_sm"])
+                    pts = [co for s, y in zip(rs[off:], r["rt_sm"])
+                           for co in (X(s), Y(min(y, ymax)))]
+                    cv.create_line(*pts, fill="#ff5c8a", width=2, smooth=True)
+                    cv.create_text(X(rs[-1]), Y(min(r["rt_sm"][-1], ymax)) + 10,
+                                   anchor="e", fill="#ff5c8a", font=("Consolas", 8),
+                                   text="real game")
         cv.create_text((x0 + x1) / 2, PT, fill="#9aa4b4", font=("Consolas", 9),
-                       text="survival: p90 (solid) + median (dashed)  vs  steps")
+                       text="sim: p90 (solid) + median (dashed)   real game: pink   vs steps")
 
 
 def main():
