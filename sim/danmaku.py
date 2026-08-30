@@ -95,16 +95,16 @@ for _cx, _cy in _CORNERS:
 ROSTER.append((E_LINE, 350.0, 412.0, "ball"))
 ROSTER += [(E_BRING, CX, CY, "ball"), (E_BRING, CX, CY, "ball")]  # [-2] bounces, [-1] orbits
 N_CORNER_EMIT = 8                          # ROSTER[0:8] are the corner CONE/SPRAY pairs
-EMIT_ACTIVE_LO, EMIT_ACTIVE_HI = 4, 10     # how many of the pool fire per episode
+EMIT_ACTIVE_LO, EMIT_ACTIVE_HI = 6, 11     # how many of the pool fire per episode
 JIT_AXIS = 40.0                            # +-px emitter position jitter (one axis/episode)
 # behaviour re-roll pool for the 8 corner slots (LINE and the 2 BRING keep their
 # roles; a corner can become any of these). weighted toward CONE/SPRAY.
-_EMIT_POOL = [E_CONE, E_CONE, E_SPRAY, E_SPRAY, E_LINE, E_BRING]
+_EMIT_POOL = [E_CONE, E_CONE, E_CONE, E_SPRAY, E_SPRAY, E_SPRAY, E_LINE, E_BRING]
 
 # sparse windows: per episode, brief spells where MOST emitters go quiet so the
 # policy learns the isolated-bullet sidestep and that "safe" is a real state.
-SPARSE_PERIOD_LO, SPARSE_PERIOD_HI = 720, 1800
-SPARSE_LEN_LO, SPARSE_LEN_HI = 75, 210
+SPARSE_PERIOD_LO, SPARSE_PERIOD_HI = 1000, 2400
+SPARSE_LEN_LO, SPARSE_LEN_HI = 60, 150
 
 # --- enemies ---
 # v16: big waves fly in from off-screen every 12 s, hover ~6 s, leave. 1 HP each;
@@ -123,8 +123,8 @@ EN_HOVER_FRAMES = 360        # 6 s
 EN_DPS = 1.0 / 45.0          # base dmg/frame at power 0 (1 HP -> 0.75 s to kill)
 EN_DMG_REW = 0.22          # v27: 0.35 -> 0.22 (v26 locked at ~35% enemy deaths - overshot)
 PWR_STAND_REW = 0.0015     # per frame, x power_frac: makes held power lastingly worth it
-SHOOT_ALIGN_DX = 15.0       # v27: 26 -> 15. real shot is narrow; the wide window
-                            # taught "hit from the edge" -> a miss on the real game
+SHOOT_ALIGN_DX = 9.0        # v27: 26 -> 15 -> 9. real shot is narrow; the wide
+                            # window taught "hit from the edge" -> a real-game miss
 
 # enemy aimed bursts: 2 per hover, snapshot-aimed at the player (no tracking)
 EN_BURST_AT = (270.0, 120.0)   # fire when the (down-counting) hover timer crosses these
@@ -436,11 +436,13 @@ class DanmakuSim:
                             self._r(B, E, lo=2.1, hi=3.0) * dsc)))
         self.e_speed = torch.where(mbe, speed, self.e_speed)
 
-        period = torch.where(is_line, self._ri(5, 9, B, E),
-                 torch.where(is_bring, self._ri(28, 40, B, E),
-                 torch.where(is_spray, self._ri(24, 46, B, E),
-                             self._ri(26, 50, B, E)))) * a_prd
-        self.e_period = torch.where(mbe, period.clamp(min=3.0), self.e_period)
+        # NOTE: the fire check is `(frame % e_period) == e_phase` (exact), so
+        # e_period MUST stay integer-valued - round after the archetype scale.
+        period = (torch.where(is_line, self._ri(5, 9, B, E),
+                  torch.where(is_bring, self._ri(28, 40, B, E),
+                  torch.where(is_spray, self._ri(24, 46, B, E),
+                              self._ri(26, 50, B, E)))) * a_prd).round().clamp(min=3.0)
+        self.e_period = torch.where(mbe, period, self.e_period)
         self.e_phase = torch.where(mbe, torch.floor(self._r(B, E) * period), self.e_phase)
 
         nsp = torch.where(is_line, torch.ones(B, E, device=d),
