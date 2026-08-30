@@ -240,6 +240,19 @@ class Watcher:
             cv.create_oval(cx(bx) - hb, cy(by) - hb, cx(bx) + hb, cy(by) + hb,
                            fill=col, outline="")
 
+        # spam-phase spawners (orange rings near the top) + a phase banner
+        sph = float(s.spam_phase[0])
+        if sph > 0.5:
+            n = int(s.spam_n[0].item())
+            spx = s.sp_x[0].numpy()
+            spy = s.sp_y[0].numpy()
+            for k in range(n):
+                cv.create_oval(cx(spx[k]) - 7, cy(spy[k]) - 7, cx(spx[k]) + 7, cy(spy[k]) + 7,
+                               outline="#ff9c33", width=2)
+            lab = f"SPAM  fire  {n} spawners" if sph < 1.5 else "SPAM  cooldown"
+            cv.create_text(cx(PW / 2), cy(6), fill="#ff9c33", font=("Consolas", 10, "bold"),
+                           text=lab)
+
         # enemies (magenta = active), hp bar above; line to the one being shot
         en_act = s.en_active[0].numpy() > 0.5
         en_pos = s.en_pos[0].numpy()

@@ -107,6 +107,29 @@ TR_CONE_EIDX = 2
 TR_REDIR_AGE = 60.0
 TR_CONE_LIFE = 300.0
 
+# --- "spam" phase: every ~45-60 s, N roaming spawners near the top of the screen
+# blanket the field with pellets for 10 s, then a 3 s cooldown. ALL other fire +
+# enemy waves pause for the whole phase. Each phase adds one more spawner (3, 4,
+# 5, ...). The pellets fire outward on a ring around the spawner (evenly spaced +
+# jitter so they don't overlap), at a random 0.5x-2x speed, with a 2x burst for
+# the first 0.2 s. No life cap - the ones aimed up/sideways die on a wall fast
+# (fine), the ones aimed down take a while. The 3 s cooldown just lets MOST clear.
+SPAM_PERIOD_LO, SPAM_PERIOD_HI = 2700, 3600   # 45-60 s between phase starts
+SPAM_FIRE_FRAMES = 600      # 10 s of firing
+SPAM_COOLDOWN = 180         # 3 s before normal fire resumes (most pellets gone by then)
+SPAM_N0 = 3                 # spawners in the first phase; +1 each phase
+SPAM_MAX = 6               # slot / state cap (a 180 s episode sees ~3 phases: 3, 4, 5)
+SPAM_SLOTS = 1400           # shared pellet pool for the phase (no life cap; ring recycles)
+SPAM_FIRE_EVERY = 12        # 5 attacks / s
+SPAM_PER_ATTACK = 10        # pellets per spawner per attack
+SPAM_RING_R = 10.0          # pellets spawn on this ring around the spawner
+SPAM_BASE_SPD = 1.6         # pellet speed = U(0.5, 2.0) * this
+SPAM_BOOST_FRAMES = 12      # first 0.2 s at 2x the chosen speed
+SPAM_SPAWNER_VX = 0.75      # spawner drift speed (px/f), x only
+SPAM_SEG = 128.0            # reverse direction after drifting ~1/3 of the stage
+SPAM_Y = 100.0              # ~80% up the screen; per-spawner +-offset, no y motion
+_PELLET_HB = TH07_BULLETS["pellet"]["hitbox"]
+
 
 class DanmakuSim:
     def __init__(self, B=16384, device="cuda", slots_per_emitter=176, spawn_k=24,
@@ -117,7 +140,8 @@ class DanmakuSim:
         self.E = len(ROSTER)
         self.SPE = slots_per_emitter
         self.K = spawn_k
-        self.N = self.E * slots_per_emitter + 1            # +1 = dump slot
+        self._spam_base = self.E * slots_per_emitter
+        self.N = self._spam_base + SPAM_SLOTS + 1          # +1 = dump slot
         self.dump = self.N - 1
         self.max_frames = max_frames
         self.frame_skip = frame_skip
@@ -173,6 +197,19 @@ class DanmakuSim:
         self._itk = torch.arange(IT_PER_KILL, device=d).float()
         self.power = torch.zeros(B, 1, device=d)              # 0..POWER_MAX
 
+        # --- spam phase ---
+        self.spam_phase = torch.zeros(B, device=d)            # 0 idle / 1 fire / 2 cooldown
+        self.spam_t = torch.zeros(B, device=d)                # frames into the current phase
+        self.spam_next = torch.zeros(B, device=d)             # frame the next phase starts
+        self.spam_n = torch.full((B,), float(SPAM_N0), device=d)   # spawners this episode
+        self.spam_cursor = torch.zeros(B, device=d)           # into the SPAM_SLOTS pool
+        self.sp_x = torch.zeros(B, SPAM_MAX, device=d)
+        self.sp_y = torch.zeros(B, SPAM_MAX, device=d)
+        self.sp_dir = torch.ones(B, SPAM_MAX, device=d)
+        self.sp_trav = torch.zeros(B, SPAM_MAX, device=d)
+        self._sp_k = torch.arange(SPAM_MAX, device=d).float()
+        self._spj = torch.arange(SPAM_PER_ATTACK, device=d).float()
+
         # death-cause diagnostic (set each frame an env dies): bullet vs enemy body
         self.death_wall = torch.zeros(B, device=d)            # "wall" = any bullet now
         self.death_enemy = torch.zeros(B, device=d)
@@ -194,6 +231,8 @@ class DanmakuSim:
                                       torch.full((self.N,), 300.0, device=d),
                                       torch.full((self.N,), 1e9, device=d))
         self._tr_cone_slot = (slot_emit == TR_CONE_EIDX)
+        self._spam_slot = ((torch.arange(self.N, device=d) >= self._spam_base) &
+                           (torch.arange(self.N, device=d) < self.dump))
         self.b_redir = torch.zeros(B, self.N, device=d)     # 1 once the t=1s roll is done
 
         self._k = torch.arange(self.K, device=d).float()
@@ -320,6 +359,13 @@ class DanmakuSim:
         self.it_cursor = torch.where(mb1, torch.zeros_like(self.it_cursor), self.it_cursor)
         self.power = torch.where(mb, self._r(B, 1, lo=0.0, hi=PWR_START_HI), self.power)
 
+        self.spam_phase = torch.where(mb1, torch.zeros_like(self.spam_phase), self.spam_phase)
+        self.spam_t = torch.where(mb1, torch.zeros_like(self.spam_t), self.spam_t)
+        self.spam_n = torch.where(mb1, torch.full_like(self.spam_n, float(SPAM_N0)), self.spam_n)
+        self.spam_cursor = torch.where(mb1, torch.zeros_like(self.spam_cursor), self.spam_cursor)
+        self.spam_next = torch.where(
+            mb1, self._r(B, lo=float(SPAM_PERIOD_LO), hi=float(SPAM_PERIOD_HI)), self.spam_next)
+
     def reset(self):
         self._spawn(torch.ones(self.B, 1, device=self.dev))
         return self._obs()
@@ -379,8 +425,11 @@ class DanmakuSim:
         self.player = torch.stack([self.player[:, 0].clamp(PX_LO, PX_HI),
                                    self.player[:, 1].clamp(PY_LO, PY_HI)], 1)
 
-        # --- move bullets, cull off-screen + past lifetime ---
-        self.b_pos = self.b_pos + self.b_vel
+        # --- move bullets (spam pellets get a 2x burst for their first 0.2 s),
+        #     cull off-screen + past lifetime ---
+        boost = torch.where(
+            self._spam_slot[None, :] & (self.b_age < float(SPAM_BOOST_FRAMES)), 2.0, 1.0)
+        self.b_pos = self.b_pos + self.b_vel * boost[..., None]
         self.b_age = self.b_age + 1.0
         on = ((self.b_pos[..., 0] > -18) & (self.b_pos[..., 0] < PW + 18) &
               (self.b_pos[..., 1] > -18) & (self.b_pos[..., 1] < PH + 18) &
@@ -403,9 +452,88 @@ class DanmakuSim:
                             CY + ORBIT_RY * torch.sin(self.e_oa)], -1)
         self.e_pos = torch.where(self._is_orbit[None, :, None] > 0.5, opos, self.e_pos)
 
+        # --- "spam" phase: roaming top-screen spawners blanket the field with
+        #     pellets for 10 s every ~45-60 s; all other fire + enemy waves pause
+        #     for the phase + a 3 s cooldown; each phase adds one more spawner ---
+        frs = self.frame.squeeze(1)                                  # [B]
+        trig = (self.spam_phase < 0.5) & (frs >= self.spam_next)     # [B] start a phase
+        spk = self._sp_k[None, :]                                    # [1,SPAM_MAX]
+        act_k = spk < self.spam_n[:, None]                           # [B,SPAM_MAX] live spawners
+        denom = (self.spam_n[:, None] - 1.0).clamp(min=1.0)
+        x0 = PW * 0.20 + PW * 0.60 * spk / denom                     # evenly spread in x
+        y0 = SPAM_Y + self._r(B, SPAM_MAX, lo=-14.0, hi=14.0)
+        dir0 = torch.where(self._r(B, SPAM_MAX) > 0.5, 1.0, -1.0)
+        t3 = trig[:, None]
+        self.sp_x = torch.where(t3, x0, self.sp_x)
+        self.sp_y = torch.where(t3, y0, self.sp_y)
+        self.sp_dir = torch.where(t3, dir0, self.sp_dir)
+        self.sp_trav = torch.where(t3, torch.zeros_like(self.sp_trav), self.sp_trav)
+        self.spam_phase = torch.where(trig, torch.ones_like(self.spam_phase), self.spam_phase)
+        self.spam_t = torch.where(trig, torch.zeros_like(self.spam_t), self.spam_t)
+
+        firing = (self.spam_phase > 0.5) & (self.spam_phase < 1.5)   # [B]
+        in_phase = self.spam_phase > 0.5
+
+        # spawners drift on x only; flip after ~1/3 of the stage or at the bounds
+        mvx = SPAM_SPAWNER_VX * self.sp_dir * firing[:, None].float()
+        nx = self.sp_x + mvx
+        self.sp_trav = self.sp_trav + mvx.abs()
+        flip = (self.sp_trav >= SPAM_SEG) | (nx < PX_LO + 8.0) | (nx > PX_HI - 8.0)
+        self.sp_dir = torch.where(flip, -self.sp_dir, self.sp_dir)
+        self.sp_trav = torch.where(flip, torch.zeros_like(self.sp_trav), self.sp_trav)
+        self.sp_x = nx.clamp(PX_LO + 8.0, PX_HI - 8.0)
+        self.spam_t = torch.where(in_phase, self.spam_t + 1.0, self.spam_t)
+
+        # fire: SPAM_PER_ATTACK pellets/spawner every SPAM_FIRE_EVERY frames, on an
+        # evenly-spaced ring (+ jitter so they don't overlap), moving radially out,
+        # each at U(0.5, 2.0) x the base speed
+        fire_due = firing & ((self.spam_t % SPAM_FIRE_EVERY) < 1.0) & (self.spam_t > 0.5)
+        NB = SPAM_MAX * SPAM_PER_ATTACK
+        jj = self._spj[None, None, :]                                # [1,1,SPAM_PER_ATTACK]
+        rot = self._r(B, SPAM_MAX, 1, lo=0.0, hi=TAU)
+        jit = self._r(B, SPAM_MAX, SPAM_PER_ATTACK, lo=-0.28, hi=0.28)
+        sang = rot + (jj + jit) * (TAU / SPAM_PER_ATTACK)
+        sspd = SPAM_BASE_SPD * self._r(B, SPAM_MAX, SPAM_PER_ATTACK, lo=0.5, hi=2.0)
+        sdir = torch.stack([torch.cos(sang), torch.sin(sang)], -1)   # [B,SPAM_MAX,SPAM_PER_ATTACK,2]
+        sp_pos = torch.stack([self.sp_x, self.sp_y], -1)            # [B,SPAM_MAX,2]
+        sbpos = sp_pos[:, :, None, :] + SPAM_RING_R * sdir
+        sbvel = sspd[..., None] * sdir                              # cruise speed (2x for 0.2 s)
+        semit = (fire_due[:, None, None] & act_k[:, :, None]).expand(
+            B, SPAM_MAX, SPAM_PER_ATTACK)                           # [B,SPAM_MAX,SPAM_PER_ATTACK]
+
+        sar = torch.arange(NB, device=d)[None, :]
+        raw_s = self._spam_base + (self.spam_cursor[:, None] + sar) % SPAM_SLOTS
+        idx_s = torch.where(semit.reshape(B, NB), raw_s,
+                            torch.full_like(raw_s, float(self.dump))).long()
+        si2 = idx_s[:, :, None].expand(B, NB, 2)
+        self.b_pos = self.b_pos.scatter(1, si2, sbpos.reshape(B, NB, 2))
+        self.b_vel = self.b_vel.scatter(1, si2, sbvel.reshape(B, NB, 2))
+        self.b_rad = self.b_rad.scatter(1, idx_s, torch.full((B, NB), _PELLET_HB, device=d))
+        self.b_active = self.b_active.scatter(1, idx_s, semit.reshape(B, NB).float())
+        self.b_age = self.b_age.scatter(1, idx_s, torch.zeros(B, NB, device=d))
+        self.b_redir = self.b_redir.scatter(1, idx_s, torch.zeros(B, NB, device=d))
+        self.b_active[:, self.dump] = 0.0
+        self.spam_cursor = torch.where(fire_due, (self.spam_cursor + NB) % SPAM_SLOTS,
+                                       self.spam_cursor)
+
+        # phase transitions (from this frame's phase, before the change)
+        pph = self.spam_phase
+        to_cool = (pph > 0.5) & (pph < 1.5) & (self.spam_t >= float(SPAM_FIRE_FRAMES))
+        to_idle = (pph > 1.5) & (self.spam_t >= float(SPAM_COOLDOWN))
+        self.spam_phase = torch.where(to_cool, torch.full_like(pph, 2.0),
+                          torch.where(to_idle, torch.zeros_like(pph), pph))
+        self.spam_n = torch.where(to_cool, (self.spam_n + 1.0).clamp(max=float(SPAM_MAX)),
+                                  self.spam_n)
+        self.spam_t = torch.where(to_cool | to_idle, torch.zeros_like(self.spam_t), self.spam_t)
+        self.spam_next = torch.where(
+            to_idle, frs + self._r(B, lo=float(SPAM_PERIOD_LO), hi=float(SPAM_PERIOD_HI)),
+            self.spam_next)
+        spam_gate = (self.spam_phase > 0.5)[:, None]                 # [B,1] pause normal fire
+
         # --- emitters fire ---
         fr = self.frame                                     # [B,1]
-        due = ((fr % self.e_period) == self.e_phase) & (self._R_type[None, :] > 0)
+        due = (((fr % self.e_period) == self.e_phase) & (self._R_type[None, :] > 0)
+               & ~spam_gate)
         kk = self._k[None, None, :]                         # [1,1,K]
         nsp = self.e_nspawn[:, :, None]                     # [B,E,1]
         emit = due[:, :, None] & (kk < nsp)                 # [B,E,K]
@@ -459,8 +587,7 @@ class DanmakuSim:
         self.b_redir = torch.where(tr_due, torch.ones_like(self.b_redir), self.b_redir)
 
         # --- enemies: waves fly in, hover, leave ---
-        frs = self.frame.squeeze(1)                              # [B]
-        wave_due = ((frs % WAVE_PERIOD) < 1.0) & (frs > 1.0)     # [B]
+        wave_due = ((frs % WAVE_PERIOD) < 1.0) & (frs > 1.0) & ~spam_gate.squeeze(1)  # [B]
         NW = EN_PER_WAVE
         ek = self._ek[None, :]                                   # [1,NW]
         n_wave = self._ri(EN_WAVE_LO, EN_WAVE_HI, B, 1)          # [B,1]
