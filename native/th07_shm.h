@@ -19,9 +19,11 @@ constexpr float INACTIVE    = -9999.0f;  // sentinel for an empty bullet slot
 
 constexpr int   OBS_DIM     = 236;   // 16 head + 9 escape + 13*13 grid + 6*3 enemies + 8*3 items
                                      // (mirror native/obs.py OBS_DIM)
+constexpr int   ROLL_T_MAX  = 256;   // max decision-steps per ST_ROLLOUT call
 constexpr int   N_ACTIONS   = 36;
 constexpr int   MAX_HIDDEN  = 256;   // per-layer hidden cap for the in-DLL MLP
-constexpr int   MAX_WEIGHTS = 1 << 17;  // 128k float32 = 512 KB flat param buffer
+constexpr int   MAX_WEIGHTS = 1 << 18;  // 256k float32 = 1 MB (236-in [256,256]
+                                        // actor is 135,716 params, over the old 1<<17)
 
 // control.state values
 enum ShmState : uint32_t {
@@ -34,6 +36,9 @@ enum ShmState : uint32_t {
     ST_EVAL     = 6,  // reset + run a whole episode with the in-DLL MLP policy
     ST_HARD_RESET = 7,  // engine-level "Give Up and Retry": reload Stage 1 in
                         // place (no pause menu, no process relaunch)
+    ST_ROLLOUT  = 8,    // DLL collects a T-step PPO training trajectory with the
+                        // in-DLL actor (sample), hard-resetting on episode end.
+                        // No per-step Python -> games run at native speed.
 };
 
 #pragma pack(push, 4)
@@ -105,7 +110,24 @@ struct Shm {
     // logic frame it belongs to.
     float    step_obs[OBS_DIM];
     uint32_t step_obs_frame;
-    uint32_t _pad_obs;
+    uint32_t struct_size;        // hook -> sizeof(Shm); Python asserts layout parity
+
+    // --- ST_ROLLOUT (env writes roll_T/roll_frame_skip/roll_h1/roll_h2/
+    // roll_seed/roll_max_ep_frames + weights[], sets state=ST_ROLLOUT; DLL runs
+    // the trajectory and fills roll_obs/roll_act/roll_rew/roll_done + roll_last_obs)
+    uint32_t roll_T;                 // decision-steps to collect (<= ROLL_T_MAX)
+    uint32_t roll_frame_skip;        // game frames per decision
+    uint32_t roll_h1, roll_h2;       // actor hidden sizes
+    uint32_t roll_seed;              // sampling RNG seed (0 -> default)
+    uint32_t roll_max_ep_frames;     // per-episode frame cap -> truncate + reset
+    uint32_t roll_steps_done;        // DLL -> steps actually collected
+    uint32_t roll_ep_ends;           // DLL -> episodes that ended during the rollout
+    float    roll_obs[ROLL_T_MAX][OBS_DIM];   // obs each action was taken on
+    float    roll_last_obs[OBS_DIM];          // obs after the final tick (GAE bootstrap)
+    uint8_t  roll_act[ROLL_T_MAX];            // sampled action index [0,36)
+    uint8_t  roll_done[ROLL_T_MAX];           // 1 = episode ended at this step
+    uint8_t  _pad_roll[4];
+    float    roll_rew[ROLL_T_MAX];            // reward (env.py formula, computed in C)
 
     Bullet   bullets[MAX_BULLETS];
     Enemy    enemies[MAX_ENEMIES];

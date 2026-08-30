@@ -11,10 +11,11 @@ MAX_BULLETS = 2048
 MAX_ENEMIES = 64
 OBS_DIM = 236  # 16 head + 9 escape + 13*13 grid + 6*3 enemies + 8*3 items (mirror th07_shm.h)
 N_ACTIONS = 36
-MAX_WEIGHTS = 1 << 17
+MAX_WEIGHTS = 1 << 18
+ROLL_T_MAX = 256
 
 (ST_IDLE, ST_STEP, ST_FREE, ST_RESET, ST_SNAPSHOT, ST_AUTONAV, ST_EVAL,
- ST_HARD_RESET) = range(8)
+ ST_HARD_RESET, ST_ROLLOUT) = range(9)
 
 # input bits (confirmed against the game)
 SHOOT, BOMB, SLOW, SKIP = 0x01, 0x02, 0x04, 0x08
@@ -89,7 +90,22 @@ class Shm(ctypes.Structure):
         ("dbg_obs", ctypes.c_float * OBS_DIM),
         ("step_obs", ctypes.c_float * OBS_DIM),   # DLL-built obs, read verbatim by env
         ("step_obs_frame", ctypes.c_uint32),
-        ("_pad_obs", ctypes.c_uint32),
+        ("struct_size", ctypes.c_uint32),
+        # --- ST_ROLLOUT ---
+        ("roll_T", ctypes.c_uint32),
+        ("roll_frame_skip", ctypes.c_uint32),
+        ("roll_h1", ctypes.c_uint32),
+        ("roll_h2", ctypes.c_uint32),
+        ("roll_seed", ctypes.c_uint32),
+        ("roll_max_ep_frames", ctypes.c_uint32),
+        ("roll_steps_done", ctypes.c_uint32),
+        ("roll_ep_ends", ctypes.c_uint32),
+        ("roll_obs", (ctypes.c_float * OBS_DIM) * ROLL_T_MAX),
+        ("roll_last_obs", ctypes.c_float * OBS_DIM),
+        ("roll_act", ctypes.c_uint8 * ROLL_T_MAX),
+        ("roll_done", ctypes.c_uint8 * ROLL_T_MAX),
+        ("_pad_roll", ctypes.c_uint8 * 4),
+        ("roll_rew", ctypes.c_float * ROLL_T_MAX),
         ("bullets", Bullet * MAX_BULLETS),
         ("enemies", Enemy * MAX_ENEMIES),
         ("weights", ctypes.c_float * MAX_WEIGHTS),
@@ -112,6 +128,11 @@ class Hook:
                 continue
             shm = Shm.from_buffer(mm)
             if shm.magic == SHM_MAGIC:
+                if shm.struct_size and shm.struct_size != ctypes.sizeof(Shm):
+                    raise RuntimeError(
+                        f"Shm layout mismatch: DLL sizeof={shm.struct_size} "
+                        f"Python sizeof={ctypes.sizeof(Shm)} - rebuild the DLL / "
+                        f"sync th07_shm.h <-> shm.py")
                 self._mm, self.s = mm, shm
                 return
             del shm
@@ -185,6 +206,38 @@ class Hook:
         if not self._cmd(ST_HARD_RESET, timeout, poll=0.001):
             return False
         return self.s.nav_frames >= 0
+
+    # --- ST_ROLLOUT: DLL collects a whole PPO trajectory, no per-step Python ---
+    def rollout_start(self, weights, T: int, h1: int, h2: int,
+                      frame_skip: int = 3, seed: int = 0,
+                      max_ep_frames: int = 10800) -> None:
+        import numpy as np
+        w = np.ascontiguousarray(weights, dtype=np.float32)
+        ctypes.memmove(self.s.weights, w.ctypes.data, w.size * 4)
+        s = self.s
+        s.roll_T = int(T)
+        s.roll_frame_skip = int(frame_skip)
+        s.roll_h1, s.roll_h2 = int(h1), int(h2)
+        if seed:
+            s.roll_seed = int(seed) & 0xFFFFFFFF
+        s.roll_max_ep_frames = int(max_ep_frames)
+        s.done = 0
+        s.state = ST_ROLLOUT
+
+    def rollout_done(self) -> bool:
+        return bool(self.s.done)
+
+    def rollout_result(self):
+        """(obs[T,OBS_DIM], act[T], rew[T], done[T], last_obs[OBS_DIM], ep_ends)."""
+        import numpy as np
+        s = self.s
+        T = int(s.roll_steps_done)
+        obs = np.ctypeslib.as_array(s.roll_obs)[:T].astype(np.float32).copy()
+        act = np.ctypeslib.as_array(s.roll_act)[:T].astype(np.int64).copy()
+        rew = np.ctypeslib.as_array(s.roll_rew)[:T].astype(np.float32).copy()
+        done = np.ctypeslib.as_array(s.roll_done)[:T].astype(np.float32).copy()
+        last = np.ctypeslib.as_array(s.roll_last_obs).astype(np.float32).copy()
+        return obs, act, rew, done, last, int(s.roll_ep_ends)
 
     # --- in-DLL episode eval: blocking + split (for the island orchestrator) ---
     def eval_start(self, weights, h1: int, h2: int, frame_skip: int = 3,

@@ -54,7 +54,8 @@ static int __fastcall hooked_run_all_on_draw(void* ecx, void* edx) {
     if (g_stub_draw && g_shm && !(g_shm->state == ST_EVAL && g_shm->eval_render) &&
         !g_render &&
         (g_shm->state == ST_STEP || g_shm->state == ST_RESET ||
-         g_shm->state == ST_EVAL))
+         g_shm->state == ST_EVAL || g_shm->state == ST_ROLLOUT ||
+         g_shm->state == ST_HARD_RESET))
         return 0;
     return orig_run_all_on_draw(ecx, edx);
 }
@@ -385,10 +386,10 @@ static void build_obs(float* o, int frame_skip) {
     }
 }
 
-// MLP: Linear(192,h1)-Tanh-Linear(h1,h2)-Tanh-Linear(h2,36) -> argmax.
+// MLP: Linear(OBS_DIM,h1)-Tanh-Linear(h1,h2)-Tanh-Linear(h2,36).
 // Flat layout matches policy.py get_flat(): W0,b0,W1,b1,W2,b2 (torch Linear
-// weight is [out,in] row-major).
-static int mlp_forward(const float* w, const float* in, int h1, int h2) {
+// weight is [out,in] row-major). Writes the 36 output logits to `out`.
+static void mlp_logits(const float* w, const float* in, int h1, int h2, float* out) {
     float a[MAX_HIDDEN], b[MAX_HIDDEN];
     const float* p = w;
     for (int j = 0; j < h1; ++j) {
@@ -407,15 +408,68 @@ static int mlp_forward(const float* w, const float* in, int h1, int h2) {
     p += (size_t)h2 * h1;
     for (int j = 0; j < h2; ++j) b[j] = tanhf(b[j] + p[j]);
     p += h2;
-    int best = 0; float bestv = -1e30f;
     const float* bias = p + (size_t)N_ACTIONS * h2;
     for (int j = 0; j < N_ACTIONS; ++j) {
         float acc = 0.f; const float* row = p + (size_t)j * h2;
         for (int k = 0; k < h2; ++k) acc += row[k] * b[k];
-        acc += bias[j];
-        if (acc > bestv) { bestv = acc; best = j; }
+        out[j] = acc + bias[j];
+    }
+}
+
+static int mlp_forward(const float* w, const float* in, int h1, int h2) {
+    float lg[N_ACTIONS];
+    mlp_logits(w, in, h1, h2, lg);
+    int best = 0; float bestv = -1e30f;
+    for (int j = 0; j < N_ACTIONS; ++j) if (lg[j] > bestv) { bestv = lg[j]; best = j; }
+    return best;
+}
+
+// splitmix64 -> a valid draw from softmax(logits) via the Gumbel-max trick
+// (only needs uniforms). PPO recomputes log-prob on the Python side, so the
+// sampler just has to draw ~the right distribution, not match a reference bit.
+static inline uint64_t sm64(uint64_t* s) {
+    uint64_t z = (*s += 0x9E3779B97F4A7C15ull);
+    z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ull;
+    z = (z ^ (z >> 27)) * 0x94D049BB133111EBull;
+    return z ^ (z >> 31);
+}
+static inline float sm64_uniform(uint64_t* s) {
+    return (float)((sm64(s) >> 40) * (1.0 / 16777216.0));   // 24-bit in [0,1)
+}
+static int gumbel_sample(const float* logits, uint64_t* rng) {
+    int best = 0; float bestv = -1e30f;
+    for (int i = 0; i < N_ACTIONS; ++i) {
+        float u = sm64_uniform(rng);
+        float gi = -logf(-logf(u + 1e-20f) + 1e-20f);
+        float v = logits[i] + gi;
+        if (v > bestv) { bestv = v; best = i; }
     }
     return best;
+}
+
+// Engine-level Stage 1 reload (shared by ST_HARD_RESET and ST_ROLLOUT). Ticks
+// through the ~40-frame teardown+fade + a short warmup; returns frames spent.
+static int engine_stage1_reload(void* self, void* edx, Shm* s) {
+    constexpr int32_t WARM = 90;
+    wr<int32_t>(GAME_MANAGER + GM_STAGE, 1);
+    wr<int32_t>(SUPERVISOR + SV_RETRY_MODE, SV_RETRY_VAL);
+    int nav = 0;
+    const int MAXF = 1800;
+    bool saw_reload = false;
+    int32_t last_tmr = rd<int32_t>(GAME_MANAGER + GM_STAGE_TIMER);
+    for (; nav < MAXF; ++nav) {
+        s->action = 0;
+        wr<uint8_t>(FRAMESKIP_BYTE, 0);
+        if (orig_do_tick(self, edx) != 0) break;
+        int32_t tmr = rd<int32_t>(GAME_MANAGER + GM_STAGE_TIMER);
+        int gm  = rd<int32_t>(SUPERVISOR + SV_GAMEMODE);
+        int stg = rd<int32_t>(GAME_MANAGER + GM_STAGE);
+        if (!saw_reload && tmr < last_tmr && tmr < 30) saw_reload = true;
+        last_tmr = tmr;
+        if (saw_reload && gm == 2 && stg == 1 && tmr >= WARM) break;
+    }
+    reset_bullet_hist();
+    return saw_reload ? nav : -1;
 }
 
 // action index -> button bitmask (mirror of env.py _decode_action + _DIRS)
@@ -516,7 +570,8 @@ static void capture_obs() {
 // ---- hooks ------------------------------------------------------------------
 static inline bool driving() {
     return g_shm && (g_shm->state == ST_STEP || g_shm->state == ST_AUTONAV ||
-                     g_shm->state == ST_EVAL || g_shm->state == ST_HARD_RESET);
+                     g_shm->state == ST_EVAL || g_shm->state == ST_HARD_RESET ||
+                     g_shm->state == ST_ROLLOUT);
 }
 
 static uint16_t __cdecl hooked_read_input(void) {
@@ -623,37 +678,98 @@ static int __fastcall hooked_do_tick(void* self, void* edx) {
 
         case ST_HARD_RESET: {
             // Engine-level "Give Up and Retry" - no pause menu, no relaunch.
-            // Force the stage number to 1 first (so a death deep in stage 2+
-            // still comes back to stage 1), then write the supervisor
-            // transition-request word. The WinMain loop consumes it, rebuilds
-            // the stage (~24f) + runs a ~15f fade. We tick through that and a
-            // short warmup. Unlike ST_RESET we do NOT touch the replay recorder
-            // - the retry runs the engine's own stage init, which re-creates it
-            // clean (restoring a stale head here corrupts the fresh object).
-            constexpr int32_t WARM = 90;      // frames into the fresh stage
-            wr<int32_t>(GAME_MANAGER + GM_STAGE, 1);
-            wr<int32_t>(SUPERVISOR + SV_RETRY_MODE, SV_RETRY_VAL);
-            int nav = 0;
-            const int MAXF = 1800;
-            bool saw_reload = false;
-            int32_t last_tmr = rd<int32_t>(GAME_MANAGER + GM_STAGE_TIMER);
-            for (; nav < MAXF; ++nav) {
-                s->action = 0;
-                wr<uint8_t>(FRAMESKIP_BYTE, 0);
-                if (orig_do_tick(self, edx) != 0) break;
-                int32_t tmr = rd<int32_t>(GAME_MANAGER + GM_STAGE_TIMER);
-                int gm  = rd<int32_t>(SUPERVISOR + SV_GAMEMODE);
-                int stg = rd<int32_t>(GAME_MANAGER + GM_STAGE);
-                if (!saw_reload && tmr < last_tmr && tmr < 30) saw_reload = true;
-                last_tmr = tmr;
-                if (saw_reload && gm == 2 && stg == 1 && tmr >= WARM) break;
-            }
+            // (see engine_stage1_reload: forces stage=1, writes the supervisor
+            // retry word, ticks the teardown+fade+warmup. Does NOT touch the
+            // replay recorder - the retry re-creates it via the engine's own
+            // stage init.)
+            int nav = engine_stage1_reload(self, edx, s);
             s->action = 0;
             s->frame = 0;
-            reset_bullet_hist();
-            s->nav_frames = (nav >= MAXF && !saw_reload) ? -1 : nav;
+            s->nav_frames = nav;
             capture_obs();
             write_step_obs();
+            s->done = 1;
+            s->state = ST_IDLE;
+            return 0;
+        }
+
+        case ST_ROLLOUT: {
+            // Collect a T-step PPO trajectory entirely in the DLL: build_obs ->
+            // actor logits -> Gumbel sample -> tick fs frames -> env.py reward ->
+            // record. On episode end, engine_stage1_reload (teardown frames are
+            // NOT counted as steps). Python computes GAE + the PPO update and
+            // ships new weights. Games run at native speed - no per-step Python.
+            const int T  = (int)(s->roll_T < ROLL_T_MAX ? s->roll_T : ROLL_T_MAX);
+            const int fs  = s->roll_frame_skip ? (int)s->roll_frame_skip : 3;
+            const int h1  = (int)s->roll_h1, h2 = (int)s->roll_h2;
+            const uint32_t ep_cap = s->roll_max_ep_frames ? s->roll_max_ep_frames : 10800;
+            uint64_t rng = s->roll_seed ? (uint64_t)s->roll_seed * 0x2545F4914F6CDD1Dull
+                                        : 0x9E3779B97F4A7C15ull;
+            s->roll_seed++;   // advance so the next rollout draws fresh noise
+
+            uintptr_t g = rd<uintptr_t>(GAME_MANAGER + GM_GLOBALS_PTR);
+            int32_t prev_score = g ? rd<int32_t>(g + G_SCORE) : 0;
+            float prev_lives = g ? rd<float>(g + G_LIFE_COUNT) : 0.f;
+            float prev_boss = rd<float>(GUI + GUI_BOSS_HP_CUR);
+            uint32_t ep_frames = 0, ep_ends = 0;
+            float logits[N_ACTIONS];
+
+            for (int t = 0; t < T; ++t) {
+                // build_obs maintains a per-bullet velocity history across calls,
+                // so call it exactly ONCE per decision (matches ST_STEP). The
+                // GAE bootstrap obs is built only on the final step (after that
+                // the corrupted history doesn't matter - the rollout is over).
+                build_obs(s->roll_obs[t], fs);
+                mlp_logits(s->weights, s->roll_obs[t], h1, h2, logits);
+                int a = gumbel_sample(logits, &rng);
+                s->roll_act[t] = (uint8_t)a;
+                s->action = decode_action(a);
+
+                int r = 0;
+                for (int k = 0; k < fs; ++k) {
+                    wr<uint8_t>(FRAMESKIP_BYTE, 0);
+                    r = orig_do_tick(self, edx);
+                    s->frame++; ep_frames++;
+                    if (r != 0) break;
+                }
+                if (t == T - 1)               // GAE bootstrap: obs after the last action
+                    build_obs(s->roll_last_obs, fs);
+
+                g = rd<uintptr_t>(GAME_MANAGER + GM_GLOBALS_PTR);
+                int32_t score = g ? rd<int32_t>(g + G_SCORE) : prev_score;
+                float lives = g ? rd<float>(g + G_LIFE_COUNT) : prev_lives;
+                int32_t bp = rd<int32_t>(GUI + GUI_BOSS_PRESENT);
+                float bhp = rd<float>(GUI + GUI_BOSS_HP_CUR);
+                float bmax = rd<float>(GUI + GUI_BOSS_HP_MAX);
+
+                // reward: mirror env.py Th07Env.step()
+                float rew = 0.02f * fs;
+                rew += (float)(score - prev_score) * 1e-4f;
+                if (bp && bmax > 0.f)
+                    rew += fmaxf(0.f, prev_boss - bhp) / bmax * 3.0f;
+                bool died = lives < prev_lives - 0.5f;
+                if (died) rew -= 5.0f;
+                s->roll_rew[t] = rew;
+
+                bool done = died || (r != 0) || (ep_frames >= ep_cap);
+                s->roll_done[t] = done ? 1 : 0;
+                prev_score = score; prev_lives = lives; prev_boss = bhp;
+
+                if (done) {
+                    ep_ends++;
+                    engine_stage1_reload(self, edx, s);
+                    g = rd<uintptr_t>(GAME_MANAGER + GM_GLOBALS_PTR);
+                    prev_score = g ? rd<int32_t>(g + G_SCORE) : 0;
+                    prev_lives = g ? rd<float>(g + G_LIFE_COUNT) : 0.f;
+                    prev_boss = 0.f;
+                    ep_frames = 0;
+                }
+            }
+
+            s->action = 0;
+            s->roll_steps_done = T;
+            s->roll_ep_ends = ep_ends;
+            capture_obs();
             s->done = 1;
             s->state = ST_IDLE;
             return 0;
@@ -830,6 +946,7 @@ static DWORD WINAPI init_thread(LPVOID) {
     memset(g_shm, 0, sizeof(Shm));
     g_shm->magic = SHM_MAGIC;
     g_shm->version = SHM_VERSION;
+    g_shm->struct_size = (uint32_t)sizeof(Shm);
     g_shm->state = ST_FREE;
     g_shm->repeat = 1;
     // capture_obs only fills bullets[0..BM_BULLET_MAX); mark the rest inactive so
