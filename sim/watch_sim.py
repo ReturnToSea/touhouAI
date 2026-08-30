@@ -24,7 +24,7 @@ import torch
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 sys.path.insert(0, str(HERE.parent / "native"))
-from danmaku import DanmakuSim, E_CONE, E_SPRAY, E_LINE, E_BRING  # noqa: E402
+from danmaku import DanmakuSim, E_CONE, E_SPRAY, E_LINE, E_BRING, PLAYER_HB  # noqa: E402
 
 # per-source bullet colours (used outside the danger box; inside stays red)
 _SRC_COL = {"cone": "#4fa3ff", "spray": "#2f6fd0", "line": "#e6e6e6",
@@ -248,23 +248,18 @@ class Watcher:
         cv.create_rectangle(cx(px - box), cy(py - box), cx(px + box), cy(py + box),
                             outline="#3fa7ff", width=1, dash=(3, 3))
 
-        # bullets: sprite drawn at ~2.4x the real hitbox. FAR bullets are coloured
-        # by source (blue cone, dark-blue spray, white line, violet bring, orange
-        # spam, green enemy-burst); bullets INSIDE the danger box turn red + get a
-        # bright hitbox dot.
+        # bullets drawn at TRUE hitbox size (so clearances read accurately). FAR
+        # ones coloured by source; ones INSIDE the danger box turn red + a ring.
         if len(bpos):
             nearm = (np.abs(bpos[:, 0] - px) < box) & (np.abs(bpos[:, 1] - py) < box)
             for (bx, by), r, c in zip(bpos[~nearm], brad[~nearm], bcol[~nearm]):
-                spr = max(2.2, r * 2.4 * SCALE)
-                cv.create_oval(cx(bx) - spr, cy(by) - spr, cx(bx) + spr, cy(by) + spr,
+                hb = r * SCALE
+                cv.create_oval(cx(bx) - hb, cy(by) - hb, cx(bx) + hb, cy(by) + hb,
                                fill=c, outline="")
             for (bx, by), r in zip(bpos[nearm], brad[nearm]):
-                spr = max(2.5, r * 2.4 * SCALE)
-                hb = max(1.2, r * SCALE)
-                cv.create_oval(cx(bx) - spr, cy(by) - spr, cx(bx) + spr, cy(by) + spr,
-                               fill="#ff4d4d", outline="", stipple="gray50")
+                hb = r * SCALE
                 cv.create_oval(cx(bx) - hb, cy(by) - hb, cx(bx) + hb, cy(by) + hb,
-                               fill="#ff4d4d", outline="")
+                               fill="#ff4d4d", outline="#ffd0d0")
 
         # spam-phase spawners (orange rings near the top) + a phase banner
         sph = float(s.spam_phase[0])
@@ -342,8 +337,9 @@ class Watcher:
         cv.create_oval(cx(px) - 9, cy(py) - 9, cx(px) + 9, cy(py) + 9,
                        outline=safe_col(esc[0]), width=2)
 
-        # player + hitbox
-        cv.create_oval(cx(px) - 2.5, cy(py) - 2.5, cx(px) + 2.5, cy(py) + 2.5,
+        # player, drawn at its true hitbox size (for judging clearances)
+        phb = PLAYER_HB * SCALE
+        cv.create_oval(cx(px) - phb, cy(py) - phb, cx(px) + phb, cy(py) + phb,
                        fill="#ffffff", outline="")
 
         # action arrow
