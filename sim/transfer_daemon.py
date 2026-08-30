@@ -25,7 +25,10 @@ from pathlib import Path
 import numpy as np
 import torch
 
-torch.set_num_threads(1)   # B=1 policy forward - default 12 OMP threads just thrash
+# the per-step cost here is the torch danger-grid march in native/obs.py, which
+# DOES parallelise - 1 thread makes episodes ~3x slower. 4 caps CPU without the
+# 12-thread thrash. (watch_sim* stay at 1: rate-capped, CPU is what matters there.)
+torch.set_num_threads(4)
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent / "native"))
