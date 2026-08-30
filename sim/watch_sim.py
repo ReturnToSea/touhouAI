@@ -228,17 +228,24 @@ class Watcher:
         cv.create_rectangle(cx(px - box), cy(py - box), cx(px + box), cy(py + box),
                             outline="#3fa7ff", width=1, dash=(3, 3))
 
-        # bullets: b_rad is the real th07 hitbox (2-3 px); the visible sprite is
-        # ~2.4x that. draw the sprite translucent + a bright dot for the hitbox.
-        for (bx, by), r in zip(bpos, brad):
-            inb = abs(bx - px) < box and abs(by - py) < box
-            spr = max(2.5, r * 2.4 * SCALE)
-            hb = max(1.2, r * SCALE)
-            col = "#ff4d4d" if inb else "#5b6472"
-            cv.create_oval(cx(bx) - spr, cy(by) - spr, cx(bx) + spr, cy(by) + spr,
-                           fill=col, outline="", stipple="gray50")
-            cv.create_oval(cx(bx) - hb, cy(by) - hb, cx(bx) + hb, cy(by) + hb,
-                           fill=col, outline="")
+        # bullets: b_rad is the real th07 hitbox (2-3 px), sprite is ~2.4x that.
+        # near the player -> sprite + bright hitbox dot; far away -> one cheap dot
+        # (keeps the draw fast when a spam phase floods the field).
+        if len(bpos):
+            nearm = (np.abs(bpos[:, 0] - px) < box) & (np.abs(bpos[:, 1] - py) < box)
+            far = bpos[~nearm]
+            if len(far) > 500:                       # spam phase - subsample the far dots
+                far = far[:: (len(far) // 500 + 1)]
+            for (bx, by) in far:
+                cv.create_oval(cx(bx) - 1.6, cy(by) - 1.6, cx(bx) + 1.6, cy(by) + 1.6,
+                               fill="#5b6472", outline="")
+            for (bx, by), r in zip(bpos[nearm], brad[nearm]):
+                spr = max(2.5, r * 2.4 * SCALE)
+                hb = max(1.2, r * SCALE)
+                cv.create_oval(cx(bx) - spr, cy(by) - spr, cx(bx) + spr, cy(by) + spr,
+                               fill="#ff4d4d", outline="", stipple="gray50")
+                cv.create_oval(cx(bx) - hb, cy(by) - hb, cx(bx) + hb, cy(by) + hb,
+                               fill="#ff4d4d", outline="")
 
         # spam-phase spawners (orange rings near the top) + a phase banner
         sph = float(s.spam_phase[0])
