@@ -12,9 +12,8 @@ line diverges DOWN from the sim curve as steps rise, that's sim overfitting
     .venv\\Scripts\\python sim\\transfer_daemon.py ppo_v27
     .venv\\Scripts\\python sim\\transfer_daemon.py ppo_v27 --checkpoint best.pt --show
 
-The game window is visible (th07 defocus-PAUSES if minimised/off-screen, which
-hangs the daemon - a DLL focus patch is the real fix, deferred). It cycles every
-~90s. --nosteal moves it behind other windows so it doesn't grab focus.
+th07 keeps ticking with its window minimised (no defocus pause in this config),
+so the game windows are minimised out of the way. --show leaves them on-screen.
 """
 from __future__ import annotations
 
@@ -27,10 +26,10 @@ from pathlib import Path
 import numpy as np
 import torch
 
-# the per-step cost here is the torch danger-grid march in native/obs.py, which
-# DOES parallelise - 1 thread makes episodes ~3x slower. 4 caps CPU without the
-# 12-thread thrash. (watch_sim* stay at 1: rate-capped, CPU is what matters there.)
-torch.set_num_threads(4)
+# 2 threads: the obs-build march in native/obs.py parallelises a bit, but the
+# default ~12 just thrash. The game itself ticks fine while its window is in the
+# background - the earlier "freeze" was this being slow, not paused.
+torch.set_num_threads(2)
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent / "native"))
@@ -42,12 +41,9 @@ RUNS = HERE.parent / "runs_sim"
 _u32 = ctypes.windll.user32
 
 
-def _nosteal_pid_windows(pid: int) -> None:
-    """Push th07's window to the BOTTOM of the z-order without activating it, so
-    it stops grabbing focus. It stays on-screen and ticking (th07 defocus-PAUSES
-    if minimised/off-screen)."""
-    HWND_BOTTOM = 1
-    SWP = 0x0010 | 0x0001 | 0x0002   # NOACTIVATE | NOSIZE | NOMOVE
+def _minimise_pid_windows(pid: int) -> None:
+    """SW_SHOWMINNOACTIVE th07's windows - it keeps ticking in the background
+    (no defocus pause in this config) and stays out of the way."""
     want = ctypes.c_ulong(pid)
 
     @ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
@@ -55,7 +51,7 @@ def _nosteal_pid_windows(pid: int) -> None:
         p = ctypes.c_ulong()
         _u32.GetWindowThreadProcessId(hwnd, ctypes.byref(p))
         if p.value == want.value:
-            _u32.SetWindowPos(hwnd, HWND_BOTTOM, 0, 0, 0, 0, SWP)
+            _u32.ShowWindow(hwnd, 7)   # SW_SHOWMINNOACTIVE
         return True
 
     _u32.EnumWindows(cb, 0)
@@ -86,7 +82,7 @@ def _append_row(path: Path, row) -> None:
     tmp.replace(path)
 
 
-def one_episode(env, pol, frame_skip):
+def one_episode(env, pol, frame_skip, hb=None):
     obs, _ = env.reset()
     steps = 0
     done = False
@@ -98,14 +94,15 @@ def one_episode(env, pol, frame_skip):
         obs, _, term, trunc, info = env.step(a)
         steps += 1
         done = term or trunc
-        # bail if the game stopped ticking (th07 defocus-pause) - the DLL doesn't
-        # patch the focus check, so a background game just freezes and env.step
-        # returns without advancing. Detect via a stuck frame counter.
         fr = info.get("frame", -1)
         stall = stall + 1 if fr == prev_frame else 0
         prev_frame = fr
-        if stall > 400 or time.time() - t0 > 900:
-            raise RuntimeError(f"game not ticking (defocus-pause?) at step {steps}")
+        if stall > 600:
+            raise RuntimeError(f"game frame counter stuck at step {steps}")
+        if time.time() - t0 > 1200:
+            raise RuntimeError(f"episode wall-time > 20 min at step {steps} ({fr} f)")
+        if hb and steps % 500 == 0:
+            hb(f"    ... {steps} steps ({fr/60:.0f}s in-game, {time.time()-t0:.0f}s wall)")
     return steps * frame_skip / 60.0, int(info.get("score", 0))
 
 
@@ -114,8 +111,7 @@ def main():
     ap.add_argument("run")
     ap.add_argument("--checkpoint", default="last.pt")
     ap.add_argument("--frame-skip", type=int, default=3)
-    ap.add_argument("--nosteal", action="store_true",
-                    help="push the game window to the back so it stops grabbing focus")
+    ap.add_argument("--show", action="store_true", help="leave game windows on-screen")
     ap.add_argument("--max-seconds", type=float, default=36000.0)
     ap.add_argument("--settle", type=float, default=3.0, help="pause between episodes (s)")
     args = ap.parse_args()
@@ -137,10 +133,11 @@ def main():
             pol = MLPPolicy.load(ckpt)
             env = Th07Env(frame_skip=args.frame_skip, max_seconds=args.max_seconds,
                           render=False)
-            if args.nosteal:
-                _nosteal_pid_windows(env.pid)
+            if not args.show:
+                _minimise_pid_windows(env.pid)
             t0 = time.time()
-            surv, score = one_episode(env, pol, args.frame_skip)
+            surv, score = one_episode(env, pol, args.frame_skip,
+                                      hb=lambda m: print(m, flush=True))
             n += 1
             _append_row(out, [time.time(), steps, surv, score])
             print(f"[{n:4d}]  {steps/1e6:6.1f}M steps   {surv:6.1f}s   score {score:>9d}   "
