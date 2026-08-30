@@ -155,10 +155,11 @@ class Watcher:
                f"speed        {steps / max(wall, 1) / 1e3:6.0f} k/s"]
         if algo == "ppo" and h.shape[1] >= 12:
             # v17+: wall_s, steps, mean_s, sampled_dec, ent, med_s, p90_s, f60, f120, f180, wallf, enemyf
+            sp, en = h[-1, 10] * 100, h[-1, 11] * 100
             out += [f"median surv  {h[-1, 5]:6.1f} s",
                     f"p90 surv     {h[-1, 6]:6.1f} s   (best {np.nanmax(h[:, 6]):.0f})",
                     f">60/120/180s {h[-1,7]*100:.0f}/{h[-1,8]*100:.0f}/{h[-1,9]*100:.0f} %",
-                    f"deaths wall/en {h[-1,10]*100:.0f}/{h[-1,11]*100:.0f} %",
+                    f"deaths  emit {max(0,100-sp-en):.0f}%  spam {sp:.0f}%  en {en:.0f}%",
                     f"entropy      {h[-1, 4]:6.3f}"]
         elif algo == "ppo":
             gd = h[-1, 2]

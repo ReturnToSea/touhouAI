@@ -118,9 +118,10 @@ class Hud:
                     f" (best p90 {np.nanmax(r['p90']):.0f})"
                     f"   >60s {r['f60'][-1]*100:.0f}%  >120s {r['f120'][-1]*100:.0f}%"
                     f"  >180s {r['f180'][-1]*100:.0f}%")
+                sp, en = r['wallf'][-1] * 100, r['enemyf'][-1] * 100
                 lines.append(
-                    f"    deaths: wall {r['wallf'][-1]*100:.0f}%  enemy {r['enemyf'][-1]*100:.0f}%"
-                    f"   ent {r['ent'][-1]:.2f}   mean {r['surv'][-1]:.0f}s")
+                    f"    deaths: emitter {max(0, 100 - sp - en):.0f}%  spam {sp:.0f}%  "
+                    f"enemy {en:.0f}%   ent {r['ent'][-1]:.2f}   mean {r['surv'][-1]:.0f}s")
             else:
                 lines.append(
                     f"    greedy survival {r['surv'][-1]:5.1f}s (best {r['surv'].max():4.1f})"
