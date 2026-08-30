@@ -69,13 +69,12 @@ for _cx, _cy in _CORNERS:
 ROSTER.append((E_LINE, 350.0, 412.0, "ball"))
 ROSTER += [(E_BRING, CX, CY, "ball"), (E_BRING, CX, CY, "ball")]  # [-2] bounces, [-1] orbits
 
-# --- enemies (learn to shoot) ---
+# --- enemies ---
 # v16: big waves fly in from off-screen every 12 s, hover ~6 s, leave. 1 HP each;
-# touching one kills the player. Holding SHOOT auto-hits the nearest N active
-# enemies (N grows with power) for EN_DPS * power_mult. Enemies drop P items;
-# collecting P raises power -> more damage (capped 3x). The damage/power model
-# doesn't transfer literally but the "collect P, hold shoot, dodge bodies" habit
-# does.
+# touching one kills the player. v23: SHOOT is FRONT-ONLY - it only hits an enemy
+# roughly directly above the player (|dx| < SHOOT_ALIGN_DX). Teaches "position
+# under the target" (= boss positioning). Enemies also fire 2 aimed bursts at the
+# player during their hover (snapshot aim, no tracking) so crowding them hurts.
 MAXE = 36                    # enemy slots
 EN_PER_WAVE = 14             # slots written per wave (9-14 activated)
 EN_WAVE_LO, EN_WAVE_HI = 9, 15
@@ -86,6 +85,14 @@ EN_FLY_SPEED = 2.6
 EN_HOVER_FRAMES = 360        # 6 s
 EN_DPS = 1.0 / 45.0          # base dmg/frame at power 0 (1 HP -> 0.75 s to kill)
 EN_DMG_REW = 0.10           # reward per HP dealt
+SHOOT_ALIGN_DX = 26.0       # front-only shot: enemy must be within this |dx|
+
+# enemy aimed bursts: 2 per hover, snapshot-aimed at the player (no tracking)
+EN_BURST_AT = (270.0, 120.0)   # fire when the (down-counting) hover timer crosses these
+EN_BURST_N = 4                 # bullets per burst
+EN_BURST_ARC = 0.42           # total fan width, radians (~24 deg)
+EN_BURST_SPD = 2.4            # px/frame
+EN_SLOTS = 400               # shared pool for enemy-burst bullets
 
 # --- power meter -> shot damage (0..POWER_MAX, +PWR_PER_ITEM per P collected) ---
 POWER_MAX = 128.0
@@ -119,16 +126,19 @@ SPAM_FIRE_FRAMES = 600      # 10 s of firing
 SPAM_COOLDOWN = 180         # 3 s before normal fire resumes (most pellets gone by then)
 SPAM_N0 = 3                 # spawners in the first phase; +1 each phase
 SPAM_MAX = 6               # slot / state cap (a 180 s episode sees ~3 phases: 3, 4, 5)
-SPAM_SLOTS = 2000           # shared pellet pool for the phase (no life cap; ring recycles)
+SPAM_SLOTS = 3000           # pellet pool: with the fired-count cursor + a 1.0 px/f
+                            # min speed, even the slowest pellet completes its fall
+                            # before its ring slot recycles (up to ~5 spawners)
 SPAM_FIRE_EVERY = 12        # 5 attacks / s
 SPAM_PER_ATTACK = 20        # pellets per spawner per attack
 SPAM_RING_R = 18.0          # pellets spawn on this ring around the spawner (fits 20 no-overlap)
-SPAM_BASE_SPD = 1.6         # pellet speed = U(0.5, 2.0) * this
+SPAM_BASE_SPD = 2.0         # pellet speed = U(0.5, 2.0) * this  -> range 1.0 .. 4.0
 SPAM_BOOST_FRAMES = 12      # first 0.2 s at 2x the chosen speed
 SPAM_SPAWNER_VX = 0.75      # spawner drift speed (px/f), x only
 SPAM_SEG = 128.0            # reverse direction after drifting ~1/3 of the stage
 SPAM_Y = 100.0              # ~80% up the screen; per-spawner +-offset, no y motion
 _PELLET_HB = TH07_BULLETS["pellet"]["hitbox"]
+_BALL_HB = TH07_BULLETS["ball"]["hitbox"]
 
 
 class DanmakuSim:
@@ -141,7 +151,8 @@ class DanmakuSim:
         self.SPE = slots_per_emitter
         self.K = spawn_k
         self._spam_base = self.E * slots_per_emitter
-        self.N = self._spam_base + SPAM_SLOTS + 1          # +1 = dump slot
+        self._en_base = self._spam_base + SPAM_SLOTS       # enemy-burst bullet pool
+        self.N = self._en_base + EN_SLOTS + 1              # +1 = dump slot
         self.dump = self.N - 1
         self.max_frames = max_frames
         self.frame_skip = frame_skip
@@ -203,6 +214,8 @@ class DanmakuSim:
         self.spam_next = torch.zeros(B, device=d)             # frame the next phase starts
         self.spam_n = torch.full((B,), float(SPAM_N0), device=d)   # spawners this episode
         self.spam_cursor = torch.zeros(B, device=d)           # into the SPAM_SLOTS pool
+        self.en_bcursor = torch.zeros(B, device=d)            # into the EN_SLOTS pool
+        self._enj = torch.arange(EN_BURST_N, device=d).float()
         self.sp_x = torch.zeros(B, SPAM_MAX, device=d)
         self.sp_y = torch.zeros(B, SPAM_MAX, device=d)
         self.sp_dir = torch.ones(B, SPAM_MAX, device=d)
@@ -232,7 +245,9 @@ class DanmakuSim:
                                       torch.full((self.N,), 1e9, device=d))
         self._tr_cone_slot = (slot_emit == TR_CONE_EIDX)
         self._spam_slot = ((torch.arange(self.N, device=d) >= self._spam_base) &
-                           (torch.arange(self.N, device=d) < self.dump))
+                           (torch.arange(self.N, device=d) < self._en_base))
+        self._en_slot = ((torch.arange(self.N, device=d) >= self._en_base) &
+                         (torch.arange(self.N, device=d) < self.dump))
         self.b_redir = torch.zeros(B, self.N, device=d)     # 1 once the t=1s roll is done
 
         self._k = torch.arange(self.K, device=d).float()
@@ -363,6 +378,7 @@ class DanmakuSim:
         self.spam_t = torch.where(mb1, torch.zeros_like(self.spam_t), self.spam_t)
         self.spam_n = torch.where(mb1, torch.full_like(self.spam_n, float(SPAM_N0)), self.spam_n)
         self.spam_cursor = torch.where(mb1, torch.zeros_like(self.spam_cursor), self.spam_cursor)
+        self.en_bcursor = torch.where(mb1, torch.zeros_like(self.en_bcursor), self.en_bcursor)
         self.spam_next = torch.where(
             mb1, self._r(B, lo=float(SPAM_PERIOD_LO), hi=float(SPAM_PERIOD_HI)), self.spam_next)
 
@@ -513,7 +529,10 @@ class DanmakuSim:
         self.b_age = self.b_age.scatter(1, idx_s, torch.zeros(B, NB, device=d))
         self.b_redir = self.b_redir.scatter(1, idx_s, torch.zeros(B, NB, device=d))
         self.b_active[:, self.dump] = 0.0
-        self.spam_cursor = torch.where(fire_due, (self.spam_cursor + NB) % SPAM_SLOTS,
+        # advance the ring by the pellets ACTUALLY fired (active spawners only) so
+        # inactive-spawner slots don't burn ring space -> slow pellets live longer
+        fired_ct = self.spam_n * float(SPAM_PER_ATTACK)              # [B]
+        self.spam_cursor = torch.where(fire_due, (self.spam_cursor + fired_ct) % SPAM_SLOTS,
                                        self.spam_cursor)
 
         # phase transitions (from this frame's phase, before the change)
@@ -626,6 +645,7 @@ class DanmakuSim:
         self.en_timer = torch.where(arrived, torch.full_like(self.en_timer,
                                     float(EN_HOVER_FRAMES)), self.en_timer)
         hov = ea & (self.en_phase > 0.5) & (self.en_phase < 1.5)
+        t_pre = self.en_timer
         self.en_timer = torch.where(hov, self.en_timer - 1.0, self.en_timer)
         self.en_phase = torch.where(hov & (self.en_timer <= 0.0),
                                     torch.full_like(self.en_phase, 2.0), self.en_phase)
@@ -643,13 +663,44 @@ class DanmakuSim:
                 (self.en_pos[..., 1] < -44) | (self.en_pos[..., 1] > PH + 44))
         self.en_active = self.en_active * (~eoff).float() * (self.en_hp > 0.0).float()
 
-        # SHOOT auto-hits the nearest N active, ON-SCREEN enemies (N: 1/2/3 grows
-        # with power). dmg = EN_DPS * power_mult (1x at 0 power .. 3x at full).
+        # --- enemy aimed bursts: 2 per hover, snapshot-aimed at the player (no
+        #     tracking); paused during the spam phase ---
+        b1 = hov & (t_pre > EN_BURST_AT[0]) & (self.en_timer <= EN_BURST_AT[0])
+        b2 = hov & (t_pre > EN_BURST_AT[1]) & (self.en_timer <= EN_BURST_AT[1])
+        eburst = (b1 | b2) & ~spam_gate                          # [B,MAXE]
+        e_aim = torch.atan2(self.player[:, None, 1] - self.en_pos[..., 1],
+                            self.player[:, None, 0] - self.en_pos[..., 0])   # [B,MAXE]
+        efan = (self._enj[None, None, :] - (EN_BURST_N - 1) * 0.5) * (
+            EN_BURST_ARC / (EN_BURST_N - 1))
+        eang = e_aim[..., None] + efan                           # [B,MAXE,EN_BURST_N]
+        edir = torch.stack([torch.cos(eang), torch.sin(eang)], -1)
+        ebpos = self.en_pos[:, :, None, :].expand(B, MAXE, EN_BURST_N, 2)
+        ebvel = EN_BURST_SPD * edir
+        ebe = eburst[:, :, None].expand(B, MAXE, EN_BURST_N)
+        ENB = MAXE * EN_BURST_N
+        ear = torch.arange(ENB, device=d)[None, :]
+        eraw = self._en_base + (self.en_bcursor[:, None] + ear) % EN_SLOTS
+        eidx = torch.where(ebe.reshape(B, ENB), eraw,
+                           torch.full_like(eraw, float(self.dump))).long()
+        ei2 = eidx[:, :, None].expand(B, ENB, 2)
+        self.b_pos = self.b_pos.scatter(1, ei2, ebpos.reshape(B, ENB, 2))
+        self.b_vel = self.b_vel.scatter(1, ei2, ebvel.reshape(B, ENB, 2))
+        self.b_rad = self.b_rad.scatter(1, eidx, torch.full((B, ENB), _BALL_HB, device=d))
+        self.b_active = self.b_active.scatter(1, eidx, ebe.reshape(B, ENB).float())
+        self.b_age = self.b_age.scatter(1, eidx, torch.zeros(B, ENB, device=d))
+        self.b_redir = self.b_redir.scatter(1, eidx, torch.zeros(B, ENB, device=d))
+        self.b_active[:, self.dump] = 0.0
+        self.en_bcursor = (self.en_bcursor + eburst.float().sum(1) * EN_BURST_N) % EN_SLOTS
+
+        # SHOOT: FRONT-ONLY - only hits an enemy roughly directly above the player
+        # (|dx| < SHOOT_ALIGN_DX, above), nearest first. dmg = EN_DPS * power_mult.
         ea = self.en_active > 0.5
         on_screen = ((self.en_pos[..., 0] > PX_LO) & (self.en_pos[..., 0] < PX_HI) &
                      (self.en_pos[..., 1] > 0.0) & (self.en_pos[..., 1] < PY_HI))
-        shootable = ea & on_screen
-        ed = torch.where(shootable, (self.en_pos - self.player[:, None, :]).norm(dim=2),
+        rel_e = self.en_pos - self.player[:, None, :]            # [B,MAXE,2]
+        aligned = (ea & on_screen & (rel_e[..., 0].abs() < SHOOT_ALIGN_DX) &
+                   (rel_e[..., 1] < 0.0))
+        ed = torch.where(aligned, rel_e.norm(dim=2),
                          torch.full((B, MAXE), 1e9, device=d))
         pfrac = (self.power[:, 0] / POWER_MAX).clamp(0.0, 1.0)   # [B]
         pmult = 1.0 + (PWR_DMG_MULT_MAX - 1.0) * pfrac

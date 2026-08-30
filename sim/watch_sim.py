@@ -259,6 +259,12 @@ class Watcher:
             cv.create_text(cx(PW / 2), cy(6), fill="#ff9c33", font=("Consolas", 10, "bold"),
                            text=lab)
 
+        # front-only shot column: the shot only hits an enemy within +-26px of
+        # the player's x and above it (teaches "position under the target").
+        ALIGN = 26.0
+        cv.create_line(cx(px - ALIGN), cy(0), cx(px - ALIGN), cy(py), fill="#3a3a22", dash=(2, 4))
+        cv.create_line(cx(px + ALIGN), cy(0), cx(px + ALIGN), cy(py), fill="#3a3a22", dash=(2, 4))
+
         # enemies (magenta = active), hp bar above; line to the one being shot
         en_act = s.en_active[0].numpy() > 0.5
         en_pos = s.en_pos[0].numpy()
@@ -270,7 +276,7 @@ class Watcher:
                 continue
             ex, ey = en_pos[k]
             d = ((ex - px) ** 2 + (ey - py) ** 2) ** 0.5
-            if 0 < ey < PH and d < near_d:
+            if abs(ex - px) < ALIGN and ey < py and d < near_d:   # aligned + above
                 near_i, near_d = k, d
             cv.create_oval(cx(ex) - 9, cy(ey) - 9, cx(ex) + 9, cy(ey) + 9,
                            fill="#d54de0", outline="#ffffff")
@@ -279,7 +285,7 @@ class Watcher:
                                 fill="#66ff88", outline="")
         if shooting and near_i >= 0:
             ex, ey = en_pos[near_i]
-            cv.create_line(cx(px), cy(py), cx(ex), cy(ey), fill="#ffe14d", width=2, dash=(4, 2))
+            cv.create_line(cx(px), cy(py), cx(ex), cy(ey), fill="#ffe14d", width=2)
 
         # P items (falling) + the collect radius
         it_act = s.it_active[0].numpy() > 0.5
