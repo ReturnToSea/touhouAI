@@ -80,11 +80,12 @@ EN_PER_WAVE = 14             # slots written per wave (9-14 activated)
 EN_WAVE_LO, EN_WAVE_HI = 9, 15
 WAVE_PERIOD = 720            # 12 s
 EN_HP = 1.0
-EN_RADIUS = 9.0
+EN_RADIUS = 13.0            # v26: 9 -> 13, a caution bias (body contact is death)
 EN_FLY_SPEED = 2.6
 EN_HOVER_FRAMES = 360        # 6 s
 EN_DPS = 1.0 / 45.0          # base dmg/frame at power 0 (1 HP -> 0.75 s to kill)
-EN_DMG_REW = 0.10           # reward per HP dealt
+EN_DMG_REW = 0.35           # v26: 0.10 -> 0.35, so it hunts enemies instead of camping
+PWR_STAND_REW = 0.0015     # per frame, x power_frac: makes held power lastingly worth it
 SHOOT_ALIGN_DX = 26.0       # front-only shot: enemy must be within this |dx|
 
 # enemy aimed bursts: 2 per hover, snapshot-aimed at the player (no tracking)
@@ -106,7 +107,7 @@ IT_PER_KILL = 4              # P items dropped per enemy killed
 IT_GRAVITY = 0.10            # px/frame^2 downward
 IT_TERM_VY = 3.0             # terminal fall speed
 IT_COLLECT_R = 14.0
-IT_REW = 0.30              # reward per P item collected (v16: 0.15 -> 0.30)
+IT_REW = 0.60              # reward per P item (v16 0.15 -> 0.30 -> v26 0.60)
 
 # top-right CONE (ROSTER emitter index 2): one-shot 50% chance at t=1s to
 # redirect anywhere in 360 deg, same speed. Those bullets get a 5 s life cap.
@@ -767,14 +768,18 @@ class DanmakuSim:
         # --- collision (bullets + enemy bodies) ---
         # th07 uses an AABB overlap; circular approx: dist < bullet_hitbox + PLAYER_HB
         dist = (self.b_pos - self.player[:, None, :]).norm(dim=2)
-        bhit = ((self.b_active > 0.5) &
-                (dist < self._slot_rad[None, :] + PLAYER_HB)).any(dim=1, keepdim=True)
+        bhitmask = (self.b_active > 0.5) & (dist < self._slot_rad[None, :] + PLAYER_HB)
+        bhit = bhitmask.any(dim=1, keepdim=True)
+        spam_hit = (bhitmask & self._spam_slot[None, :]).any(dim=1, keepdim=True)
+        eshot_hit = (bhitmask & self._en_slot[None, :]).any(dim=1, keepdim=True)
         en_d = (self.en_pos - self.player[:, None, :]).norm(dim=2)
         en_hit = (ea & (en_d < EN_RADIUS + 3.0)).any(dim=1, keepdim=True)
         hit = bhit | en_hit
         newly_dead = (self.alive > 0.5) & hit
-        self.death_wall = (newly_dead & bhit & ~en_hit).squeeze(1).float()   # died to a bullet
-        self.death_enemy = (newly_dead & en_hit).squeeze(1).float()
+        # death cause: "wall" col now = SPAM pellet; "enemy" col = enemy body OR
+        # enemy-burst bullet; the remainder (100-spam-enemy) = normal emitter fire
+        self.death_wall = (newly_dead & spam_hit).squeeze(1).float()
+        self.death_enemy = (newly_dead & (en_hit | eshot_hit) & ~spam_hit).squeeze(1).float()
         self.alive = self.alive * (~hit).float()
         self.frame = self.frame + 1.0
         done = newly_dead | (self.frame >= self.max_frames)
@@ -783,6 +788,7 @@ class DanmakuSim:
               torch.where(alive_now, torch.full_like(self.alive, self.alive_rew),
                           torch.zeros_like(self.alive)))
         rew = rew + (EN_DMG_REW * dmg + IT_REW * n_got)[:, None] * alive_now.float()
+        rew = rew + PWR_STAND_REW * (self.power / POWER_MAX) * alive_now.float()
         return rew.squeeze(1), done.squeeze(1)
 
     def step(self, actions):

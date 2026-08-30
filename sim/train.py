@@ -91,7 +91,7 @@ def train_ppo(args, sim, dev, run):
                           compile=(dev == "cuda"))
 
     @torch.no_grad()
-    def greedy_eval(n_dec=3600):     # 3600 dec * fs3 = 10800 f = 180 s ceiling
+    def greedy_eval(n_dec=4800):     # 4800 dec * fs3 = 14400 f = 240 s ceiling
         # sync-free: everything stays on the GPU, single host transfer at the end.
         o = eval_sim.reset()
         B = eval_sim.B
@@ -214,8 +214,8 @@ def train_ppo(args, sim, dev, run):
                   f"med {e['med']:5.1f}s  p90 {e['p90']:6.1f}s  >60s {e['f60']*100:3.0f}%  "
                   f">120s {e['f120']*100:3.0f}%  >180s {e['f180']*100:3.0f}%  "
                   f"sampled {ml*fs/60:4.1f}s  ent {ent.item():.2f}  "
-                  f"deaths: wall {e['wall']*100:2.0f}% enemy {e['enemy']*100:2.0f}%",
-                  flush=True)
+                  f"deaths: spam {e['wall']*100:2.0f}% enemy {e['enemy']*100:2.0f}% "
+                  f"(rest=emitter)", flush=True)
             # history cols: wall_s, steps, mean, sampled_dec, ent, med, p90, f60, f120, f180, wallf, enemyf
             hist.append((time.perf_counter() - t0, total, e['mean'], ml, float(ent.item()),
                          e['med'], e['p90'], e['f60'], e['f120'], e['f180'], e['wall'], e['enemy']))
@@ -300,7 +300,7 @@ def main():
     ap.add_argument("--steps", type=float, default=30e6)
     ap.add_argument("--B", type=int, default=24576)
     ap.add_argument("--hidden", type=int, nargs="+", default=[128, 128])
-    ap.add_argument("--max-frames", type=int, default=10800)   # 180 s training episodes
+    ap.add_argument("--max-frames", type=int, default=14400)   # 240 s training episodes
     ap.add_argument("--seed", type=int, default=0)
     # ppo
     ap.add_argument("--rollout", type=int, default=32)
