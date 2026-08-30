@@ -126,11 +126,16 @@ class Th07Env(_Base):
     metadata = {"render_modes": []}
 
     def __init__(self, frame_skip: int = 3, max_seconds: float = 90.0,
-                 warmup: int = 90, render: bool = False, mute: bool = True):
+                 warmup: int = 90, render: bool = False, mute: bool = True,
+                 hard_reset: bool = False):
         super().__init__()
         self.frame_skip = frame_skip
         self.max_steps = int(max_seconds * 60 / frame_skip)
         self.render_mode = "human" if render else None
+        # hard_reset=True: every reset() (incl. SB3's auto-reset on episode end)
+        # uses the engine-level Stage 1 reload instead of the snapshot restore -
+        # the snapshot can't rewind a run that got deep into a boss.
+        self._hard_reset_default = hard_reset
 
         # the DLL reads these at load time from the child's environment
         if render:
@@ -367,7 +372,9 @@ class Th07Env(_Base):
         # options={"hard": True} -> engine-level Stage 1 reload (Give Up &
         # Retry). Rewinds from anywhere (deep boss fights included) so one game
         # process serves many episodes; ~1s vs the snapshot restore's instant.
-        hard = bool(options and options.get("hard"))
+        hard = self._hard_reset_default
+        if options and "hard" in options:
+            hard = bool(options["hard"])
         ok = self.h.hard_reset() if hard else self.h.reset()
         if not ok:
             s = self.h.s
