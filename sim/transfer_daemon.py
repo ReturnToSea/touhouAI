@@ -100,13 +100,14 @@ def one_episode(env, pol, frame_skip, cap, hb=None):
     force_shoot = 0
     while not done:
         a = int(pol.act(obs))
-        # the DLL auto-skips menus but not in-game dialogue (e.g. post-boss). If
-        # the policy stops pressing shoot after a kill, the dialogue never
-        # advances - player + score freeze. Detect that and mash shoot to skip it.
-        if score_stall > 150 and ppos_stall > 150:
-            force_shoot = 90
+        # the DLL auto-skips menus but not in-game dialogue (pre-Cirno / post-boss
+        # etc). It locks the player and advances one line per shoot PRESS. If the
+        # policy stops shooting at that moment -> player + score freeze forever.
+        # Detect the freeze and PULSE shoot (edge-triggered, like the menu nav).
+        if score_stall > 120 and ppos_stall > 120:
+            force_shoot = 240
         if force_shoot > 0:
-            a = (a % 18) + 18
+            a = (a % 18) + (18 if (force_shoot % 12) < 4 else 0)   # ~4 on / 8 off
             force_shoot -= 1
         obs, _, term, trunc, info = env.step(a)
         steps += 1
