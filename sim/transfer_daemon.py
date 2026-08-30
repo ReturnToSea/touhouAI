@@ -91,11 +91,21 @@ def one_episode(env, pol, frame_skip):
     steps = 0
     done = False
     info = {"score": 0}
+    t0 = time.time()
+    prev_frame, stall = -1, 0
     while not done:
         a = int(pol.act(obs))
         obs, _, term, trunc, info = env.step(a)
         steps += 1
         done = term or trunc
+        # bail if the game stopped ticking (th07 defocus-pause) - the DLL doesn't
+        # patch the focus check, so a background game just freezes and env.step
+        # returns without advancing. Detect via a stuck frame counter.
+        fr = info.get("frame", -1)
+        stall = stall + 1 if fr == prev_frame else 0
+        prev_frame = fr
+        if stall > 400 or time.time() - t0 > 900:
+            raise RuntimeError(f"game not ticking (defocus-pause?) at step {steps}")
     return steps * frame_skip / 60.0, int(info.get("score", 0))
 
 

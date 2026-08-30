@@ -77,6 +77,30 @@ def field_zone(px, py):
     return f"{yz}-{xz}"
 
 
+def _log_realtransfer(model_path, surv_s, score):
+    """Append [wallclock, train_steps, survival_s, score] to the run's
+    realtransfer.npy so the hud plots these manual runs alongside the sim curve
+    (same file the transfer daemon writes)."""
+    try:
+        d = Path(model_path).resolve().parent
+        steps = 0.0
+        hp = d / "history.npy"
+        if hp.exists():
+            h = np.load(hp)
+            if h.ndim == 2 and len(h):
+                steps = float(h[-1, 1])
+        out = d / "realtransfer.npy"
+        row = np.array([[time.time(), steps, float(surv_s), float(score)]], np.float64)
+        if out.exists():
+            row = np.vstack([np.load(out), row])
+        tmp = out.with_name("realtransfer_tmp.npy")
+        with open(tmp, "wb") as f:
+            np.save(f, row)
+        tmp.replace(out)
+    except Exception:
+        pass
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("model", type=Path)
@@ -132,6 +156,7 @@ def main():
             s = env.h.s
             died = s.tick_status == 0
             t_ep = steps * dt
+            _log_realtransfer(args.model, t_ep, int(info.get("score", 0)))
             if not died:
                 print(f"ep {ep}: ended at {t_ep:.1f}s via tick_status={s.tick_status} "
                       f"(stage/game end, not a death) - score {info['score']}")

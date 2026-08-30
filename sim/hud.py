@@ -67,19 +67,29 @@ def load(name):
         surv = dec * FS / 60.0
         ret = h[:, -1]
         ent = nan
-    # real-game transfer daemon: rows [wallclock, train_steps, survival_s, score]
-    rt_steps = rt_surv = rt_sm = None
+    # real-game transfer: rows [wallclock, train_steps, survival_s, score].
+    # 3 rolling lines over a ~15-episode window: worst / median / best.
+    rt_steps = rt_surv = None
+    rt_x = rt_lo = rt_md = rt_hi = None
     rp = d / "realtransfer.npy"
     if rp.exists():
         try:
             rt = np.load(rp)
             if rt.ndim == 2 and len(rt):
                 order = np.argsort(rt[:, 1])
-                rt_steps, rt_surv = rt[order, 1], rt[order, 2]
-                w = min(15, len(rt_surv))                       # rolling-mean window
-                if w >= 2:
-                    k = np.ones(w) / w
-                    rt_sm = np.convolve(rt_surv, k, mode="valid")
+                rt_steps, rt_surv = rt[order, 1] / 1e6, rt[order, 2]
+                W = 15
+                if len(rt_surv) >= 3:
+                    xs, lo, md, hi = [], [], [], []
+                    for i in range(len(rt_surv)):
+                        a, b = max(0, i - W + 1), i + 1
+                        win = rt_surv[a:b]
+                        if len(win) >= 3:
+                            xs.append(rt_steps[i])
+                            lo.append(win.min()); md.append(np.median(win)); hi.append(win.max())
+                    if xs:
+                        rt_x = np.array(xs)
+                        rt_lo, rt_md, rt_hi = np.array(lo), np.array(md), np.array(hi)
         except Exception:
             pass
 
@@ -87,7 +97,8 @@ def load(name):
                surv=surv, ret=ret, ent=ent, dcap=nan,
                med=med, p90=p90, f60=f60, f120=f120, f180=f180,
                wallf=wallf, enemyf=enemyf,
-               rt_steps=rt_steps, rt_surv=rt_surv, rt_sm=rt_sm)
+               rt_steps=rt_steps, rt_surv=rt_surv,
+               rt_x=rt_x, rt_lo=rt_lo, rt_md=rt_md, rt_hi=rt_hi)
 
 
 class Hud:
@@ -199,25 +210,26 @@ class Hud:
             cv.create_text(X(sm[-1]), Y(yv) - 8, anchor="e",
                            fill=c, font=("Consolas", 8), text=lab)
 
-            # real-game transfer daemon: faint dots per episode + a bold smoothed
-            # line. If this diverges DOWN from the sim p90 as steps rise -> the
-            # sim is overfitting (ppo_v26 failure mode), visible live.
+            # real-game transfer: faint per-episode dots + 3 rolling lines
+            # (worst / median / best over a ~15-episode window). If the median
+            # line trends DOWN as steps rise -> the sim is overfitting.
             if r.get("rt_steps") is not None and len(r["rt_steps"]):
-                rs = r["rt_steps"] / 1e6
-                for s, y in zip(rs, r["rt_surv"]):
-                    if 0 <= y <= ymax * 1.05:
+                for s, y in zip(r["rt_steps"], r["rt_surv"]):
+                    if 0 <= y <= ymax:
                         cv.create_oval(X(s) - 1, Y(y) - 1, X(s) + 1, Y(y) + 1,
-                                       outline="", fill="#ff5c8a")
-                if r.get("rt_sm") is not None and len(r["rt_sm"]) >= 2:
-                    off = len(rs) - len(r["rt_sm"])
-                    pts = [co for s, y in zip(rs[off:], r["rt_sm"])
-                           for co in (X(s), Y(min(y, ymax)))]
-                    cv.create_line(*pts, fill="#ff5c8a", width=2, smooth=True)
-                    cv.create_text(X(rs[-1]), Y(min(r["rt_sm"][-1], ymax)) + 10,
+                                       outline="", fill="#5a2a3a")
+                if r.get("rt_x") is not None and len(r["rt_x"]) >= 2:
+                    rx = r["rt_x"]
+                    for key, col, wdt in (("rt_lo", "#8a5c6a", 1), ("rt_hi", "#8a5c6a", 1),
+                                          ("rt_md", "#ff5c8a", 2)):
+                        pts = [co for s, y in zip(rx, r[key])
+                               for co in (X(s), Y(min(y, ymax)))]
+                        cv.create_line(*pts, fill=col, width=wdt, smooth=True)
+                    cv.create_text(X(rx[-1]), Y(min(r["rt_md"][-1], ymax)) - 8,
                                    anchor="e", fill="#ff5c8a", font=("Consolas", 8),
-                                   text="real game")
+                                   text="real game (worst/med/best)")
         cv.create_text((x0 + x1) / 2, PT, fill="#9aa4b4", font=("Consolas", 9),
-                       text="sim: p90 (solid) + median (dashed)   real game: pink   vs steps")
+                       text="sim: p90 (—) median (··)    real game: median (—) worst/best (thin)   vs steps")
 
 
 def main():
