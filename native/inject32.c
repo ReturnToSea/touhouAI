@@ -62,6 +62,14 @@ int main(int argc, char** argv) {
     if (slash) *slash = 0;
 
     STARTUPINFOA si = { sizeof(si) };
+    // launch WITHOUT stealing focus (TH07_SHOW=1 to override). Not minimised -
+    // th07's WinMain skips do_tick when minimised, so the window must be shown;
+    // SW_SHOWNOACTIVATE keeps it off the foreground so it doesn't force-tab the
+    // user out.
+    if (getenv("TH07_SHOW") == NULL) {
+        si.dwFlags = STARTF_USESHOWWINDOW;
+        si.wShowWindow = SW_SHOWNOACTIVATE;    // 4
+    }
     PROCESS_INFORMATION pi = { 0 };
     if (!CreateProcessA(exe, NULL, NULL, NULL, FALSE, CREATE_SUSPENDED, NULL,
                         dir, &si, &pi)) {

@@ -462,7 +462,10 @@ static inline bool driving() {
 static uint16_t __cdecl hooked_read_input(void) {
     if (driving())
         return g_shm->action;
-    return orig_read_input();
+    uint16_t w = orig_read_input();
+    if (g_shm && g_shm->state == ST_FREE)   // RE aid: mirror the live input word
+        g_shm->action = w;                  // (Python isn't writing it in FREE mode)
+    return w;
 }
 
 // Present is DWM-vsync-capped in a window. Skip it while we drive the game
