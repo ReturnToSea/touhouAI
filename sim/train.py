@@ -30,6 +30,37 @@ from obs import OBS_DIM                  # noqa: E402
 from policy import MLPPolicy, N_ACTIONS  # noqa: E402
 
 
+class RunningMeanStd(nn.Module):
+    """Welford running mean/var over the batch axis. Buffers so it saves/loads
+    and moves with the module. Standard obs/return normalisation (rl_games / SB3)."""
+
+    def __init__(self, shape):
+        super().__init__()
+        self.register_buffer("mean", torch.zeros(shape))
+        self.register_buffer("var", torch.ones(shape))
+        self.register_buffer("count", torch.zeros(()))
+
+    @torch.no_grad()
+    def update(self, x):                    # x: [..., *shape]
+        x = x.reshape(-1, *self.mean.shape)
+        bn = x.shape[0]
+        if bn == 0:
+            return
+        bm, bv = x.mean(0), x.var(0, unbiased=False)
+        n = self.count + bn
+        d = bm - self.mean
+        self.mean += d * (bn / n)
+        self.var.copy_((self.var * self.count + bv * bn + d * d * self.count * bn / n) / n)
+        self.count.copy_(n)
+
+    @property
+    def std(self):
+        return (self.var + 1e-8).sqrt()
+
+    def norm(self, x):
+        return (x - self.mean) / self.std
+
+
 def mlp(sizes, out_gain=1.0):
     layers = []
     for i in range(len(sizes) - 2):
@@ -51,20 +82,31 @@ class ActorCritic(nn.Module):
         self.hidden = tuple(hidden)
         self.actor = mlp([OBS_DIM, *hidden, N_ACTIONS], out_gain=0.01)   # == MLPPolicy.net
         self.critic = mlp([OBS_DIM, 128, 128, 1], out_gain=1.0)
+        self.obs_rms = RunningMeanStd(OBS_DIM)     # v28: obs normalisation
 
     def forward(self, o):
+        o = self.obs_rms.norm(o)
         return self.actor(o), self.critic(o).squeeze(-1)
 
     @torch.no_grad()
     def act(self, o, greedy=False):
-        logits = self.actor(o)
+        logits = self.actor(self.obs_rms.norm(o))
         if greedy:
             return logits.argmax(-1)
         return torch.distributions.Categorical(logits=logits).sample()
 
     def export_mlp(self):
+        """Fold the current obs normalisation into the actor's first Linear, so
+        the exported net is a plain MLP that runs on RAW obs - transfer / watch /
+        deathcam load it unchanged."""
         pol = MLPPolicy(hidden=self.hidden)
-        pol.net.load_state_dict(self.actor.state_dict())
+        sd = {k: v.clone() for k, v in self.actor.state_dict().items()}
+        m = self.obs_rms.mean
+        inv = 1.0 / self.obs_rms.std                 # [OBS_DIM]
+        W0 = sd["0.weight"]                           # [h, OBS_DIM]
+        sd["0.bias"] = sd["0.bias"] - (W0 * inv) @ m
+        sd["0.weight"] = W0 * inv
+        pol.net.load_state_dict(sd)
         return pol
 
 
@@ -101,7 +143,7 @@ def train_ppo(args, sim, dev, run):
         de = torch.zeros((), device=dev)
         nd = torch.zeros((), device=dev)
         for i in range(n_dec):
-            a = ac.actor(o).argmax(-1)
+            a = ac.actor(ac.obs_rms.norm(o)).argmax(-1)
             o, _, done = eval_sim.step(a)
             el = el + 1.0
             df = done.float()
@@ -110,16 +152,26 @@ def train_ppo(args, sim, dev, run):
             nd = nd + df.sum()
             dw = dw + eval_sim.step_death_wall.sum()
             de = de + eval_sim.step_death_enemy.sum()
-        lens = torch.cat([comp[comp > 0], el[el > 0]])          # survivors at current len
         fs = 3.0 / 60.0
-        a = (lens * fs).sort().values.cpu().numpy()             # <-- the one sync
+        lens = torch.cat([comp[comp > 0], el[el > 0]])          # ALL episodes (pooled)
+        a = (lens * fs).sort().values.cpu().numpy()             # <-- one sync
+        # honest metric: FIRST episode per env, equal weight (the pooled median
+        # above is biased low - fast-dying situations auto-reset and cycle more).
+        m1 = comp > 0
+        died1 = m1.any(dim=0)
+        first_len = comp.gather(0, torch.argmax(m1.float(), dim=0, keepdim=True)).squeeze(0)
+        fe = (torch.where(died1, first_len, el) * fs).sort().values.cpu().numpy()
         ndeaths = float(nd)
         if a.size == 0:
             a = np.zeros(1)
+        if fe.size == 0:
+            fe = np.zeros(1)
         return dict(mean=float(a.mean()), med=float(np.median(a)),
                     p10=float(np.percentile(a, 10)), p90=float(np.percentile(a, 90)),
                     f60=float((a > 60).mean()), f120=float((a > 120).mean()),
                     f180=float((a > 180).mean()),
+                    med1=float(np.median(fe)), p90_1=float(np.percentile(fe, 90)),
+                    f60_1=float((fe > 60).mean()), mean1=float(fe.mean()),
                     wall=float(dw) / max(ndeaths, 1), enemy=float(de) / max(ndeaths, 1))
 
     ep_ret = torch.zeros(B, device=dev)
@@ -129,6 +181,10 @@ def train_ppo(args, sim, dev, run):
     recent_len, recent_ret = [], []
     next_log = 1_000_000            # cheap status line every ~1M steps
 
+    ret_rms = RunningMeanStd(()).to(dev)   # v28: running std of the discounted return
+    ret_disc = torch.zeros(B, device=dev)  # per-env discounted-return accumulator
+    lr0 = args.lr
+
     o_buf = torch.zeros(T, B, OBS_DIM, device=dev)
     a_buf = torch.zeros(T, B, dtype=torch.long, device=dev)
     lp_buf = torch.zeros(T, B, device=dev)
@@ -137,6 +193,10 @@ def train_ppo(args, sim, dev, run):
     d_buf = torch.zeros(T, B, device=dev)
 
     while total < args.steps:
+        # v28: linear LR anneal to 10% of lr0
+        lr_now = lr0 * max(0.1, 1.0 - total / args.steps)
+        for g in opt.param_groups:
+            g["lr"] = lr_now
         for t in range(T):
             with torch.no_grad():
                 logits, val = ac(obs)
@@ -145,6 +205,10 @@ def train_ppo(args, sim, dev, run):
             o_buf[t], a_buf[t], lp_buf[t], v_buf[t] = obs, act, dist.log_prob(act), val
             obs, rew, done = sim.step(act)
             r_buf[t], d_buf[t] = rew, done.float()
+            # v28: reward normalisation (SB3-style) - track the std of the
+            # discounted return, divide rewards by it. train-only.
+            ret_disc = args.gamma * ret_disc * (1.0 - done.float()) + rew
+            ret_rms.update(ret_disc)
             ep_ret += rew
             ep_len += 1
             if done.any():
@@ -155,6 +219,8 @@ def train_ppo(args, sim, dev, run):
         total += T * B
         upd += 1
 
+        ac.obs_rms.update(o_buf)                          # v28: obs normalisation stats
+        r_use = r_buf / ret_rms.std                       # v28: normalised rewards
         with torch.no_grad():
             _, last_v = ac(obs)
             adv = torch.zeros(T, B, device=dev)
@@ -162,7 +228,7 @@ def train_ppo(args, sim, dev, run):
             for t in reversed(range(T)):
                 nonterm = 1.0 - d_buf[t]
                 nextv = last_v if t == T - 1 else v_buf[t + 1]
-                delta = r_buf[t] + args.gamma * nextv * nonterm - v_buf[t]
+                delta = r_use[t] + args.gamma * nextv * nonterm - v_buf[t]
                 gae = delta + args.gamma * args.lam * nonterm * gae
                 adv[t] = gae
             ret = adv + v_buf
@@ -211,15 +277,17 @@ def train_ppo(args, sim, dev, run):
             e = greedy_eval()                        # dict, values already in seconds
             sps = total / (time.perf_counter() - t0)
             print(f"EVAL upd {upd:4d}  {total/1e6:6.1f}M  {sps/1e3:4.0f}k/s  "
-                  f"med {e['med']:5.1f}s  p90 {e['p90']:6.1f}s  >60s {e['f60']*100:3.0f}%  "
-                  f">120s {e['f120']*100:3.0f}%  >180s {e['f180']*100:3.0f}%  "
-                  f"sampled {ml*fs/60:4.1f}s  ent {ent.item():.2f}  "
+                  f"med1 {e['med1']:5.1f}s  p90_1 {e['p90_1']:6.1f}s  >60s {e['f60_1']*100:3.0f}%  "
+                  f"(pooled med {e['med']:.0f}/p90 {e['p90']:.0f})  "
+                  f"sampled {ml*fs/60:4.1f}s  ent {ent.item():.2f}  lr {lr_now/1e-4:.2f}e-4  "
                   f"deaths: spam {e['wall']*100:2.0f}% enemy {e['enemy']*100:2.0f}% "
                   f"(rest=emitter)", flush=True)
-            # history cols: wall_s, steps, mean, sampled_dec, ent, med, p90, f60, f120, f180, wallf, enemyf
+            # history cols 0-11 (v17): wall_s, steps, mean, sampled_dec, ent, med, p90,
+            #   f60, f120, f180, wallf, enemyf   -- 12-15 (v28): med1, p90_1, f60_1, mean1
             hist.append((time.perf_counter() - t0, total, e['mean'], ml, float(ent.item()),
-                         e['med'], e['p90'], e['f60'], e['f120'], e['f180'], e['wall'], e['enemy']))
-            score = e['med'] + 0.5 * e['p90']        # rank checkpoints by center + top end
+                         e['med'], e['p90'], e['f60'], e['f120'], e['f180'], e['wall'], e['enemy'],
+                         e['med1'], e['p90_1'], e['f60_1'], e['mean1']))
+            score = e['med1'] + 0.5 * e['p90_1']    # v28: rank by the honest metric
             if score > best:
                 best = score
                 ac.export_mlp().save(run / "best.pt")

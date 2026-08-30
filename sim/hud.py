@@ -46,15 +46,19 @@ def load(name):
     nan = np.full(n, np.nan)
     med = p90 = f60 = f120 = f180 = wallf = enemyf = nan
     if algo == "ppo" and h.shape[1] >= 12:
-        # v17+ cols: wall_s, steps, mean_s, sampled_dec, ent, med_s, p90_s,
-        #            f60, f120, f180, wallf, enemyf   (survival cols already in seconds)
+        # v17+ cols 0-11: wall_s, steps, mean_s, sampled_dec, ent, med_s, p90_s,
+        #   f60, f120, f180, wallf, enemyf.  v28 cols 12-15: med1, p90_1, f60_1, mean1
+        #   (first-episode-per-env - the honest metric; 5-6 are the biased pooled one)
         wall, steps = h[:, 0], h[:, 1]
         surv = h[:, 2]
         ret = h[:, 3]
         ent = h[:, 4]
-        med, p90 = h[:, 5], h[:, 6]
-        f60, f120, f180 = h[:, 7], h[:, 8], h[:, 9]
+        f120, f180 = h[:, 8], h[:, 9]
         wallf, enemyf = h[:, 10], h[:, 11]
+        if h.shape[1] >= 16:
+            med, p90, f60 = h[:, 12], h[:, 13], h[:, 14]      # honest
+        else:
+            med, p90, f60 = h[:, 5], h[:, 6], h[:, 7]         # pooled (pre-v28)
     elif algo == "ppo":
         # legacy cols: wall, steps, greedy_dec, sampled_dec, ent
         wall, steps = h[:, 0], h[:, 1]

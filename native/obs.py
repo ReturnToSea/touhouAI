@@ -41,6 +41,9 @@ GRID_HORIZON = 24.0
 HEAD_DIM = 16
 NDIRS = 9
 DIR_SPEED = 4.0          # measured unfocused player move speed (px/frame)
+DIR_SPEED_FOCUS = 1.6    # focused move speed - the escape scan uses this when
+                        # player_focus is set (v28: it assumed 4.0 always, so a
+                        # focused policy thought it could out-run bullets it can't)
 DIR_HORIZON = 20.0
 DIR_HIT_R = 7.0          # player_r (~2) + typical stage-1 bullet_r (~4), a touch generous
 K_NEAREST = 128          # only the K nearest bullets feed the local grid + escape scan
@@ -138,9 +141,13 @@ def build_obs_batch(player_pos, player_vel, player_focus,
     # ---------- escape scalars ----------
     L = dirs.norm(dim=1, keepdim=True)
     unit = torch.where(L > 1e-6, dirs / L.clamp(min=1e-9), torch.zeros_like(dirs))
-    pm = unit * DIR_SPEED
-    pmx = pm[:, 0][None, :]
-    pmy = pm[:, 1][None, :]
+    # v28: focus-aware move speed - [B,1]
+    sp = torch.where(player_focus.reshape(B, 1).to(dt) > 0.5,
+                     torch.tensor(DIR_SPEED_FOCUS, device=dev, dtype=dt),
+                     torch.tensor(DIR_SPEED, device=dev, dtype=dt))
+    pm = unit[None, :, :] * sp[:, :, None]           # [B, NDIRS, 2]
+    pmx = pm[:, :, 0]                                 # [B, NDIRS]
+    pmy = pm[:, :, 1]
     big = torch.full((B, NDIRS), 1e9, device=dev, dtype=dt)
 
     twx = torch.where(pmx > 1e-6, (PX_HI - px) / pmx.clamp(min=1e-6),
@@ -154,7 +161,7 @@ def build_obs_batch(player_pos, player_vel, player_focus,
     dist = rb.norm(dim=2)
     near = (dist < 150.0) & act
     r0 = -rb
-    rv = pm[None, None, :, :] - bv[:, :, None, :]
+    rv = pm[:, None, :, :] - bv[:, :, None, :]        # [B, N, NDIRS, 2]
     a = (rv * rv).sum(-1)
     bdot = (r0[:, :, None, :] * rv).sum(-1)
     ts = torch.where(a < 1e-6, torch.zeros_like(a), -bdot / a.clamp(min=1e-6))

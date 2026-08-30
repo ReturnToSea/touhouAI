@@ -123,6 +123,10 @@ EN_HOVER_FRAMES = 360        # 6 s
 EN_DPS = 1.0 / 45.0          # base dmg/frame at power 0 (1 HP -> 0.75 s to kill)
 EN_DMG_REW = 0.22          # v27: 0.35 -> 0.22 (v26 locked at ~35% enemy deaths - overshot)
 PWR_STAND_REW = 0.0015     # per frame, x power_frac: makes held power lastingly worth it
+# v28: nudge off the exact bottom wall (zero escape room = fragile). Only the
+# bottom ~12% - the whole lower field stays free (real Touhou is played low).
+BOTTOM_Y = 385.0
+BOTTOM_PEN = 0.003         # per frame at the wall, ramps to 0 at BOTTOM_Y
 SHOOT_ALIGN_DX = 9.0        # v27: 26 -> 15 -> 9. real shot is narrow; the wide
                             # window taught "hit from the edge" -> a real-game miss
 
@@ -319,6 +323,7 @@ class DanmakuSim:
         self._head[:, 5] = 1.0
         self._zeros2 = torch.zeros(B, 2, device=d)
         self._zeros1 = torch.zeros(B, device=d)
+        self.player_focus = torch.zeros(B, device=d)   # v28: real focus -> obs
 
         self._obs_fn = build_obs_batch
         self._spawn(torch.ones(B, 1, device=d))
@@ -538,7 +543,7 @@ class DanmakuSim:
     def _obs(self):
         head = self._head.clone()
         head[:, 2] = (self.power[:, 0] / 128.0).clamp(0.0, 1.0)
-        return self._obs_fn(self.player, self._zeros2, self._zeros1,
+        return self._obs_fn(self.player, self._zeros2, self.player_focus,
                             self.b_pos, self.b_vel, self.b_active,
                             head, self._enemy_obs(), self._item_obs())
 
@@ -550,6 +555,7 @@ class DanmakuSim:
         norm = mv.norm(dim=1, keepdim=True).clamp(min=1e-6)
         spd = torch.where(focus > 0.5, torch.full_like(focus, SPEED_SLOW),
                           torch.full_like(focus, SPEED_FAST))
+        self.player_focus = focus.squeeze(1)      # v28: -> obs escape scalars
         moving = (mv.abs().sum(1, keepdim=True) > 0).float()
         self.player = self.player + moving * mv / norm * spd
         self.player = torch.stack([self.player[:, 0].clamp(PX_LO, PX_HI),
@@ -927,9 +933,13 @@ class DanmakuSim:
         self.power = (self.power + PWR_PER_ITEM * n_got[:, None]).clamp(0.0, POWER_MAX)
 
         # --- collision (bullets + enemy bodies) ---
-        # th07 uses an AABB overlap; circular approx: dist < bullet_hitbox + PLAYER_HB
-        dist = (self.b_pos - self.player[:, None, :]).norm(dim=2)
-        bhitmask = (self.b_active > 0.5) & (dist < self._slot_rad[None, :] + PLAYER_HB)
+        # th07 collision is an AABB overlap (box @ zBullet+0xB7C, +-size/2). v28:
+        # match it - |dx| AND |dy| within (hitbox + PLAYER_HB). Stage-1 bullets
+        # are square so one half-extent per slot. Cheaper than the circle (no sqrt)
+        # and slightly harder on the diagonals (the safe direction for transfer).
+        rel_b = (self.b_pos - self.player[:, None, :]).abs()
+        r_hit = self._slot_rad[None, :] + PLAYER_HB
+        bhitmask = ((self.b_active > 0.5) & (rel_b[..., 0] < r_hit) & (rel_b[..., 1] < r_hit))
         bhit = bhitmask.any(dim=1, keepdim=True)
         spam_hit = (bhitmask & self._spam_slot[None, :]).any(dim=1, keepdim=True)
         eshot_hit = (bhitmask & self._en_slot[None, :]).any(dim=1, keepdim=True)
@@ -950,6 +960,9 @@ class DanmakuSim:
                           torch.zeros_like(self.alive)))
         rew = rew + (EN_DMG_REW * dmg + IT_REW * n_got)[:, None] * alive_now.float()
         rew = rew + PWR_STAND_REW * (self.power / POWER_MAX) * alive_now.float()
+        # v28: small penalty in the bottom ~12% (linear, 0 at BOTTOM_Y)
+        bot = ((self.player[:, 1:2] - BOTTOM_Y) / (PY_HI - BOTTOM_Y)).clamp(min=0.0)
+        rew = rew - BOTTOM_PEN * bot * alive_now.float()
         return rew.squeeze(1), done.squeeze(1)
 
     def step(self, actions):
