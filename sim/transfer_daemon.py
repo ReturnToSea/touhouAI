@@ -12,7 +12,9 @@ line diverges DOWN from the sim curve as steps rise, that's sim overfitting
     .venv\\Scripts\\python sim\\transfer_daemon.py ppo_v27
     .venv\\Scripts\\python sim\\transfer_daemon.py ppo_v27 --checkpoint best.pt --show
 
-th07 windows are minimised + kept from stealing focus. --show leaves them normal.
+The game window is visible (th07 defocus-PAUSES if minimised/off-screen, which
+hangs the daemon - a DLL focus patch is the real fix, deferred). It cycles every
+~90s. --nosteal moves it behind other windows so it doesn't grab focus.
 """
 from __future__ import annotations
 
@@ -40,9 +42,12 @@ RUNS = HERE.parent / "runs_sim"
 _u32 = ctypes.windll.user32
 
 
-def _minimise_pid_windows(pid: int) -> None:
-    """SW_SHOWMINNOACTIVE every top-level window owned by pid."""
-    SW_SHOWMINNOACTIVE = 7
+def _nosteal_pid_windows(pid: int) -> None:
+    """Push th07's window to the BOTTOM of the z-order without activating it, so
+    it stops grabbing focus. It stays on-screen and ticking (th07 defocus-PAUSES
+    if minimised/off-screen)."""
+    HWND_BOTTOM = 1
+    SWP = 0x0010 | 0x0001 | 0x0002   # NOACTIVATE | NOSIZE | NOMOVE
     want = ctypes.c_ulong(pid)
 
     @ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
@@ -50,7 +55,7 @@ def _minimise_pid_windows(pid: int) -> None:
         p = ctypes.c_ulong()
         _u32.GetWindowThreadProcessId(hwnd, ctypes.byref(p))
         if p.value == want.value:
-            _u32.ShowWindow(hwnd, SW_SHOWMINNOACTIVE)
+            _u32.SetWindowPos(hwnd, HWND_BOTTOM, 0, 0, 0, 0, SWP)
         return True
 
     _u32.EnumWindows(cb, 0)
@@ -99,7 +104,8 @@ def main():
     ap.add_argument("run")
     ap.add_argument("--checkpoint", default="last.pt")
     ap.add_argument("--frame-skip", type=int, default=3)
-    ap.add_argument("--show", action="store_true", help="don't minimise the game window")
+    ap.add_argument("--nosteal", action="store_true",
+                    help="push the game window to the back so it stops grabbing focus")
     ap.add_argument("--max-seconds", type=float, default=36000.0)
     ap.add_argument("--settle", type=float, default=3.0, help="pause between episodes (s)")
     args = ap.parse_args()
@@ -121,8 +127,8 @@ def main():
             pol = MLPPolicy.load(ckpt)
             env = Th07Env(frame_skip=args.frame_skip, max_seconds=args.max_seconds,
                           render=False)
-            if not args.show:
-                _minimise_pid_windows(env.pid)
+            if args.nosteal:
+                _nosteal_pid_windows(env.pid)
             t0 = time.time()
             surv, score = one_episode(env, pol, args.frame_skip)
             n += 1
