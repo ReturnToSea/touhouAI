@@ -20,10 +20,20 @@ from pathlib import Path
 import numpy as np
 import torch
 
+import os
 import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "native"))
-from obs import (build_obs_batch, OBS_DIM, PX_LO, PX_HI, PY_LO, PY_HI,  # noqa: E402
-                 DIR_SPEED, DIR_SPEED_FOCUS)
+from obs import (build_obs_batch as _build_obs_eager, OBS_DIM,  # noqa: E402
+                 PX_LO, PX_HI, PY_LO, PY_HI, DIR_SPEED, DIR_SPEED_FOCUS)
+
+# torch.compile fuses build_obs_batch's ~40 tiny kernels (topk, the march-step
+# loop + scatter_reduce, the 9-dir escape raycast) - it's ~3/4 of a step and
+# entirely launch-overhead bound in eager mode. FIGHTSIM_NOCOMPILE=1 to disable.
+if os.environ.get("FIGHTSIM_NOCOMPILE"):
+    build_obs_batch = _build_obs_eager
+else:
+    build_obs_batch = torch.compile(_build_obs_eager, dynamic=False,
+                                    mode="max-autotune-no-cudagraphs")
 
 FIGHTS = Path(__file__).resolve().parent / "fights"
 POOL = 1025                      # th07 bullet pool size
@@ -177,6 +187,7 @@ class FightSim:
         for k in ("pos", "spawn", "bhalf", "aimed", "rec_ang", "birth",
                   "boss", "en"):
             setattr(self, k, getattr(self, k).to(device))
+        self.rec_len_gpu = self.rec_len.to(device)  # step() reads it without a sync
         self.min_start = min_start
         self.HIST = 320             # re-aim window: how far back we keep the sim
         #                            player's path so an aimed bullet can lock
@@ -207,14 +218,17 @@ class FightSim:
             self.pl_ring = torch.zeros(self.B, self.HIST, 2, device=self.d)
             self.pl_ring[..., 0] = 192.0
             self.pl_ring[..., 1] = 384.0
-            self._prev_b = None
-            idx = torch.arange(self.B, device=self.d)
+            self._prev_bp = torch.zeros(self.B, POOL, 2, device=self.d)
+            self._prev_active = torch.zeros(self.B, POOL, dtype=torch.bool,
+                                            device=self.d)
+            self._bi = torch.arange(self.B, device=self.d)
+            idx = self._bi
         self._sample_starts(idx.cpu())
         self.t[idx] = 0
         self.px[idx] = 192.0
         self.py[idx] = 384.0
         self.pl_ring[idx] = torch.tensor([192.0, 384.0], device=self.d)
-        self._prev_b = None
+        self._prev_active[idx] = False
         return self._obs()
 
     def _now(self):
@@ -235,33 +249,27 @@ class FightSim:
         birth = self.birth[self.rec_id, f].long()               # [B, POOL]
         bstep = birth - self.t0[:, None]                        # sim step at spawn
         age = self.t[:, None] - bstep
-        use = aim & (bstep >= 0) & (age >= 0) & (age < self.HIST)
-        if use.any():
-            ring_i = (bstep.clamp(min=0) % self.HIST)           # [B, POOL]
-            pxb = torch.gather(self.pl_ring[..., 0], 1, ring_i)
-            pyb = torch.gather(self.pl_ring[..., 1], 1, ring_i)
-            sp = self.spawn[self.rec_id, f]                     # [B, POOL, 2]
-            new_ang = torch.atan2(pyb - sp[..., 1], pxb - sp[..., 0])
-            dth = torch.where(use, new_ang - self.rec_ang[self.rec_id, f],
-                              torch.zeros_like(new_ang))
-            cs, sn = torch.cos(dth), torch.sin(dth)
-            rel = bp - sp
-            rx = rel[..., 0] * cs - rel[..., 1] * sn
-            ry = rel[..., 0] * sn + rel[..., 1] * cs
-            bp = torch.where(use[..., None],
-                             torch.stack([sp[..., 0] + rx, sp[..., 1] + ry], -1),
-                             bp)
+        use = aim & (bstep >= 0) & (age >= 0) & (age < self.HIST)   # [B, POOL]
+        ring_i = (bstep.clamp(min=0) % self.HIST)               # [B, POOL]
+        pxb = torch.gather(self.pl_ring[..., 0], 1, ring_i)
+        pyb = torch.gather(self.pl_ring[..., 1], 1, ring_i)
+        sp = self.spawn[self.rec_id, f]                         # [B, POOL, 2]
+        new_ang = torch.atan2(pyb - sp[..., 1], pxb - sp[..., 0])
+        dth = torch.where(use, new_ang - self.rec_ang[self.rec_id, f],
+                          torch.zeros_like(new_ang))
+        cs, sn = torch.cos(dth), torch.sin(dth)
+        rel = bp - sp
+        rx = rel[..., 0] * cs - rel[..., 1] * sn
+        ry = rel[..., 0] * sn + rel[..., 1] * cs
+        bp = torch.where(use[..., None],
+                         torch.stack([sp[..., 0] + rx, sp[..., 1] + ry], -1), bp)
         return bp, active, bh, en, en_active, f
 
-    def _obs(self):
-        bp, active, bh, en, en_a, f = self._now()
-        if self._prev_b is None:
-            bv = torch.zeros_like(bp)
-        else:
-            pv, pa = self._prev_b
-            both = (active & pa)[..., None]
-            bv = torch.where(both, bp - pv, torch.zeros_like(bp))
-        self._prev_b = (bp, active)
+    def _obs(self, now=None):
+        bp, active, bh, en, en_a, f = now if now is not None else self._now()
+        both = (active & self._prev_active)[..., None]
+        bv = torch.where(both, bp - self._prev_bp, torch.zeros_like(bp))
+        self._prev_bp, self._prev_active = bp, active
         bx = self.boss[self.rec_id, f]                           # [B, 2]
         pl = torch.stack([self.px, self.py], -1)
         head = torch.zeros(self.B, 9, device=self.d)
@@ -274,10 +282,9 @@ class FightSim:
         d2 = torch.where(en_a, dx * dx + dy * dy,
                          torch.full_like(dx, 1e12))
         j = d2.argmin(dim=1)
-        bi = torch.arange(self.B, device=self.d)
         has_en = en_a.any(dim=1)
-        ne_dx = torch.where(has_en, dx[bi, j], bx[:, 0] - self.px)
-        ne_dy = torch.where(has_en, dy[bi, j], bx[:, 1] - self.py)
+        ne_dx = torch.where(has_en, dx[self._bi, j], bx[:, 0] - self.px)
+        ne_dy = torch.where(has_en, dy[self._bi, j], bx[:, 1] - self.py)
         enemies[:, 0] = ne_dx / 128.0
         enemies[:, 1] = ne_dy / 128.0
         enemies[:, 2] = 1.0
@@ -301,11 +308,11 @@ class FightSim:
         self.px = (self.px + mstep[:, 0]).clamp(PX_LO, PX_HI)
         self.py = (self.py + mstep[:, 1]).clamp(PY_LO, PY_HI)
         self.t += 1
-        bi = torch.arange(self.B, device=self.d)
-        self.pl_ring[bi, self.t % self.HIST, 0] = self.px
-        self.pl_ring[bi, self.t % self.HIST, 1] = self.py
+        self.pl_ring[self._bi, self.t % self.HIST, 0] = self.px
+        self.pl_ring[self._bi, self.t % self.HIST, 1] = self.py
 
-        bp, active, bh, en, en_a, f = self._now()
+        now = self._now()
+        bp, active, bh, en, en_a, f = now
         pxy = torch.stack([self.px, self.py], -1)[:, None, :]
         # bullets: per-bullet AABB half + player half
         rel = (bp - pxy).abs()
@@ -317,10 +324,10 @@ class FightSim:
         hit_e = (en_a & (erel[..., 0] < er) & (erel[..., 1] < er)).any(dim=1)
         hit = hit_b | hit_e
 
-        ended = (self.t0 + self.t) >= (self.rec_len[self.rec_id.cpu()].to(self.d) - 2)
+        ended = (self.t0 + self.t) >= (self.rec_len_gpu[self.rec_id] - 2)
         done = hit | ended
         rew = torch.full((self.B,), 0.02, device=self.d) - 5.0 * hit.float()
-        obs = self._obs()
+        obs = self._obs(now)
         if done.any():
             self.reset(done.nonzero(as_tuple=True)[0])
         return obs, rew, done

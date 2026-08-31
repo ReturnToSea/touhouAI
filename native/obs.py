@@ -65,6 +65,8 @@ OBS_DIRS = torch.tensor(
     dtype=torch.float32,
 )
 _MARCH_T = torch.arange(0.0, GRID_HORIZON + 0.5, 0.5)   # 49 steps, t = 0..24 by 0.5
+_MARCH_T_PY = tuple(float(x) for x in _MARCH_T)         # plain floats -> torch.compile
+#                                                        doesn't graph-break on .item()
 
 
 @torch.no_grad()
@@ -110,7 +112,6 @@ def build_obs_batch(player_pos, player_vel, player_focus,
     bv = _guard(bvel)
 
     dirs = OBS_DIRS.to(dev, dt)
-    tsteps = _MARCH_T.to(dev, dt)
     o = torch.zeros(B, OBS_DIM, device=dev, dtype=dt)
 
     # ---------- local danger grid ----------
@@ -124,8 +125,7 @@ def build_obs_batch(player_pos, player_vel, player_focus,
     wall = (wx < PX_LO) | (wx > PX_HI) | (wy < PY_LO) | (wy > PY_HI)
     grid = torch.where(wall, torch.full_like(grid, 0.5), grid)
 
-    for i in range(tsteps.shape[0]):
-        t = tsteps[i]
+    for t in _MARCH_T_PY:                       # plain float t -> no .item() break
         bp = bpos + bv * t
         rel = (bp - player_pos[:, None, :]) / GRID_CELL
         cell = torch.floor(rel + 0.5).long() + GRID_R
@@ -133,8 +133,7 @@ def build_obs_batch(player_pos, player_vel, player_focus,
         gy = cell[..., 1]
         valid = (gx >= 0) & (gx < GRID) & (gy >= 0) & (gy < GRID) & act
         lin = gy.clamp(0, GRID - 1) * GRID + gx.clamp(0, GRID - 1)
-        dval = torch.full_like(lin, float(1.0 - t / GRID_HORIZON), dtype=dt)
-        dval = torch.where(valid, dval, torch.zeros_like(dval))
+        dval = valid.to(dt) * (1.0 - t / GRID_HORIZON)     # dv where valid, else 0
         grid.scatter_reduce_(1, lin, dval, reduce="amax")
     o[:, _O_GRID:_O_ENE] = grid
 
