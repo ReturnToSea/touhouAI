@@ -37,6 +37,12 @@ def main():
     ap.add_argument("--policy", default="runs_sim/ppo_v29/snap_0092M.pt")
     ap.add_argument("--shoot", choices=("auto", "off", "on"), default="auto",
                     help="off = dodge only (phases run to their full timer)")
+    ap.add_argument("--dodge-after-boss", action="store_true",
+                    help="shoot to reach the boss, then dodge-only so all its "
+                    "phases play their full timer (no damage-phasing)")
+    ap.add_argument("--which", type=int, default=1,
+                    help="which EM_BOSSES[0] appearance to record: 1 = Stage 1 "
+                    "midboss (Cirno), 2 = Stage 1 boss (Letty)")
     ap.add_argument("--n", type=int, default=1, help="record N runs -> <name>_0.npz ...")
     args = ap.parse_args()
 
@@ -71,29 +77,43 @@ def _record_one(env, pm, pol, boss, args, out, run):
     obs, _ = env.reset(options={"hard": True})
     bullets, bosslog, playerlog = [], [], []
     recording = False
-    max_steps = int(args.secs * 60) + 4000
+    max_steps = int(args.secs * 60) + 6000
     step = 0
-    seen_boss = False
+    appearance = 0                 # how many distinct bosses we've seen
+    boss_present = False
+    null_run = 999                 # consecutive no-boss frames
+    gone = 0
     while step < max_steps:
         a = int(pol.act(obs))
-        if args.shoot == "off":
+        if args.shoot == "off" or (recording and args.dodge_after_boss):
             a = a % 18
         elif args.shoot == "on":
             a = a % 18 + 18
         obs, r, term, trunc, info = env.step(a)
         step += 1
         b = boss()
-        if b and not recording:
-            recording = True
-            seen_boss = True
-            f0 = int(info.get("frame", step))
-            print(f"boss up at game-frame {f0} - recording", flush=True)
+        if b is None:
+            null_run += 1
+            if null_run > 90:
+                boss_present = False
+        else:
+            if not boss_present and null_run > 90:     # a NEW boss appeared
+                appearance += 1
+                if appearance == args.which and not recording:
+                    recording = True
+                    print(f"boss #{appearance} up at step {step} - recording"
+                          f"{' (dodge-only)' if args.dodge_after_boss else ''}",
+                          flush=True)
+            boss_present = True
+            null_run = 0
         if recording:
             if b is None:
-                if seen_boss:
-                    print("boss gone - done", flush=True)
+                gone += 1
+                if gone > 90:                     # ~1.5s null -> this boss done
+                    print(f"boss gone at step {step} - done", flush=True)
                     break
             else:
+                gone = 0
                 bosslog.append((step, b[0], b[1]))
             s = env.h.s
             playerlog.append((step, s.player_x, s.player_y))
