@@ -86,3 +86,4 @@ nav:
   - "Part IV":
       - "11 · Dead ends & lessons": dead-ends.md
       - "12 · Address reference": reference.md
+      - "13 · Experiment log": experiment-log.md
