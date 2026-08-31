@@ -57,11 +57,17 @@ def _load_dense(npz_path):
         m = np.isnan(boss[i, 0])
         boss[i] = np.where(m, boss[i - 1], boss[i])
     boss = np.nan_to_num(boss, nan=192.0)
+    # trim a quiet lead-in (boss entrance / spellcard intro with ~no bullets)
+    nb = (~np.isnan(pos[:, :, 0])).sum(1)
+    busy = np.where(nb >= 15)[0]
+    if len(busy) and busy[0] > 30:
+        s = max(0, busy[0] - 30)
+        pos, boss = pos[s:], boss[s:]
     return pos, boss
 
 
 class FightSim:
-    def __init__(self, B=8192, name="cirno", device="cuda", max_frames=4000,
+    def __init__(self, B=8192, name="cirno", device="cuda", max_frames=5200,
                  min_start=0, warmup_max=200, seed=0):
         self.B, self.d = B, device
         g = torch.Generator(device="cpu").manual_seed(seed)
