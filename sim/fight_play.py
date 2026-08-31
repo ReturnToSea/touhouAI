@@ -105,7 +105,7 @@ def main():
                 aimed, sx, sy, rec_ang = False, r[2], r[3], 0.0
             else:
                 aimed, sx, sy, rec_ang = info
-            out.append((r[2], r[3], int(r[7]), sx, sy, aimed, rec_ang))
+            out.append((r[2], r[3], int(r[7]), sx, sy, aimed, rec_ang, sf))
         for s in list(cur_sf):
             if s not in present:
                 del cur_sf[s]
@@ -132,6 +132,8 @@ def main():
     reaim = True
     ghost = True
     deaths = 0
+    my_hist = {}                      # frame -> my (x, y), so an aimed bullet
+    #                                  locks onto where I was AT ITS SPAWN
 
     while True:
         for e in pygame.event.get():
@@ -155,7 +157,7 @@ def main():
                 if e.key == pygame.K_MINUS:
                     speed = max(0.1, speed / 1.5)
                 if e.key == pygame.K_r:
-                    fr = 0.0; px, py = 192.0, 380.0; deaths = 0
+                    fr = 0.0; px, py = 192.0, 380.0; deaths = 0; my_hist.clear()
 
         keys = pygame.key.get_pressed()
         sp = MOVE_FOCUS if (keys[pygame.K_LSHIFT] or keys[pygame.K_RSHIFT]) else MOVE
@@ -171,16 +173,20 @@ def main():
         if fr >= F:
             fr = 0.0
         cf = int(fr)
+        my_hist[cf] = (px, py)
 
         screen.fill((10, 10, 16))
         pygame.draw.rect(screen, (26, 26, 38),
                          (MARGIN, MARGIN, PW * SCALE, PH * SCALE))
 
         touched = False
-        for (bx, by, fx, sx, sy, aimed, rec_ang) in frames[cf]:
+        for (bx, by, fx, sx, sy, aimed, rec_ang, sf) in frames[cf]:
             if aimed and reaim:
-                new_ang = math.atan2(py - sy, px - sx)
-                dth = new_ang - rec_ang
+                # angle to where I was when THIS bullet spawned - fixed for its
+                # whole life (aimed shots lock direction at spawn, they don't
+                # follow). Fall back to now if I haven't reached that frame yet.
+                mx, my = my_hist.get(sf, (px, py))
+                dth = math.atan2(my - sy, mx - sx) - rec_ang
                 c, s = math.cos(dth), math.sin(dth)
                 rx, ry = bx - sx, by - sy
                 bx, by = sx + rx * c - ry * s, sy + rx * s + ry * c
