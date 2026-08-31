@@ -35,9 +35,13 @@ _DIRS = torch.tensor([[0, 0], [0, -1], [1, -1], [1, 0], [1, 1],
                       [0, 1], [-1, 1], [-1, 0], [-1, -1]], dtype=torch.float32)
 
 
+AIM_TOL = np.radians(24.0)          # spawn-vel within this of the rec player -> aimed
+
+
 def _load_dense(npz_path):
-    """npz -> (bpos[F,POOL,2], bhalf[F,POOL], boss[F,2], en[F,MAX_EN,3]) where
-    en rows are (x, y, body_half); empty slots are NaN / body_half<=0."""
+    """npz -> dict of dense [F, POOL(...)] arrays: pos, half, spawn (spawn point
+    of the bullet in each slot), aimed (bool), rec_ang (angle spawn->rec player
+    at spawn), plus boss[F,2] and en[F,MAX_EN,3]."""
     d = np.load(npz_path)
     b = d["bullets"]
     if len(b) == 0:
@@ -50,12 +54,49 @@ def _load_dense(npz_path):
     pos = np.full((F, POOL, 2), np.nan, np.float32)
     pos[f, slot, 0] = b[:, 2]
     pos[f, slot, 1] = b[:, 3]
+    vel = np.zeros((F, POOL, 2), np.float32)
+    vel[f, slot, 0] = b[:, 4]
+    vel[f, slot, 1] = b[:, 5]
 
     half = np.full((F, POOL), BULLET_HB_DEFAULT, np.float32)
     if b.shape[1] >= 10:                       # cols 8,9 = AABB full size x,y
         hb = np.maximum(b[:, 8], b[:, 9]) * 0.5
         hb[hb <= 0] = BULLET_HB_DEFAULT
         half[f, slot] = hb
+
+    # --- per-bullet birth + aim classification (for re-aiming at replay) ------
+    rp = np.full((F, 2), np.nan, np.float32)
+    if "player" in d and len(d["player"]):
+        p = d["player"]
+        pf = np.clip((p[:, 0] - p[:, 0].min()).astype(int), 0, F - 1)
+        rp[pf] = p[:, 1:3]
+    for i in range(1, F):
+        if np.isnan(rp[i, 0]):
+            rp[i] = rp[i - 1]
+    rp = np.nan_to_num(rp, nan=192.0)
+
+    present = ~np.isnan(pos[:, :, 0])                       # [F, POOL]
+    born = present.copy()
+    born[1:] &= ~present[:-1]
+    fr_idx = np.arange(F, dtype=np.int64)[:, None]
+    birth = np.where(present,
+                     np.maximum.accumulate(np.where(born, fr_idx, 0), axis=0),
+                     0)                                     # [F, POOL] rec-frame
+    bi, si = np.where(born)
+    aim_map = np.zeros((F, POOL), bool)
+    ang_map = np.zeros((F, POOL), np.float32)
+    if len(bi):
+        p0 = pos[bi, si]                                    # [K, 2]
+        v = vel[bi, si]
+        va = np.arctan2(v[:, 1], v[:, 0])
+        ta = np.arctan2(rp[bi, 1] - p0[:, 1], rp[bi, 0] - p0[:, 0])
+        dd = np.abs((va - ta + np.pi) % (2 * np.pi) - np.pi)
+        aim_map[bi, si] = (dd < AIM_TOL) & ((v[:, 0] != 0) | (v[:, 1] != 0))
+        ang_map[bi, si] = ta
+    aimed = np.take_along_axis(aim_map, birth, axis=0) & present
+    rec_ang = np.take_along_axis(ang_map, birth, axis=0)
+    spawn = np.stack([np.take_along_axis(pos[:, :, 0], birth, axis=0),
+                      np.take_along_axis(pos[:, :, 1], birth, axis=0)], -1)
 
     boss = np.full((F, 2), np.nan, np.float32)
     if len(d["boss"]):
@@ -91,12 +132,14 @@ def _load_dense(npz_path):
             en[fr, :n, 2] = rows[:, 5] * 0.5 * ENEMY_BODY_SCALE   # (hbx/2)*2/3
 
     # trim a quiet lead-in (boss entrance / intro with ~no bullets)
-    nb = (~np.isnan(pos[:, :, 0])).sum(1)
+    nb = present.sum(1)
     busy = np.where(nb >= 15)[0]
+    s0 = 0
     if len(busy) and busy[0] > 30:
-        s = max(0, busy[0] - 30)
-        pos, half, boss, en = pos[s:], half[s:], boss[s:], en[s:]
-    return pos, half, boss, en
+        s0 = max(0, busy[0] - 30)
+    return dict(pos=pos[s0:], half=half[s0:], boss=boss[s0:], en=en[s0:],
+               spawn=(spawn[s0:] - 0), aimed=aimed[s0:],
+               rec_ang=rec_ang[s0:], birth=(birth[s0:] - s0))
 
 
 class FightSim:
@@ -106,30 +149,43 @@ class FightSim:
         self._g = torch.Generator(device="cpu").manual_seed(seed)
         paths = sorted(glob.glob(str(FIGHTS / f"{name}*.npz")))
         recs = [_load_dense(p) for p in paths]
-        recs = [r for r in recs if r is not None and r[0].shape[0] > 600]
+        recs = [r for r in recs if r is not None and r["pos"].shape[0] > 600]
         assert recs, f"no usable recordings matching {name}*"
         self.n_rec = len(recs)
-        self.rec_len = torch.tensor([r[0].shape[0] for r in recs])
-        self.maxF = min(max(r[0].shape[0] for r in recs), max_frames)
+        self.rec_len = torch.tensor([r["pos"].shape[0] for r in recs])
+        self.maxF = min(max(r["pos"].shape[0] for r in recs), max_frames)
 
-        self.pos = torch.full((self.n_rec, self.maxF, POOL, 2), float("nan"))
-        self.bhalf = torch.full((self.n_rec, self.maxF, POOL), BULLET_HB_DEFAULT)
+        nF = (self.n_rec, self.maxF, POOL)
+        self.pos = torch.full((*nF, 2), float("nan"))
+        self.spawn = torch.full((*nF, 2), float("nan"))
+        self.bhalf = torch.full(nF, BULLET_HB_DEFAULT)
+        self.aimed = torch.zeros(nF, dtype=torch.bool)
+        self.rec_ang = torch.zeros(nF)
+        self.birth = torch.full(nF, -1, dtype=torch.int32)
         self.boss = torch.full((self.n_rec, self.maxF, 2), 192.0)
         self.en = torch.full((self.n_rec, self.maxF, MAX_EN, 3), float("nan"))
-        for i, (p, h, bo, e) in enumerate(recs):
-            L = min(p.shape[0], self.maxF)
-            self.pos[i, :L] = torch.from_numpy(p[:L])
-            self.bhalf[i, :L] = torch.from_numpy(h[:L])
-            self.boss[i, :L] = torch.from_numpy(bo[:L])
-            self.en[i, :L] = torch.from_numpy(e[:L])
-        self.pos = self.pos.to(device)
-        self.bhalf = self.bhalf.to(device)
-        self.boss = self.boss.to(device)
-        self.en = self.en.to(device)
+        for i, r in enumerate(recs):
+            L = min(r["pos"].shape[0], self.maxF)
+            self.pos[i, :L] = torch.from_numpy(r["pos"][:L])
+            self.spawn[i, :L] = torch.from_numpy(r["spawn"][:L])
+            self.bhalf[i, :L] = torch.from_numpy(r["half"][:L])
+            self.aimed[i, :L] = torch.from_numpy(r["aimed"][:L])
+            self.rec_ang[i, :L] = torch.from_numpy(r["rec_ang"][:L])
+            self.birth[i, :L] = torch.from_numpy(r["birth"][:L].astype(np.int32))
+            self.boss[i, :L] = torch.from_numpy(r["boss"][:L])
+            self.en[i, :L] = torch.from_numpy(r["en"][:L])
+        for k in ("pos", "spawn", "bhalf", "aimed", "rec_ang", "birth",
+                  "boss", "en"):
+            setattr(self, k, getattr(self, k).to(device))
         self.min_start = min_start
+        self.HIST = 320             # re-aim window: how far back we keep the sim
+        #                            player's path so an aimed bullet can lock
+        #                            onto where the player was AT ITS SPAWN
         n_en = int((~torch.isnan(self.en[..., 0])).any(-1).float().mean() * 100)
+        n_aim = int(self.aimed.float().mean() * 1000) / 10
         print(f"[FightSim] {self.n_rec} recs, {self.maxF} frames, B={B}, "
-              f"enemy bodies on ~{n_en}% of frames", flush=True)
+              f"enemy bodies ~{n_en}% of frames, aimed bullet-frames ~{n_aim}%",
+              flush=True)
         self._dirs = _DIRS.to(device)
         self.reset()
 
@@ -148,12 +204,16 @@ class FightSim:
             self.t = torch.zeros(self.B, dtype=torch.long, device=self.d)
             self.px = torch.full((self.B,), 192.0, device=self.d)
             self.py = torch.full((self.B,), 384.0, device=self.d)
+            self.pl_ring = torch.zeros(self.B, self.HIST, 2, device=self.d)
+            self.pl_ring[..., 0] = 192.0
+            self.pl_ring[..., 1] = 384.0
             self._prev_b = None
             idx = torch.arange(self.B, device=self.d)
         self._sample_starts(idx.cpu())
         self.t[idx] = 0
         self.px[idx] = 192.0
         self.py[idx] = 384.0
+        self.pl_ring[idx] = torch.tensor([192.0, 384.0], device=self.d)
         self._prev_b = None
         return self._obs()
 
@@ -166,6 +226,31 @@ class FightSim:
         en = self.en[self.rec_id, f]                             # [B, MAX_EN, 3]
         en_active = ~torch.isnan(en[..., 0])
         en = torch.nan_to_num(en, nan=-9999.0)
+
+        # --- re-aim: aimed bullets born during this episode lock onto where the
+        # sim player was AT THAT SPAWN, then fly the rest of the recorded path
+        # rotated by the angle delta. Bullets already in flight at episode start
+        # (birth < t0) keep their recorded aim.
+        aim = self.aimed[self.rec_id, f] & active               # [B, POOL]
+        birth = self.birth[self.rec_id, f].long()               # [B, POOL]
+        bstep = birth - self.t0[:, None]                        # sim step at spawn
+        age = self.t[:, None] - bstep
+        use = aim & (bstep >= 0) & (age >= 0) & (age < self.HIST)
+        if use.any():
+            ring_i = (bstep.clamp(min=0) % self.HIST)           # [B, POOL]
+            pxb = torch.gather(self.pl_ring[..., 0], 1, ring_i)
+            pyb = torch.gather(self.pl_ring[..., 1], 1, ring_i)
+            sp = self.spawn[self.rec_id, f]                     # [B, POOL, 2]
+            new_ang = torch.atan2(pyb - sp[..., 1], pxb - sp[..., 0])
+            dth = torch.where(use, new_ang - self.rec_ang[self.rec_id, f],
+                              torch.zeros_like(new_ang))
+            cs, sn = torch.cos(dth), torch.sin(dth)
+            rel = bp - sp
+            rx = rel[..., 0] * cs - rel[..., 1] * sn
+            ry = rel[..., 0] * sn + rel[..., 1] * cs
+            bp = torch.where(use[..., None],
+                             torch.stack([sp[..., 0] + rx, sp[..., 1] + ry], -1),
+                             bp)
         return bp, active, bh, en, en_active, f
 
     def _obs(self):
@@ -216,6 +301,9 @@ class FightSim:
         self.px = (self.px + mstep[:, 0]).clamp(PX_LO, PX_HI)
         self.py = (self.py + mstep[:, 1]).clamp(PY_LO, PY_HI)
         self.t += 1
+        bi = torch.arange(self.B, device=self.d)
+        self.pl_ring[bi, self.t % self.HIST, 0] = self.px
+        self.pl_ring[bi, self.t % self.HIST, 1] = self.py
 
         bp, active, bh, en, en_a, f = self._now()
         pxy = torch.stack([self.px, self.py], -1)[:, None, :]

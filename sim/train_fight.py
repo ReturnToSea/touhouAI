@@ -77,8 +77,8 @@ def main():
                    max_frames=args.max_frames)
     ev = FightSim(B=1024, name=args.fight, device=dev, seed=args.seed + 999,
                   max_frames=args.max_frames)
-    ev.pos, ev.bhalf = sim.pos, sim.bhalf        # identical data - don't double it
-    ev.boss, ev.en = sim.boss, sim.en
+    for k in ("pos", "spawn", "bhalf", "aimed", "rec_ang", "birth", "boss", "en"):
+        setattr(ev, k, getattr(sim, k))          # identical data - don't double it
     ac = AC().to(dev)
     opt = torch.optim.Adam(ac.parameters(), lr=args.lr, eps=1e-5)
     B, T = args.B, args.rollout
