@@ -18,7 +18,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 from ecl_vm import run_boss, REF_PLAYER          # noqa: E402
 from ecl_expand import expand                    # noqa: E402
-import math                                      # noqa: E402
+from ecl_bullet import spawn as b_spawn, advance as b_advance  # noqa: E402
 
 PW, PH = 384, 448
 SCALE = 1.6
@@ -109,23 +109,12 @@ def main():
             if last_int_frame in clears:
                 live = []
             while bi < len(bullets) and bullets[bi][0] <= last_int_frame:
-                bf, x, y, a, spd, aimed, sprite, fx = bullets[bi]
-                live.append([x, y, a, spd, bf, sprite, fx])
+                bf, x, y, a, spd, aimed, flags, fx = bullets[bi]
+                live.append(b_spawn(x, y, a, spd, flags, fx))
                 bi += 1
             for b in live:
-                age = last_int_frame - b[4]
-                for (mode, flag, dur, C2, p1, p2) in b[6]:
-                    if flag == 16 and (dur <= 0 or age < dur):
-                        b[3] += p1
-                    elif flag == 32 and (dur <= 0 or age < dur):
-                        b[2] += p2
-                    elif flag == 64 and age == dur:
-                        b[2] += p1
-                        if p2 > -900:
-                            b[3] = p2
-                b[0] += b[3] * math.cos(b[2])
-                b[1] += b[3] * math.sin(b[2])
-            live = [b for b in live if -30 < b[0] < PW + 30 and -30 < b[1] < PH + 60]
+                b_advance(b, REF_PLAYER)
+            live = [b for b in live if -40 < b[0] < PW + 40 and -40 < b[1] < PH + 80]
 
         screen.fill((12, 12, 18))
         pf = pygame.Rect(MARGIN, MARGIN, PW * SCALE, PH * SCALE)
@@ -135,7 +124,8 @@ def main():
         shown = 0
         for b in live:
             sx, sy = to_screen(b[0], b[1])
-            pygame.draw.circle(screen, col(b[5]), (int(sx), int(sy)), 3)
+            c = (120, 180, 255) if b[9] > 0 else col(b[5])   # crawling = dim
+            pygame.draw.circle(screen, c, (int(sx), int(sy)), 3)
             shown += 1
 
         # ref player

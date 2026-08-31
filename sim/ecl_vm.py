@@ -386,6 +386,7 @@ class Boss:
         # (mode, flag, C, dur, C2, p1, p2). flag: 1 reset, 16 accelerate (p1/f),
         # 32 angular vel (p2 rad/f), 64 redirect to angle p1 after `dur` frames.
         if op == "bullet_effects":
+            # bullet_effects(slot, effect_flag, ?, interval/dur, count, p1, p2)
             a = [self._get(vm, x) for x in A]
             slot, flag = int(a[0]), int(a[1])
             slots = {s[0]: s for s in vm.cur_fx}
