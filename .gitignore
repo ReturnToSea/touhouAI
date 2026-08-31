@@ -50,3 +50,4 @@ tools/th07_ecl/*.ecl
 tools/th07_ecl/*.tecl
 tools/th07_ecl/*.dat
 runs/
+sim/fights/

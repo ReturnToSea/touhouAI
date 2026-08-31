@@ -35,6 +35,9 @@ def main():
     ap.add_argument("name")
     ap.add_argument("--secs", type=float, default=75)
     ap.add_argument("--policy", default="runs_sim/ppo_v29/snap_0092M.pt")
+    ap.add_argument("--shoot", choices=("auto", "off", "on"), default="auto",
+                    help="off = dodge only (phases run to their full timer)")
+    ap.add_argument("--n", type=int, default=1, help="record N runs -> <name>_0.npz ...")
     args = ap.parse_args()
 
     pol = MLPPolicy.load(HERE.parent / args.policy)
@@ -43,7 +46,6 @@ def main():
     if pm is None:
         import pymem
         pm = pymem.Pymem(); pm.open_process_from_id(env.pid)
-    obs, _ = env.reset()
 
     def boss():
         try:
@@ -58,13 +60,27 @@ def main():
             pass
         return None
 
+    out = HERE.parent / "sim" / "fights"
+    out.mkdir(parents=True, exist_ok=True)
+    for run in range(args.n):
+        _record_one(env, pm, pol, boss, args, out, run)
+    env.close()
+
+
+def _record_one(env, pm, pol, boss, args, out, run):
+    obs, _ = env.reset(options={"hard": True})
     bullets, bosslog, playerlog = [], [], []
     recording = False
     max_steps = int(args.secs * 60) + 4000
     step = 0
     seen_boss = False
     while step < max_steps:
-        obs, r, term, trunc, info = env.step(int(pol.act(obs)))
+        a = int(pol.act(obs))
+        if args.shoot == "off":
+            a = a % 18
+        elif args.shoot == "on":
+            a = a % 18 + 18
+        obs, r, term, trunc, info = env.step(a)
         step += 1
         b = boss()
         if b and not recording:
@@ -97,24 +113,21 @@ def main():
             if step % 300 == 0:
                 print(f"  step {step}: {len(bullets)} rows", flush=True)
         if term or trunc:
-            print("player died / episode end", flush=True)
+            print(f"  run {run}: player died / episode end at step {step}", flush=True)
             break
 
-    env.close()
-    out = HERE.parent / "sim" / "fights"
-    out.mkdir(parents=True, exist_ok=True)
-    p = out / f"{args.name}.npz"
+    p = out / (f"{args.name}_{run}.npz" if args.n > 1 else f"{args.name}.npz")
     np.savez_compressed(p, bullets=np.array(bullets, np.float32),
                         boss=np.array(bosslog, np.float32),
                         player=np.array(playerlog, np.float32))
     b = np.array(bullets, np.float32)
-    print(f"\nsaved {p}")
     if len(b):
         fr = b[:, 0]
-        print(f"  {len(b)} bullet-frames over {int(fr.max() - fr.min())} frames "
-              f"(~{(fr.max()-fr.min())/60:.0f}s), avg {len(b)/len(set(fr)):.0f}/frame")
-        print(f"  classes {sorted(set(b[:,6].astype(int)))[:12]}")
-        print(f"  fx flags {sorted(set(b[:,7].astype(int)))}")
+        print(f"  saved {p.name}: {len(b)} rows / {int(fr.max()-fr.min())}f "
+              f"(~{(fr.max()-fr.min())/60:.0f}s) / avg {len(b)/len(set(fr)):.0f}/frame "
+              f"/ fx {sorted(set(b[:,7].astype(int)))}", flush=True)
+    else:
+        print(f"  run {run}: NO BULLETS recorded (boss not reached?)", flush=True)
 
 
 if __name__ == "__main__":
