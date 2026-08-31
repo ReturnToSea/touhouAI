@@ -45,7 +45,8 @@ def main():
     sched, clears = run_boss(tecl, sub, difficulty=diff, frames=frames)
     bullets = expand(sched)
     bullets.sort()
-    print(f"{len(sched)} spawns -> {len(bullets)} bullets")
+    clears = set(clears)
+    print(f"{len(sched)} spawns -> {len(bullets)} bullets, clears @ {sorted(clears)}")
 
     pygame.init()
     W = int(PW * SCALE) + 2 * MARGIN + 180
@@ -62,7 +63,8 @@ def main():
     speed = 1.0
     paused = False
     bi = 0                          # index into sorted bullets
-    live = []                       # [(x0,y0,vx,vy,birth,sprite)]
+    live = []                       # [[x, y, a, s, birth, sprite, fx]]
+    last_int_frame = -1
 
     running = True
     while running:
@@ -94,14 +96,36 @@ def main():
         if not paused:
             frame += speed
 
-        # rebuild live set if we scrubbed backward
-        if bi > 0 and (not live or live[-1][4] > frame):
+        if frame < last_int_frame:        # scrubbed back -> rebuild
             bi = 0
             live = []
-        while bi < len(bullets) and bullets[bi][0] <= frame:
-            bf, x, y, a, spd, aimed, sprite = bullets[bi]
-            live.append((x, y, spd * math.cos(a), spd * math.sin(a), bf, sprite))
-            bi += 1
+            last_int_frame = -1
+
+        # integer-frame stepping: spawn new bullets, advance existing ones,
+        # honour screen clears
+        cf = int(frame)
+        while last_int_frame < cf:
+            last_int_frame += 1
+            if last_int_frame in clears:
+                live = []
+            while bi < len(bullets) and bullets[bi][0] <= last_int_frame:
+                bf, x, y, a, spd, aimed, sprite, fx = bullets[bi]
+                live.append([x, y, a, spd, bf, sprite, fx])
+                bi += 1
+            for b in live:
+                age = last_int_frame - b[4]
+                for (mode, flag, dur, C2, p1, p2) in b[6]:
+                    if flag == 16 and (dur <= 0 or age < dur):
+                        b[3] += p1
+                    elif flag == 32 and (dur <= 0 or age < dur):
+                        b[2] += p2
+                    elif flag == 64 and age == dur:
+                        b[2] += p1
+                        if p2 > -900:
+                            b[3] = p2
+                b[0] += b[3] * math.cos(b[2])
+                b[1] += b[3] * math.sin(b[2])
+            live = [b for b in live if -30 < b[0] < PW + 30 and -30 < b[1] < PH + 60]
 
         screen.fill((12, 12, 18))
         pf = pygame.Rect(MARGIN, MARGIN, PW * SCALE, PH * SCALE)
@@ -109,14 +133,10 @@ def main():
         pygame.draw.rect(screen, (70, 70, 90), pf, 1)
 
         shown = 0
-        for (x0, y0, vx, vy, birth, sprite) in live:
-            age = frame - birth
-            bx = x0 + vx * age
-            by = y0 + vy * age
-            if -20 < bx < PW + 20 and -20 < by < PH + 20:
-                sx, sy = to_screen(bx, by)
-                pygame.draw.circle(screen, col(sprite), (int(sx), int(sy)), 3)
-                shown += 1
+        for b in live:
+            sx, sy = to_screen(b[0], b[1])
+            pygame.draw.circle(screen, col(b[5]), (int(sx), int(sy)), 3)
+            shown += 1
 
         # ref player
         px, py = to_screen(*REF_PLAYER)

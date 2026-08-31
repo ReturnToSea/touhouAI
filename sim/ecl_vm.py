@@ -54,6 +54,7 @@ class Spawn:
     aimed: bool
     sprite: int
     aim_ref: float     # boss->refplayer angle at spawn (for the taint-aimed case)
+    fx: tuple = ()      # active bullet_effects: ((mode, flag, dur, C, p1, p2), ...)
 
 
 @dataclass
@@ -77,6 +78,7 @@ class VM:
     shoot_interval: int = 0
     shoot_last: int = -999
     cur_bullet: tuple | None = None      # last bullet_* spec, for shoot_interval
+    cur_fx: tuple = ()                    # active bullet_effects for new spawns
     invuln: bool = True
     _taint: set = field(default_factory=set)          # float slots derived from PLAYER_*
 
@@ -247,12 +249,11 @@ class Boss:
         px, py = REF_PLAYER
         aim_ref = math.atan2(py - vm.y, px - vm.x)
         aimed = opcode.endswith("_aimed") or aim_tainted
-        base = launch
         self.sched.append(Spawn(
             frame=self.frame, x=vm.x, y=vm.y, opcode=opcode,
             count=int(count), shots=int(shots), speed=float(spd),
-            speed2=float(spd2), base_angle=float(base), spread=float(spread),
-            aimed=aimed, sprite=int(sprite), aim_ref=aim_ref))
+            speed2=float(spd2), base_angle=float(launch), spread=float(spread),
+            aimed=aimed, sprite=int(sprite), aim_ref=aim_ref, fx=vm.cur_fx))
 
     # ---- execute one instruction; return True if it jumped ------------
     def _exec(self, vm: VM, ins: Instr) -> bool:
@@ -381,10 +382,25 @@ class Boss:
         if op == "__move_circle_abs":
             return False        # orbit - approximate as stationary for the PoC
 
+        # --- bullet post-spawn motion (bullet_effects) ---
+        # (mode, flag, C, dur, C2, p1, p2). flag: 1 reset, 16 accelerate (p1/f),
+        # 32 angular vel (p2 rad/f), 64 redirect to angle p1 after `dur` frames.
+        if op == "bullet_effects":
+            a = [self._get(vm, x) for x in A]
+            slot, flag = int(a[0]), int(a[1])
+            slots = {s[0]: s for s in vm.cur_fx}
+            if flag == 1:                      # reset all effect slots
+                slots = {}
+            else:
+                slots[slot] = (slot, flag, int(a[3]), int(a[4]),
+                               float(a[5]), float(a[6]))
+            vm.cur_fx = tuple(slots[k] for k in sorted(slots))
+            return False
+
         # --- bullets ---
         if op.startswith("bullet_") and op not in (
-                "bullet_effects", "bullet_sound", "bullet_cancel",
-                "bullet_cancel_radius", "bullet_clear", "bullet_rank_influence"):
+                "bullet_sound", "bullet_cancel", "bullet_cancel_radius",
+                "bullet_clear", "bullet_rank_influence"):
             tainted = any(self._tainted(vm, a) for a in A[6:8])
             vm.cur_bullet = (op, list(A), tainted)
             self._emit(vm, op, list(A), tainted)
