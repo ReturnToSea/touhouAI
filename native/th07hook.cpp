@@ -5,9 +5,10 @@
 //     returns the env's action.
 //   * Window::do_tick (0x4346E0) - STEP mode advances exactly one call per
 //     env step; IDLE spins; FREE runs normally so menus work.
-// The 60fps limiter is NOP'd so do_tick doesn't busy-wait. The game only
-// advances when the env asks, so the "Continue screen free-running" corruption
-// cannot happen.
+// The 60fps limiter is NOP'd so do_tick doesn't busy-wait (held at real-time
+// for the first ~3s so the startup BGM doesn't screech at 80x before mute takes
+// - see apply_limiter_patch / audio_guard_thread). The game only advances when
+// the env asks, so the "Continue screen free-running" corruption cannot happen.
 //
 // Handshake + observation live in a shared mapping "th07hook_<pid>".
 
@@ -113,6 +114,33 @@ static void patch(uintptr_t a, const uint8_t* b, size_t n) {
     memcpy((void*)a, b, n);
     VirtualProtect((void*)a, n, old, &old);
     FlushInstructionCache(GetCurrentProcess(), (void*)a, n);
+}
+
+// The frame limiter is NOP'd so do_tick free-runs at ~80x. Done immediately in
+// init_thread, the game boots straight into 80x mode and the title BGM plays as
+// an ear-splitting high-pitched screech for the fraction of a second before
+// mute_self() has a DirectSound session to mute. So: hold the limiter at
+// real-time 60fps for the first LIMITER_HOLD_MS while a guard thread re-applies
+// mute until it sticks. By the time we speed up, audio is silenced (or, worst
+// case, it played briefly at 1x volume/pitch instead of an 80x scream).
+static uint64_t g_boot_ms = 0;
+static bool     g_limiter_patched = false;
+static const uint64_t LIMITER_HOLD_MS = 3000;
+
+static void apply_limiter_patch() {
+    if (g_limiter_patched) return;
+    static const uint8_t nop2[2] = {0x90, 0x90};
+    for (auto& L : LIMITER)
+        if (memcmp((void*)L.va, L.want, 2) == 0) patch(L.va, nop2, 2);
+    g_limiter_patched = true;
+}
+
+// Called from hooked_do_tick each frame: release the limiter once the hold
+// window has elapsed (the guard thread has had time to silence the game).
+static inline void limiter_release_tick() {
+    if (g_limiter_patched) return;
+    if (g_render || GetTickCount64() - g_boot_ms >= LIMITER_HOLD_MS)
+        apply_limiter_patch();
 }
 
 // ---- in-DLL policy: obs builder + MLP (mirror of native/env.py) --------------
@@ -595,6 +623,7 @@ static int __cdecl hooked_present(void) {
 static int __fastcall hooked_do_tick(void* self, void* edx) {
     Shm* s = g_shm;
     s->alive = 1;
+    limiter_release_tick();   // hold 60fps for the first LIMITER_HOLD_MS (audio)
 
     // Window::do_tick starts with `if ([this+8] == 0) return 0;` - a "run a
     // logic frame now" gate the WinMain loop normally toggles. Headless it can
@@ -887,8 +916,8 @@ static const GUID kIID_IMMDeviceEnumerator =
 static const GUID kIID_IAudioSessionManager2 =
     {0x77AA99A0,0x1BD6,0x484F,{0x8B,0xC7,0x2C,0x65,0x4C,0x9A,0x9B,0x6F}};
 
-static void mute_self() {
-    if (FAILED(CoInitializeEx(nullptr, COINIT_MULTITHREADED))) return;
+// One mute pass. COM must already be initialised on the calling thread.
+static void mute_once() {
     IMMDeviceEnumerator* en = nullptr;
     if (SUCCEEDED(CoCreateInstance(kCLSID_MMDeviceEnumerator, nullptr, CLSCTX_ALL,
                                    kIID_IMMDeviceEnumerator, (void**)&en))) {
@@ -908,6 +937,28 @@ static void mute_self() {
         }
         en->Release();
     }
+}
+
+// The game creates its DirectSound session slightly after the DLL loads, so a
+// single mute pass at inject time doesn't stick. Re-apply it for the first few
+// seconds (matches LIMITER_HOLD_MS - the limiter stays at 60fps until we're
+// done here) on a dedicated MTA thread so we never fight the game's own COM
+// apartment on its main thread.
+static DWORD WINAPI audio_guard_thread(LPVOID) {
+    if (FAILED(CoInitializeEx(nullptr, COINIT_MULTITHREADED))) return 0;
+    uint64_t end = GetTickCount64() + LIMITER_HOLD_MS + 500;
+    while (GetTickCount64() < end) {
+        mute_once();
+        Sleep(50);
+    }
+    CoUninitialize();
+    return 0;
+}
+
+static void mute_self() {
+    if (FAILED(CoInitializeEx(nullptr, COINIT_MULTITHREADED))) return;
+    mute_once();
+    CoUninitialize();
 }
 
 // ---- crash diagnostics ---------------------------------------------------
@@ -935,8 +986,12 @@ static DWORD WINAPI init_thread(LPVOID) {
         g_render = atoi(e) != 0;
     if (char* e = getenv("TH07_DIFFICULTY"))
         g_difficulty = atoi(e);
-    if (!g_render && !getenv("TH07_NO_MUTE"))
-        mute_self();
+    g_boot_ms = GetTickCount64();
+    if (!g_render && !getenv("TH07_NO_MUTE")) {
+        mute_self();                                     // immediate first pass
+        CreateThread(nullptr, 0, audio_guard_thread,     // keep re-muting ~3s
+                     nullptr, 0, nullptr);
+    }
     sprintf(name, "th07hook_%lu", GetCurrentProcessId());
     g_map = CreateFileMappingA(INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE,
                                0, sizeof(Shm), name);
@@ -973,9 +1028,11 @@ static DWORD WINAPI init_thread(LPVOID) {
                       (void**)&orig_rec) != MH_OK) return 1;
     if (MH_EnableHook(MH_ALL_HOOKS) != MH_OK) return 1;
 
-    static const uint8_t nop2[2] = {0x90, 0x90};
-    for (auto& L : LIMITER)
-        if (memcmp((void*)L.va, L.want, 2) == 0) patch(L.va, nop2, 2);
+    // Limiter stays live (game runs at real-time 60fps) until limiter_release_tick()
+    // in hooked_do_tick fires after LIMITER_HOLD_MS - see apply_limiter_patch().
+    // TH07_NO_MUTE also means "don't bother holding" - release right away.
+    if (getenv("TH07_NO_MUTE"))
+        apply_limiter_patch();
 
     return 0;
 }
