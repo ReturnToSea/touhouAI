@@ -75,7 +75,7 @@ player. **All other fire + enemy waves pause** for the phase + a 3 s cooldown.
 
 | run | notes | real Lunatic transfer |
 |---|---|---|
-| `ppo_v12` | early layout, obs 212, auto-aim | reached **Stage 2**, ~1.63 M score, died before Chen (boss). "470 s" = its sim survival, unverified real |
+| `ppo_v12` | early layout, obs 212, auto-aim | past the Chen midboss, died before the Stage 2 boss, ~1.63 M score. "470 s" = its sim survival |
 | `ppo_v22` | + spam phase, real hitboxes | **~368 s** @ 82M steps |
 | `ppo_v25` | front-only shot, weak rewards | 159 s — stopped engaging |
 | `ppo_v26` | rebalanced rewards | overfit the fixed stage; transfer got *worse* as sim rose |
