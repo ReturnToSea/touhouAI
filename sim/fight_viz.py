@@ -20,8 +20,12 @@ PW, PH, SCALE, MARGIN = 384, 448, 1.6, 20
 def main():
     name = sys.argv[1] if len(sys.argv) > 1 else "cirno"
     d = np.load(HERE / "fights" / f"{name}.npz")
-    B = d["bullets"]                     # frame,slot,x,y,vx,vy,cls,fxflag
+    B = d["bullets"]              # frame,slot,x,y,vx,vy,cls,fx[,hbx,hby]
     boss = d["boss"]; player = d["player"]
+    EN = d["enemies"] if "enemies" in d else np.zeros((0, 8), np.float32)
+    en_by_frame = {}
+    if len(EN):
+        EN = EN.copy(); EN[:, 0] -= int(B[:, 0].min())
     f0 = int(B[:, 0].min())
     B[:, 0] -= f0
     if len(boss):
@@ -37,7 +41,10 @@ def main():
         by_frame[f] = Bs[idx[f]:idx[f + 1]]
     bpos = {int(r[0]): (r[1], r[2]) for r in boss}
     ppos = {int(r[0]): (r[1], r[2]) for r in player}
-    print(f"{name}: {len(B)} rows, {nframes} frames (~{nframes/60:.0f}s)")
+    for r in EN:                       # frame,slot,x,y,life,hbx,hby,hbz
+        en_by_frame.setdefault(int(r[0]), []).append((r[2], r[3], r[5]))
+    print(f"{name}: {len(B)} rows, {nframes} frames (~{nframes/60:.0f}s), "
+          f"{len(EN)} enemy rows")
 
     pygame.init()
     W = int(PW * SCALE) + 2 * MARGIN + 170
@@ -85,12 +92,15 @@ def main():
                          (MARGIN, MARGIN, PW * SCALE, PH * SCALE))
         rows = by_frame[cf]
         for r in rows:
-            _, _, x, y, vx, vy, cls, fxf = r
-            fxf = int(fxf)
+            x, y, fxf = r[2], r[3], int(r[7])
             c = ((120, 210, 255) if fxf == 32 else
                  (255, 170, 90) if fxf in (64, 128, 256) else
                  (235, 235, 235))
             pygame.draw.circle(screen, c, ts(x, y), 3)
+        for (ex, ey, hbx) in en_by_frame.get(cf, ()):   # satellite sub-enemies
+            rad = max(2, int(hbx * 0.5 * SCALE))         # drawn at set-hitbox/2
+            col = (255, 80, 80) if hbx > 0.5 else (90, 90, 110)
+            pygame.draw.circle(screen, col, ts(ex, ey), rad, 1)
         if cf in bpos:
             pygame.draw.circle(screen, (255, 120, 255), ts(*bpos[cf]), 6, 2)
         if cf in ppos:
@@ -102,6 +112,7 @@ def main():
             f"{speed:.1f}x {'PAUSED' if paused else ''}",
             f"bullets {len(rows)}",
             "", "white=plain", "cyan=curve", "orange=redirect",
+            "red ring=lethal enemy",
             "", "SPACE . <-/-> +/- R",
         ]):
             screen.blit(font.render(ln, True, (200, 200, 210)), (px, MARGIN + i * 20))

@@ -94,6 +94,7 @@ constexpr uintptr_t BM_BULLETS       = 0x0000B8C0;  // zBullet[0x401]
 constexpr uintptr_t BM_BULLET_STRIDE = 0x00000D68;
 constexpr uintptr_t BM_BULLET_MAX    = 0x401;       // 1025
 constexpr uintptr_t BM_BULLET_COUNT  = 0x0037A128;  // int32
+constexpr uintptr_t BULLET_HITBOX    = 0x0B7C;      // float x, y - AABB full size; collision fn 0x43e260 uses +-half (probe_enemy_hitbox: pellet 4.0 -> +-2.0)
 constexpr uintptr_t BULLET_POS       = 0x0B8C;      // float x, y, z
 constexpr uintptr_t BULLET_VEL       = 0x0B98;      // float vx, vy   (verified probe_bullet_motion)
 constexpr uintptr_t BULLET_SPEED     = 0x0BB0;      // float
@@ -113,7 +114,8 @@ constexpr uintptr_t EM_ENEMY_STRIDE = 0x00004F48;   // approx sizeof(zEnemy)
 constexpr uintptr_t EM_ENEMY_COUNT  = 0x009545BC;   // int32
 constexpr uintptr_t EM_BOSSES       = 0x00954598;   // zEnemy*[8]
 constexpr uintptr_t ENEMY_POS       = 0x2B0C;       // zFloat3
-constexpr uintptr_t ENEMY_LIFE      = 0x2BB8;       // int32
+constexpr uintptr_t ENEMY_HITBOX    = 0x2B3C;       // float x, y, z - matches ECL enemy_set_hitbox args (probe_enemy_hitbox: Sub43 orbs = 0,0,32; Letty = 48,64,32). player-body collision uses (x/2)*2/3 per pytouhou; x<=0 => not lethal
+constexpr uintptr_t ENEMY_LIFE      = 0x2BB8;       // int32 (Letty ~15000; satellite sub-enemies = 1; dead slot = 0)
 constexpr uintptr_t ENEMY_MAXLIFE   = 0x2BBC;       // int32
 
 // --- zItemManager (static; verified live vs th-re-data) ---
