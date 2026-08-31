@@ -3,56 +3,123 @@
 The dated, quantitative companion to [Dead ends & lessons](dead-ends.md). Every
 training run: what changed, what the sim curve did, what transferred, verdict.
 
+!!! warning "Sim score is not real transfer"
+    The procedural sim is deliberately brutal (domain randomization), so its
+    survival numbers run ~20–40 s while the *same policy* survives ~200–300 s on
+    the real game. Always read the **real** line, not the sim line. `ppo_v26` got
+    *worse* on the real game while its sim median rose.
+
 !!! note "How this is kept"
     After a run, `python tools/plot_run.py runs_sim/<name>` writes the curve to
-    `docs/assets/curves/<name>.png` and copies `history.npy` to `runs_meta/`
-    (so the plot is reproducible from the repo — `.pt` weights stay out of git).
-    Then add a row below. The *what changed* and *verdict* columns are written
-    by hand.
+    `docs/assets/curves/<name>.png` (sim series + the `realtransfer.npy` overlay)
+    and copies `history.npy` to `runs_meta/`. `.pt` weights stay out of git.
+    The *what changed* / *verdict* columns are written by hand.
 
 ## Current best
 
 | Metric | Value | From |
 |---|---|---|
-| Real playthrough | `~470 s, stages 1–3` | `ppo_v12` (retired 212-d obs) |
-| Real Letty, dodge-only | `6/6 clears` | procedural-sim baseline (`snap_0092M`) |
-| Real Letty, dodge-only | `3/6 clears` | `fight_letty` (recorded) |
-| Current-obs general policy | `dies at S1 boss` | best of v27 / v29 |
+| Real playthrough (peak) | **~470 s**, stages 1–3 | `ppo_v12` — retired 212-d obs |
+| Real transfer, current obs | **~225 s** median (stages 1–2) | `ppo_v27` / `ppo_v29` |
+| Recorded-boss transfer | 150–190 s on real Letty | `fight_letty` (but baseline clears Letty 6/6) |
 
-The headline number (`ppo_v12`) has not been reproduced on the current 236-d
-observation. See [the base-policy regression](dead-ends.md#the-base-policy-regression-open).
+The current 236-d observation has **not** reproduced `ppo_v12`'s reach. Every
+domain-randomized run plateaus around "clears stage 1, dies in stage 2."
+
+## The PPO arc
+
+Read top-to-bottom.
+
+### v12 and the 212-d era — peak
+
+`ppo_v12` reached **~470 s real, stages 1–3** at ~200 M steps on a 212-d
+observation. `ppo_v22` (an early re-run) hit **~368 s at only 82 M steps**. This
+is the bar everything since has failed to clear. The 212-d obs was later widened
+to 236-d (new enemy/item blocks, focus-aware escape) and `ppo_v12` no longer
+loads against the current code.
+
+### v23–v25 — trying to teach shooting, the policy games it
+
+Added a front-only shot model, aimed enemy bursts, and a top-down "spam phase"
+to push the agent to engage enemies. Over 1000 M steps `ppo_v25` **regressed to
+~159 s**. The kill and power rewards were too weak relative to the survival
+bonus, so the optimal policy was to *stop shooting and just dodge* — which is
+fine in the sim and useless for a real run where you need power.
+
+> **Realisation.** You cannot bolt "shoot enemies" onto a survival objective with
+> a small reward term. The agent will find the survive-only local optimum.
+
+### v26 — stronger engagement rewards, overfits
+
+Cranked the enemy-damage reward (`0.10 → 0.35`), item reward (`0.30 → 0.60`),
+added a power-standing bonus, widened the enemy hit radius, capped episodes at
+240 s, split the death signal by cause. On a **fixed** sim stage it learned to
+engage — and transfer got *worse* as the sim score climbed. `best.pt`, ranked by
+sim score, was the most overfit checkpoint in the run.
+
+> **Realisation.** A fixed sim stage is a memorisation target. Rank checkpoints
+> by transfer tests, not sim score.
+
+### v27 — domain-randomization rewrite, recovers
+
+Threw out the hand-tuned stage. Patterns are now procedurally generated per
+episode with heavy randomization of density, speed, aim, and emitter layout.
+Real transfer came back to **~223 s median** (41–505 s range). The last
+current-obs run that clearly worked.
+
+### v28 — observation normalization, catastrophic
+
+Standardized each obs feature to zero-mean/unit-variance using sim statistics.
+Features that are constant in the sim (empty item slots, walls) got divided by a
+near-zero std, folding their weights up ~`1e4×`. On real obs the network
+exploded. Real transfer **collapsed to 18 s median** (13–42 s) despite a
+perfectly healthy sim curve. Reverted (`65a4d78`).
+
+### v29 — v27 plus a batch of refinements, marginal
+
+v27 randomization + AABB collision (was circular) + a bottom-camp penalty +
+focus-aware escape scalars + reward normalization + LR annealing, **no** obs
+normalization. Real transfer **~231 s median** (68–645 s), flat after ~100 M
+steps. Basically a wash versus v27 — the plateau is the sim's, not the run's.
+Snapshots saved every 40 M for transfer-testing (`snap_*.pt`); `best.pt` still
+underperforms mid-training snapshots, per the v26 lesson.
 
 ## Runs
 
-Reverse-chronological. "sim" = greedy median survival at the end of training;
-"real" = survival on the actual game.
-
-| Run | Date | What changed | Sim | Real | Verdict |
-|---|---|---|---|---|---|
-| `fight_letty` | 2026-08-31 | recorded-Letty FightSim + re-aiming + per-bullet hitboxes + lethal enemy bodies; from scratch | 70 s median (capped view) | 150–190 s on real Letty, but the plain baseline clears it 6/6 | **inconclusive** — Letty is too easy to show a benefit |
-| `ppo_v29` | 2026-08-30 | v27 randomization + AABB collision + bottom-camp penalty + focus-aware escape + reward-norm + LR anneal; **no** obs-norm | ~35 s median | dies at S1 boss (normal play) | regressed vs v12; snapshots every 40 M for transfer-testing |
-| `ppo_v28` | 2026-08-29 | added obs normalization | healthy curve | **15–40 s** real | **killed** — sim-constant features got `1e4×` weights ([why](dead-ends.md#observation-normalization-v28-abandoned)) |
-| `ppo_v27` | 2026-08-28 | domain-randomization rewrite | ~39 s median | 200–500 s real (per notes) | transferred well; the last current-obs run that did |
-| `ppo_v26` | — | fixed sim stage, stronger enemy/item rewards | rising | got **worse** as sim rose | overfit — `best.pt` is the most overfit checkpoint |
-| `ppo_v25` | — | front-only shot + aimed enemy bursts + top-down spam phase, 1000 M steps | high | **159 s** real (down from 470) | regressed — reward changes made it stop engaging |
-| `ppo_v22` | — | (212-d era) | 88 s median | **368 s real**, stages 1–3, at only 82 M steps | strong; preserved |
-| `ppo_v12` | — | (212-d era) | — | **470 s real**, stages 1–3 | best real result to date; obs since retired |
-
-### fight_letty
-
-![fight_letty survival curve](assets/curves/fight_letty.png)
-
-Climbed the whole run (42 → 70 s median), never plateaued. The in-sim eval is
-capped at 83 s so full clears are invisible here — the real signal is
-`eval_boss.py`.
+| Run | Date | What changed | Real transfer | Verdict |
+|---|---|---|---|---|
+| `fight_letty` | 2026-08-31 | recorded-Letty FightSim + re-aiming + real hitboxes + lethal enemy bodies; from scratch | 150–190 s on real Letty | inconclusive — Letty too easy (baseline 6/6) |
+| `ppo_v29` | 2026-08-30 | v27 + AABB collision + focus-aware escape + reward-norm + LR anneal | ~231 s median | wash vs v27 |
+| `ppo_v28` | 2026-08-29 | + obs normalization | ~18 s median | **killed** |
+| `ppo_v27` | 2026-08-28 | domain-randomization rewrite | ~223 s median | works; the current baseline |
+| `ppo_v26` | — | stronger enemy/item rewards, fixed sim stage | worse as sim rose | overfit |
+| `ppo_v25` | — | front-only shot + aimed bursts + spam phase, 1000 M | ~159 s | regressed — stopped engaging |
+| `ppo_v22` | — | early 236-d re-run | ~368 s, 82 M steps | strong; preserved |
+| `ppo_v12` | — | 212-d era | **~470 s**, stages 1–3 | best to date; obs retired |
 
 ### ppo_v27
 
 ![ppo_v27 survival curve](assets/curves/ppo_v27.png)
 
+### ppo_v28 — obs normalization
+
+![ppo_v28 survival curve](assets/curves/ppo_v28.png)
+
+The sim curve is fine; real transfer sits at the floor the whole run.
+
 ### ppo_v29
 
 ![ppo_v29 survival curve](assets/curves/ppo_v29.png)
+
+The gap between the sim lines (~20–35 s) and the real line (~230 s) is the whole
+point of this chapter.
+
+### fight_letty
+
+![fight_letty survival curve](assets/curves/fight_letty.png)
+
+No `realtransfer.npy` for this run — the real number is one `eval_boss.py` pass:
+150–190 s on real Letty, 3/6 full clears.
 
 ## Sim throughput
 

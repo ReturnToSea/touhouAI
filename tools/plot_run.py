@@ -53,16 +53,32 @@ def main():
     import matplotlib.pyplot as plt
 
     x = h[:, sch["x"]] / 1e6
-    fig, ax = plt.subplots(figsize=(7.2, 3.8), dpi=140)
+    fig, ax = plt.subplots(figsize=(7.4, 4.0), dpi=140)
     colors = ["#ee6ea0", "#67c8e2", "#8b94a1"]
     for i, (col, lbl) in enumerate(sch["series"]):
-        ax.plot(x, h[:, col], color=colors[i % len(colors)], lw=1.8,
-                label=lbl, marker="o", ms=2.5)
+        ax.plot(x, h[:, col], color=colors[i % len(colors)], lw=1.6, alpha=.85,
+                label=f"sim {lbl}", marker="o", ms=2.5)
+
+    # real-game transfer, if it was logged: [wall, step, survival_s, score, flag]
+    rt_path = run / "realtransfer.npy"
+    if rt_path.exists():
+        rt = np.load(rt_path)
+        rs, rv = rt[:, 1] / 1e6, rt[:, 2]
+        ax.scatter(rs, rv, s=9, color="#c9a227", alpha=.35, lw=0,
+                   label="real (each eval)", zorder=2)
+        # binned median
+        edges = np.linspace(rs.min(), rs.max(), 12)
+        mids = 0.5 * (edges[:-1] + edges[1:])
+        med = [np.median(rv[(rs >= a) & (rs < b)]) if ((rs >= a) & (rs < b)).any()
+               else np.nan for a, b in zip(edges[:-1], edges[1:])]
+        ax.plot(mids, med, color="#c9a227", lw=2.2, marker="s", ms=3.5,
+                label="real (binned median)", zorder=3)
+
     ax.set_xlabel("training steps (millions)")
     ax.set_ylabel("survival (seconds)")
     ax.set_title(name, loc="left", fontsize=11, fontweight="bold")
     ax.grid(True, alpha=.18, lw=.6)
-    ax.legend(frameon=False, fontsize=9)
+    ax.legend(frameon=False, fontsize=8.5, ncol=2)
     ax.spines[["top", "right"]].set_visible(False)
     fig.tight_layout()
 

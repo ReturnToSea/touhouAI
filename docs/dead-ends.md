@@ -66,13 +66,19 @@ there was nothing left to fine-tune.
 
 ## The base-policy regression — *open*
 
-The strong result in the record — `ppo_v12`, ~470 s, stages 1–3 — is on a 212-d
-observation that no longer exists. Every current-obs run (v27, v29) dies at the
-Stage 1 boss in normal play, and pure-dodge dies in the Stage 1 *stage portion*
-at 33 s. The recorder / FightSim / re-aim work this session sits on a foundation
-that is below where the project was months ago.
+`ppo_v12` reached ~470 s (stages 1–3) on a 212-d observation that no longer
+exists. The current 236-d runs (v27, v29) transfer to **~225 s median** — they
+clear Stage 1 and die somewhere in Stage 2. A regression from v12, though not
+the "dies at Stage 1 boss" I first reported (that was `best.pt`, which the
+[v26 lesson](#v26-stronger-engagement-rewards-overfits) says is the wrong
+checkpoint to pick).
 
-> **Lesson (provisional).** The sim teaches boss-dodging. A 1cc also needs
-> stage-portion enemy management and boss damage-routing, and recording bosses
-> fixes neither. The likely path: record bosses for dodging *and* add synthetic
-> HP phasing so the policy learns to shoot.
+Every domain-randomized run plateaus at roughly the same place. Pure-dodge, with
+no shooting at all, dies in the Stage 1 *stage portion* at ~33 s — the
+procedural sim never taught enemy management.
+
+> **Lesson (provisional).** The sim teaches boss-dodging and tops out around
+> "into Stage 2." A 1cc also needs stage-portion enemy management and boss
+> damage-routing, and recording bosses fixes neither. The path being taken:
+> record bosses for dodging *and* add synthetic HP phasing so the policy learns
+> to shoot.

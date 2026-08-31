@@ -45,9 +45,9 @@ touch-up tool, not the main training vehicle.
 
 | Milestone | Result | Notes |
 |---|---|---|
-| Best real playthrough | `~470 s, stages 1–3` | `ppo_v12` — on a now-retired 212-d observation |
+| Best real playthrough (peak) | `~470 s, stages 1–3` | `ppo_v12` — on a now-retired 212-d observation |
+| Current-obs transfer | `~225 s median` | `ppo_v27` / `ppo_v29` — clears Stage 1, dies in Stage 2 |
 | Recorded-boss transfer | `150–190 s` | `fight_letty`, trained only on replayed Letty, dodges real Letty |
-| Current-obs general policy | `dies at S1 boss` | the 236-d runs have not reproduced v12's reach |
 
 !!! note "Constraints"
     The clear runs on vanilla `th07.exe` with the hook in observe-only mode.
