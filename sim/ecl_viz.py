@@ -42,7 +42,7 @@ def main():
     frames = int(sys.argv[4]) if len(sys.argv) > 4 else 2400
 
     print(f"running VM: sub {sub} difficulty {diff} for {frames} frames...")
-    sched = run_boss(tecl, sub, difficulty=diff, frames=frames)
+    sched, clears = run_boss(tecl, sub, difficulty=diff, frames=frames)
     bullets = expand(sched)
     bullets.sort()
     print(f"{len(sched)} spawns -> {len(bullets)} bullets")

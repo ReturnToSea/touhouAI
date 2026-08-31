@@ -82,14 +82,36 @@ class VM:
 
 
 class Boss:
-    def __init__(self, subs, difficulty, rng):
+    def __init__(self, subs, difficulty, rng, dps=0.0):
         self.subs = subs
         self.diff = difficulty
         self.rng = rng
+        self.dps = dps                     # simulated player damage/sec (0 = timer only)
         self.vms: list[VM] = []
         self.sched: list[Spawn] = []
+        self.clears: list[int] = []        # frames where the screen was cleared
         self.frame = 0
         self.life = 999999
+        self.root: VM | None = None        # the boss controller VM
+        self.phase_start = 0
+        self.timer_cb = None               # (threshold_frames, sub_id)
+        self.life_cb = None                # (threshold_hp, sub_id)
+        self.death_cb = None               # sub_id
+        self.phase_life0 = 999999
+
+    # trigger a phase transition: interrupt the controller, jump to `sub`
+    def _goto_phase(self, sub):
+        r = self.root
+        r.ins = self.subs[int(sub)]
+        r.pc, r.t, r.stack = 0, 0, []
+        r.move = r.cur_bullet = None
+        r.speed = r.accel = r.ang_vel = 0.0
+        for v in self.vms:
+            if v is not r:
+                v.dead = True
+        self.phase_start = self.frame
+        self.phase_life0 = self.life
+        self.timer_cb = self.life_cb = None
 
     # ---- gvar access -------------------------------------------------------
     def _get(self, vm: VM, a):
@@ -144,10 +166,24 @@ class Boss:
 
     # ---- one frame ------------------------------------------------------
     def step(self):
+        # simulated boss damage + phase-transition callbacks (whole-fight)
+        if self.dps and self.life < 1e8:
+            self.life -= self.dps / 60.0
+        pt = self.frame - self.phase_start
+        if self.root and not self.root.dead:
+            if self.life_cb and self.life <= self.life_cb[0]:
+                self._goto_phase(self.life_cb[1])
+            elif self.timer_cb and pt >= self.timer_cb[0]:
+                self._goto_phase(self.timer_cb[1])
         for vm in list(self.vms):
             if vm.dead:
                 continue
             self._run_vm_frame(vm)
+        # controller finished a phase with a death callback pending -> next phase
+        if self.root and self.root.dead and self.death_cb is not None:
+            self.root.dead = False
+            nxt, self.death_cb = self.death_cb, None
+            self._goto_phase(nxt)
         self.vms = [v for v in self.vms if not v.dead]
         self.frame += 1
 
@@ -375,15 +411,45 @@ class Boss:
             return False
         if op == "enemy_life_set":
             self.life = int(g(0))
+            self.phase_life0 = self.life
             return False
         if op == "enemy_flag_invulnerable":
             vm.invuln = bool(g(0))
             return False
-        if op == "enemy_kill_all":
-            for v in self.vms:
-                if v is not vm:
-                    v.dead = True
-            self.sched = [s for s in self.sched if s.frame >= self.frame - 1]
+
+        # --- phase-transition callbacks (root controller only) ---
+        if vm is self.root:
+            if op == "timer_callback_threshold":
+                self._pend_timer_t = int(g(0))
+                return False
+            if op == "timer_callback_sub":
+                self.timer_cb = (getattr(self, "_pend_timer_t", 99999), int(g(0)))
+                return False
+            if op == "life_callback_threshold":
+                self._pend_life_t = int(g(0))
+                return False
+            if op == "life_callback_sub":
+                self.life_cb = (getattr(self, "_pend_life_t", 0), int(g(0)))
+                return False
+            if op in ("life_callback_ex", "life_callback"):
+                # (mode, threshold, sub)  -> fire when life <= threshold
+                self.life_cb = (float(g(1)), int(g(2)))
+                return False
+            if op == "death_callback_sub":
+                self.death_cb = int(g(0))
+                return False
+        if op in ("timer_callback_threshold", "timer_callback_sub",
+                  "life_callback_threshold", "life_callback_sub",
+                  "life_callback_ex", "life_callback", "death_callback_sub",
+                  "enemy_interrupt", "enemy_interrupt_set", "boss_interrupt"):
+            return False
+        if op in ("enemy_kill_all", "bullet_cancel", "bullet_clear",
+                  "laser_clear_all", "bullet_cancel_radius"):
+            if op in ("enemy_kill_all",):
+                for v in self.vms:
+                    if v is not vm:
+                        v.dead = True
+            self.clears.append(self.frame)   # replay despawns live bullets here
             return False
 
         # everything else (anm_*, effect_*, *_sound, *_callback, flags, laser_*,
@@ -420,19 +486,25 @@ class Boss:
 _DIFF_CHR = {0: "E", 1: "N", 2: "H", 3: "L", 4: "L"}
 
 
-def run_boss(tecl_path, sub, difficulty=3, frames=3600, seed=0):
+def run_boss(tecl_path, sub, difficulty=3, frames=3600, seed=0, dps=0.0):
+    """`sub` = the boss *controller* sub (Cirno=20, Letty=38). Phase transitions
+    (non-spell -> spell -> ...) fire via the timer/life/death callbacks. dps=0 =>
+    phases run to their timer threshold (full patterns); dps>0 simulates player
+    damage so life-callbacks fire earlier."""
     subs = parse(tecl_path)
-    boss = Boss(subs, difficulty, random.Random(seed))
+    boss = Boss(subs, difficulty, random.Random(seed), dps=dps)
     root = VM(subs[int(sub)], difficulty)
     root.x, root.y = 192.0, 120.0
     root.freg["PARAM_R"] = 192.0
     root.freg["PARAM_S"] = 120.0
+    boss.root = root
     boss.vms.append(root)
     for _ in range(frames):
         boss.step()
-        if not boss.vms:
+        if not boss.vms and boss.root.dead:
             break
-    return boss.sched
+    boss.sched.sort(key=lambda s: s.frame)
+    return boss.sched, sorted(set(boss.clears))
 
 
 if __name__ == "__main__":
@@ -440,7 +512,7 @@ if __name__ == "__main__":
     p = sys.argv[1]
     sub = int(sys.argv[2]) if len(sys.argv) > 2 else 29
     fr = int(sys.argv[3]) if len(sys.argv) > 3 else 1800
-    sched = run_boss(p, sub, difficulty=3, frames=fr)
+    sched, clears = run_boss(p, sub, difficulty=3, frames=fr)
     print(f"{len(sched)} spawn events over {fr} frames")
     from collections import Counter
     print("by opcode:", Counter(s.opcode for s in sched))
