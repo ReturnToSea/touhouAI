@@ -54,6 +54,9 @@ def main():
     ap.add_argument("--fight", default="cirno")
     ap.add_argument("--steps", type=float, default=150e6)
     ap.add_argument("--B", type=int, default=12288)
+    ap.add_argument("--max-frames", type=int, default=11000,
+                    help="cap on recording length loaded into FightSim (Letty's "
+                    "full dodge-only fight is ~10750 frames / 179s)")
     ap.add_argument("--rollout", type=int, default=32)
     ap.add_argument("--lr", type=float, default=3e-4)
     ap.add_argument("--gamma", type=float, default=0.995)
@@ -70,15 +73,21 @@ def main():
     run = Path("runs_sim") / args.name
     run.mkdir(parents=True, exist_ok=True)
 
-    sim = FightSim(B=args.B, name=args.fight, device=dev, seed=args.seed)
-    ev = FightSim(B=4096, name=args.fight, device=dev, seed=args.seed + 999)
+    sim = FightSim(B=args.B, name=args.fight, device=dev, seed=args.seed,
+                   max_frames=args.max_frames)
+    ev = FightSim(B=1024, name=args.fight, device=dev, seed=args.seed + 999,
+                  max_frames=args.max_frames)
+    ev.pos, ev.boss = sim.pos, sim.boss          # identical data - don't double it
     ac = AC().to(dev)
     opt = torch.optim.Adam(ac.parameters(), lr=args.lr, eps=1e-5)
     B, T = args.B, args.rollout
-    fs = 3
 
+    # in-training eval is a cheap sanity signal only (same recordings -> prone to
+    # memorisation). Real transfer number comes from native/eval_boss.py on the
+    # snapshots. FightSim.step == 1 frame; the full fight is ~10750 frames but a
+    # ~5000-frame window (83s, into phase 3) is enough to see it learning.
     @torch.no_grad()
-    def evaluate(n=1600):
+    def evaluate(n=5000):
         o = ev.reset()
         alive = torch.ones(ev.B, dtype=torch.bool, device=dev)
         life = torch.zeros(ev.B, device=dev)
@@ -87,8 +96,8 @@ def main():
             o, r, dn = ev.step(a)
             life += alive.float()
             alive = alive & ~dn
-        s = (life * fs / 60.0).cpu().numpy()
-        return float(np.median(s)), float(np.mean(s)), float((s > 30).mean())
+        s = (life / 60.0).cpu().numpy()          # step == frame
+        return float(np.median(s)), float(np.mean(s)), float((s > 60).mean())
 
     obs = sim.reset()
     ob = torch.zeros(T, B, OBS_DIM, device=dev)
@@ -146,11 +155,11 @@ def main():
                 nn.utils.clip_grad_norm_(ac.parameters(), 0.5)
                 opt.step()
 
-        if upd % 15 == 0:
+        if upd % 30 == 0:
             med, mean, f30 = evaluate()
             sps = total / (time.perf_counter() - t0)
             print(f"upd {upd:4d}  {total/1e6:6.1f}M  {sps/1e3:4.0f}k/s  "
-                  f"eval surv med {med:5.1f}s mean {mean:5.1f}s  >30s {f30*100:3.0f}%",
+                  f"eval surv med {med:5.1f}s mean {mean:5.1f}s  >60s {f30*100:3.0f}%",
                   flush=True)
             hist.append((total, med, mean, f30))
             np.save(run / "history.npy", np.array(hist))

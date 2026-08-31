@@ -67,7 +67,7 @@ def _load_dense(npz_path):
 
 
 class FightSim:
-    def __init__(self, B=8192, name="cirno", device="cuda", max_frames=5200,
+    def __init__(self, B=8192, name="cirno", device="cuda", max_frames=11000,
                  min_start=0, warmup_max=200, seed=0):
         self.B, self.d = B, device
         g = torch.Generator(device="cpu").manual_seed(seed)
