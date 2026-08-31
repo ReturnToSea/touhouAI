@@ -26,6 +26,16 @@ BM_BASE = 0x0062F958 + 0x0000B8C0
 BM_STRIDE, BM_MAX = 0x00000D68, 0x401
 B_POS, B_VEL, B_ANGLE, B_CLASS, B_STATE, B_FXFLAG = 0xB8C, 0xB98, 0xBBC, 0xB8A, 0xBFC, 0xC3C
 LIVE = (1, 2, 3, 4, 5)
+
+# one strided view over the whole bullet pool - lets us pull every live bullet
+# per frame with numpy instead of 1025 x 5 struct.unpack_from calls (~10x faster,
+# which is most of the recording-time cost).
+BULLET_DT = np.dtype({
+    "names":    ["cls", "pos", "vel", "state", "fxf"],
+    "formats":  ["<i2", "<2f4", "<2f4", "<u2", "<i4"],
+    "offsets":  [B_CLASS, B_POS, B_VEL, B_STATE, B_FXFLAG],
+    "itemsize": BM_STRIDE,
+})
 EM_BOSSES0 = 0x009A9B00 + 0x00954598
 E_POS, E_LIFE = 0x2B0C, 0x2BB8
 
@@ -33,7 +43,10 @@ E_POS, E_LIFE = 0x2B0C, 0x2BB8
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("name")
-    ap.add_argument("--secs", type=float, default=75)
+    ap.add_argument("--secs", type=float, default=600,
+                    help="hard safety cap on recording length (s). The recorder "
+                    "normally stops on its own when the boss despawns; this is "
+                    "just a backstop so a stuck run can't record forever.")
     ap.add_argument("--policy", default="runs_sim/ppo_v29/snap_0092M.pt")
     ap.add_argument("--shoot", choices=("auto", "off", "on"), default="auto",
                     help="off = dodge only (phases run to their full timer)")
@@ -47,7 +60,8 @@ def main():
     args = ap.parse_args()
 
     pol = MLPPolicy.load(HERE.parent / args.policy)
-    env = Th07Env(frame_skip=1, max_seconds=400, render=False, dll_obs=True)
+    env = Th07Env(frame_skip=1, max_seconds=max(args.secs + 120, 400),
+                  render=False, dll_obs=True)
     pm = env._pm
     if pm is None:
         import pymem
@@ -75,7 +89,7 @@ def main():
 
 def _record_one(env, pm, pol, boss, args, out, run):
     obs, _ = env.reset(options={"hard": True})
-    bullets, bosslog, playerlog = [], [], []
+    frames, bosslog, playerlog = [], [], []   # frames: list of (n_i, 8) arrays
     recording = False
     max_steps = int(args.secs * 60) + 6000
     step = 0
@@ -118,29 +132,34 @@ def _record_one(env, pm, pol, boss, args, out, run):
             s = env.h.s
             playerlog.append((step, s.player_x, s.player_y))
             blob = pm.read_bytes(BM_BASE, BM_STRIDE * BM_MAX)
-            for i in range(BM_MAX):
-                o = i * BM_STRIDE
-                st = struct.unpack_from("<H", blob, o + B_STATE)[0]
-                if st not in LIVE:
-                    continue
-                x, y = struct.unpack_from("<ff", blob, o + B_POS)
-                if not (-100 < x < 500 and -100 < y < 580):
-                    continue
-                vx, vy = struct.unpack_from("<ff", blob, o + B_VEL)
-                cls = struct.unpack_from("<h", blob, o + B_CLASS)[0]
-                fxf = struct.unpack_from("<i", blob, o + B_FXFLAG)[0]
-                bullets.append((step, i, x, y, vx, vy, cls, fxf))
-            if step % 300 == 0:
-                print(f"  step {step}: {len(bullets)} rows", flush=True)
+            arr = np.frombuffer(blob, dtype=BULLET_DT, count=BM_MAX)
+            pos = arr["pos"]
+            keep = ((arr["state"] >= 1) & (arr["state"] <= 5) &
+                    (pos[:, 0] > -100) & (pos[:, 0] < 500) &
+                    (pos[:, 1] > -100) & (pos[:, 1] < 580))
+            sel = np.nonzero(keep)[0]
+            if sel.size:
+                fr = np.empty((sel.size, 8), np.float32)
+                fr[:, 0] = step
+                fr[:, 1] = sel
+                fr[:, 2:4] = pos[sel]
+                fr[:, 4:6] = arr["vel"][sel]
+                fr[:, 6] = arr["cls"][sel]
+                fr[:, 7] = arr["fxf"][sel]
+                frames.append(fr)
+            if step % 600 == 0:
+                nrows = sum(len(f) for f in frames)
+                print(f"  step {step}: {nrows} rows", flush=True)
         if term or trunc:
             print(f"  run {run}: player died / episode end at step {step}", flush=True)
             break
 
+    b = (np.concatenate(frames) if frames
+         else np.zeros((0, 8), np.float32))
     p = out / (f"{args.name}_{run}.npz" if args.n > 1 else f"{args.name}.npz")
-    np.savez_compressed(p, bullets=np.array(bullets, np.float32),
+    np.savez_compressed(p, bullets=b,
                         boss=np.array(bosslog, np.float32),
                         player=np.array(playerlog, np.float32))
-    b = np.array(bullets, np.float32)
     if len(b):
         fr = b[:, 0]
         print(f"  saved {p.name}: {len(b)} rows / {int(fr.max()-fr.min())}f "
