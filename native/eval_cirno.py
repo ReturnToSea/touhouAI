@@ -46,7 +46,11 @@ def main():
     ap.add_argument("--eps", type=int, default=6)
     ap.add_argument("--driver", type=Path,
                     default=HERE.parent / "runs_sim/ppo_v29/snap_0092M.pt")
+    ap.add_argument("--no-shoot", action="store_true",
+                    help="force the test policy to dodge only (a %% 18) - clean "
+                    "survival metric, no boss damage confound")
     args = ap.parse_args()
+    _mask = (lambda a: a % 18) if args.no_shoot else (lambda a: a)
 
     test = MLPPolicy.load(args.policy)
     drive = MLPPolicy.load(args.driver)
@@ -76,7 +80,7 @@ def main():
         # hand over to the test policy, time the fight
         fstart = step
         while step < fstart + 5000:
-            obs, r, term, trunc, info = env.step(int(test.act(obs)))
+            obs, r, term, trunc, info = env.step(_mask(int(test.act(obs))))
             step += 1
             b = boss_state(pm)
             if b is None:                       # phased out / killed

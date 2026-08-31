@@ -1,7 +1,37 @@
 # touhouAI
 
-An AI that plays **Touhou 7 – Perfect Cherry Blossom** (`th07`, v1.00b), aiming
-for an agent that survives and maximizes score on **Stage 1 Lunatic**.
+An AI that plays **Touhou 7 – Perfect Cherry Blossom** (`th07`, v1.00b). Started
+as "survive + score on Stage 1 Lunatic"; **Stage 1 is now solved** (a sim-trained
+policy clears the stage, reaches + usually beats Letty, ~238 s greedy) and the
+goal is a **full Lunatic 1-credit clear**.
+
+## Current direction (2026-08)
+
+The GPU made-up-danmaku sim (track 2 below) gets a policy through Stage 1 but
+tops out around Stage 2–3 on transfer — generic dodging isn't enough for the
+hand-authored Stage 4–6 spellcards.
+
+- **Real-game PPO fine-tuning** — built (`native/ST_ROLLOUT` runs whole
+  trajectories in the DLL at ~68×/env, `train_ppo_dll.py`, `sb3_bridge.py`).
+  Result: fine-tuning on Stage 1 was a **wash** (238 s → 223 s greedy) — the sim
+  policy is already at the ceiling for content it can handle; PPO only helps
+  where the policy is *failing*.
+- **Import the real boss patterns** — the live path forward.
+  - ECL decompilation (`tools/th07_ecl/`, thtk) gives the boss *scripts*; a CPU
+    ECL VM (`sim/ecl_vm.py`) reconstructs them, but TH07's engine semantics
+    aren't documented well enough to be faithful without weeks of RE.
+  - **Recording the real game instead** (`native/record_boss_driven.py`): the
+    `zBullet` struct holds each bullet's exact velocity + effect state, so
+    reading it every frame captures the real pattern with no interpretation.
+    `sim/fight_replay.py` (`FightSim`) replays those recordings on the GPU at
+    ~66k steps/s; `sim/train_fight.py` trains on them.
+  - **Cirno PoC**: a policy trained on 10 replayed Cirno recordings and a
+    made-up-danmaku policy **both** clear the real Cirno fight dodge-only
+    (~66 s) — no measurable gain, because Cirno is easy enough that generic
+    dodging already handles her. The real test needs a boss the sim policy
+    fails (Stage 2+). Pipeline works; harder target needed.
+
+See `sim/README.md` and the memory notes for the detailed history.
 
 - **Perception:** read game state from process memory — exact player / bullet /
   enemy / boss / score data, no computer vision.
@@ -82,22 +112,21 @@ then drop it into the real game.
 - `sim/transfer.py <best.pt> [--watch] [--until-death]` — run a sim-trained
   policy on the real game and report survival.
 
-**Result:** a sim-trained policy (`ppo_v12`, mid-training) transferred to the
-real game and survived **470 s / 1.63M score on Lunatic — clearing stages 1–3
-and reaching stage 4** — dodging on 95 % of decisions. This is the from-scratch
-reactive dodging that neither live-PPO nor evolution produced across ~10 runs.
-(`env.reset()` only rewinds stage-1 snapshots, so a long-surviving policy
-crashes the game on the *next* reset — use `--episodes 1` for `--until-death`.)
+**Result:** sim-trained policies transfer to the real game — best real Stage 1
+runs: `ppo_v12` **470 s / 1.63 M** (stages 1–3), `ppo_v27`/`ppo_v29` snapshots
+~200–320 s reliably clearing Letty. The sim has been reworked many times
+(v12→v29): global map added/dropped, real bullet hitboxes, spam phase,
+front-only shot, per-episode domain randomization (v27), then AABB collision +
+focus-aware escape (v29). `ppo_v28` was killed — obs-normalization folded 1e4×
+weights into the actor and destroyed transfer. Every run overfits the sim after
+~50–90 M steps (sim metric keeps rising, real transfer plateaus/dips), which is
+why the current focus is real boss content, not more sim tweaks. Full status
+table in `sim/README.md`.
 
-Since v12 the sim has been reworked many times (global map added then dropped,
-a wall attack added then removed, real bullet hitboxes, a spam phase, front-only
-shooting, enemy aimed bursts). `ppo_v22` (spam phase, real hitboxes) transferred
-to **368 s / 1.58 M** at only 82M steps. `ppo_v25` (+ front-only shot, 1000M
-steps) regressed to 159 s / 100 k — the front-only shot plus weak kill/P-item
-rewards made it stop engaging and just survive. `ppo_v26` (training now)
-rebalances the rewards, and `env.py` now reads the stage-1 midboss/boss from
-`EM_BOSSES[0]` (PCB doesn't put them in the enemy array) so front-only shooting
-can target them. See `sim/README.md` for the full status table.
+`env.py` reads the stage-1 midboss/boss from `EM_BOSSES[0]` (PCB doesn't put
+them in the enemy array). `env.reset(hard=True)` does an **engine-level Stage 1
+reload** (`ST_HARD_RESET` — writes the supervisor "Give Up and Retry" word), so
+episodes reset in ~0.2 s from anywhere without a process relaunch.
 
 Needs a CUDA PyTorch venv (`.venv-cuda`, kept separate so the live-game venv
 stays untouched):
@@ -132,12 +161,21 @@ Point the harness at your `th07.exe` install (see `native/README.md`), then:
 
 ```
 native/       the DLL, injector, Gym env, shared-memory contract, obs builder, HUDs
-  obs.py        canonical observation (shared by env + sim)
-  env.py        Th07Env - Gymnasium wrapper
-  th07hook.cpp  the DLL: hooks, snapshot/reset, in-DLL episode eval, obs, MLP
-  viz.py        live debug overlay for a real-game instance
-train_evo.py  island-model neuroevolution on the live game
-watch.py      replay a checkpoint in a visible window
-sim/          GPU danmaku sim + PPO/ES training + sim-to-real transfer
+  obs.py            canonical observation (shared by env + sim)
+  env.py            Th07Env - Gymnasium wrapper (dll_obs, hard_reset)
+  th07hook.cpp      the DLL: hooks, snapshot/reset, hard-reset, ST_ROLLOUT, obs, MLP
+  sb3_bridge.py     MLPPolicy <-> SB3 PPO weight bridge
+  real_rollout.py   RealRolloutVec - N DLL instances collecting PPO trajectories
+  record_boss_driven.py  drive to a boss + record every bullet (x,y,vx,vy,fx) per frame
+  eval_cirno.py     measure a policy's real-Cirno-fight survival
+  probe_*.py        RE probes (bullet motion fields, hitboxes, the retry trigger, ...)
+train_evo.py    island-model neuroevolution on the live game
+train_ppo_dll.py  PPO fine-tuning on the real game via ST_ROLLOUT
+watch.py        replay a checkpoint in a visible window
+sim/          GPU danmaku sim + PPO/ES + sim-to-real transfer
+  danmaku.py, train.py    the made-up-danmaku sim + trainer (ppo_v12..v29)
+  ecl_parse.py, ecl_vm.py, ecl_bullet.py    CPU ECL decompile -> interpreter
+  fight_replay.py (FightSim), train_fight.py, fight_viz.py   replay recorded real fights
+tools/th07_ecl/   thtk-decompiled th07 ECL + the annotate/opcode-map helpers
 feasibility/  early proof-of-concept notes
 ```

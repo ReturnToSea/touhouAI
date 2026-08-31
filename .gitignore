@@ -51,3 +51,4 @@ tools/th07_ecl/*.tecl
 tools/th07_ecl/*.dat
 runs/
 sim/fights/
+tools/th07_ecl/pytouhou_ref/

@@ -71,24 +71,54 @@ downward ~150° fan. Free-slot pool (1600) — write into inactive / least-
 threatening slots, and a past-player cull frees pellets that fall below the
 player. **All other fire + enemy waves pause** for the phase + a 3 s cooldown.
 
-## Status
+## Status (made-up-danmaku sim)
 
-| run | notes | sim greedy | real Lunatic stage 1 |
-|---|---|---|---|
-| `ppo_v12` | early layout, obs 212, auto-aim | ~23 s med | **470 s / 1.63 M** (stages 1–3) |
-| `ppo_v21` | reverted 8-corner stage, obs 236, 180 s cap | med ~42 / p90 ~139 @ 429M | 105 s / 15 k — camps a corner |
-| `ppo_v22` | + spam phase, real hitboxes, corners in | med ~78 / p90 180 @ 82M (too easy) | **368 s / 1.58 M** @ 82M |
-| `ppo_v25` | + front-only shot, enemy bursts, top-down spam, free-slot pool | med ~77 / p90 180 @ 1000M (plateaued ~500M) | 159 s / **100 k** — front-only + weak rewards → stopped engaging |
-| `ppo_v26` | + `EN_DMG_REW` 0.35, `IT_REW` 0.6, power reward, `EN_RADIUS` 13, `[256,256]`, 240 s cap, death split | *training* | — |
+| run | notes | real Lunatic stage 1 |
+|---|---|---|
+| `ppo_v12` | early layout, obs 212, auto-aim | **470 s / 1.63 M** (stages 1–3) |
+| `ppo_v22` | + spam phase, real hitboxes | **368 s / 1.58 M** @ 82M |
+| `ppo_v25` | front-only shot, weak rewards | 159 s — stopped engaging |
+| `ppo_v26` | rebalanced rewards | overfit the fixed stage; transfer got *worse* as sim rose |
+| `ppo_v27` | **per-episode domain randomization** (emitter re-roll, motion profiles, sparse windows) | ~200–320 s, clears Letty; peaked ~30–75 M then mild drift |
+| `ppo_v28` | + obs normalization | **killed** — the export folded 1e4× weights → 15–40 s |
+| `ppo_v29` | v27 + AABB collision + focus-aware escape + reward-norm + LR anneal (NO obs-norm) | peaked ~320 s @ 46 M, settled ~185–245 s. Best real ckpts are early (`snap_0046M` / `snap_0092M`) |
 
-`ppo_v20` (turrets outside + spinning centre wheels + no auto-aim) was abandoned
-— sparse stage left a bottom-centre camp spot.
+**Recurring failure mode:** every run overfits the fixed/near-fixed sim after
+~50–90 M steps — the sim greedy metric keeps climbing while real transfer
+plateaus then dips. `best.pt` (ranked by sim score) is by construction the
+*most* overfit checkpoint. Fix is real content, not more sim tuning.
 
-**Known:** v25 transfer confirmed the front-only shot + weak kill/P rewards make
-it stop playing the game (just survives). v26 rebalances. Also: the stage-1
-midboss (Cirno) and boss (Letty) live in `EM_BOSSES[0]`, **not** `EM_ENEMIES` —
-`env.py` now dereferences that pointer so they're visible/targetable (needed
-because front-only shot has to position under a target it can see).
+## Real-fight replay (`FightSim`)
+
+`native/record_boss_driven.py` drives to a boss and records every live bullet's
+`(x, y, vx, vy, class, fx_flag)` per frame → `sim/fights/<name>_*.npz`. The
+`zBullet` struct (RE'd in `native/probe_bullet_motion.py`) holds the exact
+velocity and the live `bullet_effects` state, so this captures the real pattern
+— hangs, accel, curves — with zero interpretation.
+
+`fight_replay.py FightSim` packs N recordings to `[n_rec, F, 1025, 2]` on the
+GPU; B episodes each pick a random recording + start offset and replay the exact
+bullet positions (velocity diffed per-slot for the obs). Player physics + AABB
+collision + the shared `build_obs_batch`. ~66 k steps/s. No re-aiming yet.
+
+`train_fight.py` — PPO on it. `fight_viz.py <name>` — play a recording back.
+
+**Cirno PoC**: `train_fight` reached ~66 s greedy survival on the replays fast
+(then memorized the 10 recordings). Against the *real* Cirno, dodge-only, it
+scored the same as the made-up-danmaku policy (~66 s, both clear the fight) —
+Cirno is too easy to show a difference. Needs a Stage 2+ boss.
+
+## ECL decompilation (`ecl_*.py`, `../tools/th07_ecl/`)
+
+thtk decompiles th07's stage scripts; `ecl_parse.py` + `ecl_vm.py` reconstruct a
+boss as a CPU program → bullet spawn schedule. `ecl_bullet.py` ports PyTouhou's
+`Bullet.update()`. Runs Cirno/Letty patterns but isn't faithful — TH07 engine
+semantics (bullet-type launch data, difficulty coeffs, multi-slot effects)
+aren't documented. Kept as a *structure* reference (phases, timings, which
+patterns are aimed); the recorder is the ground truth.
+
+`EM_BOSSES[0]` holds the stage-1 midboss (Cirno) + boss (Letty), **not**
+`EM_ENEMIES` — `env.py` dereferences that pointer.
 
 ## Notes
 
