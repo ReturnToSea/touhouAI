@@ -34,6 +34,8 @@ static dotick_fn    orig_do_tick    = nullptr;
 static readinput_fn orig_read_input = nullptr;
 static present_fn   orig_present    = nullptr;
 
+static inline int god_tick(void* self, void* edx);   // one tick, death-proofed in god mode
+
 static Shm*   g_shm = nullptr;
 static HANDLE g_map = nullptr;
 
@@ -50,6 +52,10 @@ static bool g_stub_draw = true;
 static bool g_render = false;
 // difficulty to force during menu nav (env var TH07_DIFFICULTY, default Lunatic)
 static int32_t g_difficulty = 3;
+// god mode (env var TH07_GODMODE=1): the player cannot die. Used only for
+// RECORDING - a weak/any driver can reach a Stage 2+ boss to record its
+// patterns. The trained policy and the actual 1cc run never touch this.
+static bool g_godmode = false;
 typedef int(__fastcall* drawall_fn)(void* ecx, void* edx);
 static drawall_fn orig_run_all_on_draw = nullptr;
 static int __fastcall hooked_run_all_on_draw(void* ecx, void* edx) {
@@ -478,7 +484,7 @@ static int engine_stage1_reload(void* self, void* edx, Shm* s) {
     for (; nav < MAXF; ++nav) {
         s->action = 0;
         wr<uint8_t>(FRAMESKIP_BYTE, 0);
-        if (orig_do_tick(self, edx) != 0) break;
+        if (god_tick(self, edx) != 0) break;
         int32_t tmr = rd<int32_t>(GAME_MANAGER + GM_STAGE_TIMER);
         int gm  = rd<int32_t>(SUPERVISOR + SV_GAMEMODE);
         int stg = rd<int32_t>(GAME_MANAGER + GM_STAGE);
@@ -610,6 +616,28 @@ static int __cdecl hooked_present(void) {
     return orig_present();
 }
 
+// One logic tick, with god mode applied around it when active. Pins the player
+// to state 3 (invuln: flashing, still moves & shoots) before the tick so no hit
+// registers; if a death slips through anyway, revert state + position + life
+// count to their pre-tick values. Pure pass-through when g_godmode is off.
+static inline int god_tick(void* self, void* edx) {
+    if (!g_godmode) return orig_do_tick(self, edx);
+    uint8_t* pst = (uint8_t*)(PLAYER + PL_STATE);
+    if (*pst == 0) *pst = 3;
+    float px = rd<float>(PLAYER + PL_POS_X);
+    float py = rd<float>(PLAYER + PL_POS_Y);
+    uintptr_t gp = rd<uintptr_t>(GAME_MANAGER + GM_GLOBALS_PTR);
+    float lv = gp ? rd<float>(gp + G_LIFE_COUNT) : 0.f;
+    int r = orig_do_tick(self, edx);
+    if (*pst == 1 || *pst == 2) {              // died anyway -> undo it
+        *pst = 3;
+        wr<float>(PLAYER + PL_POS_X, px);
+        wr<float>(PLAYER + PL_POS_Y, py);
+        if (gp) wr<float>(gp + G_LIFE_COUNT, lv);
+    }
+    return r;
+}
+
 static int __fastcall hooked_do_tick(void* self, void* edx) {
     Shm* s = g_shm;
     s->alive = 1;
@@ -623,7 +651,7 @@ static int __fastcall hooked_do_tick(void* self, void* edx) {
 
     switch (s->state) {
         case ST_FREE: {
-            int r = orig_do_tick(self, edx);
+            int r = god_tick(self, edx);
             capture_obs();
             return r;
         }
@@ -633,7 +661,7 @@ static int __fastcall hooked_do_tick(void* self, void* edx) {
             int r = 0;
             for (uint16_t k = 0; k < rep; ++k) {
                 wr<uint8_t>(FRAMESKIP_BYTE, 0);   // 1 logic tick per do_tick call
-                r = orig_do_tick(self, edx);
+                r = god_tick(self, edx);
                 s->frame++;
                 if (r != 0) break;               // stage clear / quit
             }
@@ -677,7 +705,7 @@ static int __fastcall hooked_do_tick(void* self, void* edx) {
                 // ~4 frames pressed, ~10 released -> a clean tap the menus accept
                 s->action = ((nav % 14) < 4) ? (uint16_t)BTN_SHOOT : (uint16_t)0;
                 wr<uint8_t>(FRAMESKIP_BYTE, 0);
-                if (orig_do_tick(self, edx) != 0) break;
+                if (god_tick(self, edx) != 0) break;
             }
             s->action = 0;
             s->nav_frames = (nav >= MAXF) ? -1 : nav;
@@ -749,7 +777,7 @@ static int __fastcall hooked_do_tick(void* self, void* edx) {
                 int r = 0;
                 for (int k = 0; k < fs; ++k) {
                     wr<uint8_t>(FRAMESKIP_BYTE, 0);
-                    r = orig_do_tick(self, edx);
+                    r = god_tick(self, edx);
                     s->frame++; ep_frames++;
                     if (r != 0) break;
                 }
@@ -821,7 +849,7 @@ static int __fastcall hooked_do_tick(void* self, void* edx) {
                 build_obs(obs, (int)fs);
                 s->action = decode_action(mlp_forward(s->weights, obs, h1, h2));
                 wr<uint8_t>(FRAMESKIP_BYTE, 0);
-                int wr_ = orig_do_tick(self, edx);
+                int wr_ = god_tick(self, edx);
                 s->frame++;
                 uintptr_t wg = rd<uintptr_t>(GAME_MANAGER + GM_GLOBALS_PTR);
                 float wl = wg ? rd<float>(wg + G_LIFE_COUNT) : start_lives;
@@ -843,7 +871,7 @@ static int __fastcall hooked_do_tick(void* self, void* edx) {
                 s->action = decode_action(mlp_forward(s->weights, obs, h1, h2));
                 for (uint32_t k = 0; k < fs && frames < cap; ++k) {
                     wr<uint8_t>(FRAMESKIP_BYTE, 0);
-                    r = orig_do_tick(self, edx);
+                    r = god_tick(self, edx);
                     s->frame++; frames++;
                     if (r != 0) break;
                 }
@@ -961,6 +989,8 @@ static DWORD WINAPI init_thread(LPVOID) {
         g_render = atoi(e) != 0;
     if (char* e = getenv("TH07_DIFFICULTY"))
         g_difficulty = atoi(e);
+    if (char* e = getenv("TH07_GODMODE"))
+        g_godmode = atoi(e) != 0;
     if (!g_render && !getenv("TH07_NO_MUTE"))
         mute_self();
     sprintf(name, "th07hook_%lu", GetCurrentProcessId());

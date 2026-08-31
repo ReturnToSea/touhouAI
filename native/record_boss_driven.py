@@ -66,14 +66,17 @@ def main():
                     help="shoot to reach the boss, then dodge-only so all its "
                     "phases play their full timer (no damage-phasing)")
     ap.add_argument("--which", type=int, default=1,
-                    help="which EM_BOSSES[0] appearance to record: 1 = Stage 1 "
-                    "midboss (Cirno), 2 = Stage 1 boss (Letty)")
+                    help="which EM_BOSSES[0] appearance to record: 1 Cirno "
+                    "(S1 mid), 2 Letty (S1 boss), 3 Chen (S2 mid), 4 Chen (S2 boss)")
+    ap.add_argument("--godmode", action="store_true",
+                    help="player can't die (RECORDING ONLY) - lets a weak driver "
+                    "reach a Stage 2+ boss. The trained policy never sees this.")
     ap.add_argument("--n", type=int, default=1, help="record N runs -> <name>_0.npz ...")
     args = ap.parse_args()
 
     pol = MLPPolicy.load(HERE.parent / args.policy)
     env = Th07Env(frame_skip=1, max_seconds=max(args.secs + 120, 400),
-                  render=False, dll_obs=True)
+                  render=False, dll_obs=True, godmode=args.godmode)
     pm = env._pm
     if pm is None:
         import pymem

@@ -128,7 +128,7 @@ class Th07Env(_Base):
     def __init__(self, frame_skip: int = 3, max_seconds: float = 90.0,
                  warmup: int = 90, render: bool = False, mute: bool = True,
                  hard_reset: bool = False, dll_obs: bool = True,
-                 menu_dwell: float = 4.0):
+                 menu_dwell: float = 4.0, godmode: bool = False):
         super().__init__()
         self.frame_skip = frame_skip
         self.max_steps = int(max_seconds * 60 / frame_skip)
@@ -147,6 +147,10 @@ class Th07Env(_Base):
             os.environ["TH07_RENDER"] = "1"      # actually draw + present
         else:
             os.environ.pop("TH07_RENDER", None)
+        if godmode:
+            os.environ["TH07_GODMODE"] = "1"     # RECORDING only - player can't die
+        else:
+            os.environ.pop("TH07_GODMODE", None)
 
         self.pid = 0
         try:
