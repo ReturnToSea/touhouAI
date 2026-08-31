@@ -88,17 +88,21 @@ def main():
     # snapshots. FightSim.step == 1 frame; the full fight is ~10750 frames but a
     # ~5000-frame window (83s, into phase 3) is enough to see it learning.
     @torch.no_grad()
-    def evaluate(n=5000):
+    def evaluate(n=8000):
         o = ev.reset()
         alive = torch.ones(ev.B, dtype=torch.bool, device=dev)
         life = torch.zeros(ev.B, device=dev)
+        cleared = torch.zeros(ev.B, dtype=torch.bool, device=dev)
         for _ in range(n):
             a = ac.actor(o).argmax(-1)
             o, r, dn = ev.step(a)
             life += alive.float()
+            if getattr(ev, "last_killed", None) is not None:
+                cleared |= alive & ev.last_killed
             alive = alive & ~dn
         s = (life / 60.0).cpu().numpy()          # step == frame
-        return float(np.median(s)), float(np.mean(s)), float((s > 60).mean())
+        clr = float(cleared.float().mean())
+        return float(np.median(s)), float(np.mean(s)), clr
 
     obs = sim.reset()
     ob = torch.zeros(T, B, OBS_DIM, device=dev)
@@ -157,10 +161,10 @@ def main():
                 opt.step()
 
         if upd % 30 == 0:
-            med, mean, f30 = evaluate()
+            med, mean, f30 = evaluate()   # f30 = clear rate when phasing is on
             sps = total / (time.perf_counter() - t0)
             print(f"upd {upd:4d}  {total/1e6:6.1f}M  {sps/1e3:4.0f}k/s  "
-                  f"eval surv med {med:5.1f}s mean {mean:5.1f}s  >60s {f30*100:3.0f}%",
+                  f"eval surv med {med:5.1f}s mean {mean:5.1f}s  cleared {f30*100:3.0f}%",
                   flush=True)
             hist.append((total, med, mean, f30))
             np.save(run / "history.npy", np.array(hist))

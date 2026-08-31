@@ -35,12 +35,21 @@ else:
     build_obs_batch = torch.compile(_build_obs_eager, dynamic=False,
                                     mode="max-autotune-no-cudagraphs")
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from boss_phases import total_hp as _boss_total_hp   # noqa: E402
+
 FIGHTS = Path(__file__).resolve().parent / "fights"
 POOL = 1025                      # th07 bullet pool size
 MAX_EN = 48                      # max satellite sub-enemies tracked per frame
 PLAYER_HB = 1.8                  # measured player half-extent
 BULLET_HB_DEFAULT = 2.5          # fallback when a recording has no hitbox column
 ENEMY_BODY_SCALE = 2.0 / 3.0     # player-body vs enemy-body box (pytouhou)
+
+# synthetic damage-phasing (ReimuA, homing shot). Numbers are approximate -
+# tune SHOT_DPS against real damage-phased fight lengths (Letty ~50-70s).
+SHOT_DPS = 14.0                  # HP/frame while the shoot bit is held
+DMG_REW = 0.003                  # reward per HP dealt
+KILL_BONUS = 150.0               # for defeating the boss (drives "kill, don't just dodge")
 _DIRS = torch.tensor([[0, 0], [0, -1], [1, -1], [1, 0], [1, 1],
                       [0, 1], [-1, 1], [-1, 0], [-1, -1]], dtype=torch.float32)
 
@@ -192,19 +201,25 @@ class FightSim:
         self.HIST = 320             # re-aim window: how far back we keep the sim
         #                            player's path so an aimed bullet can lock
         #                            onto where the player was AT ITS SPAWN
+        self.total_hp = _boss_total_hp(name)       # None -> no damage-phasing
         n_en = int((~torch.isnan(self.en[..., 0])).any(-1).float().mean() * 100)
         n_aim = int(self.aimed.float().mean() * 1000) / 10
         print(f"[FightSim] {self.n_rec} recs, {self.maxF} frames, B={B}, "
-              f"enemy bodies ~{n_en}% of frames, aimed bullet-frames ~{n_aim}%",
-              flush=True)
+              f"enemy bodies ~{n_en}% of frames, aimed bullet-frames ~{n_aim}%, "
+              f"boss HP {self.total_hp}", flush=True)
         self._dirs = _DIRS.to(device)
         self.reset()
 
     def _sample_starts(self, idx):
         rid = torch.randint(0, self.n_rec, (len(idx),), generator=self._g)
-        maxstart = (self.rec_len[rid] - 800).clamp(min=self.min_start + 1)
-        off = (torch.rand(len(idx), generator=self._g) *
-               (maxstart - self.min_start) + self.min_start).long()
+        if self.total_hp is not None:
+            # damage-phasing on -> start from the top so the whole fight + HP
+            # pool is available; the agent shortens it by shooting.
+            off = torch.full((len(idx),), self.min_start, dtype=torch.long)
+        else:
+            maxstart = (self.rec_len[rid] - 800).clamp(min=self.min_start + 1)
+            off = (torch.rand(len(idx), generator=self._g) *
+                   (maxstart - self.min_start) + self.min_start).long()
         self.rec_id[idx] = rid.to(self.d)
         self.t0[idx] = off.to(self.d)
 
@@ -213,6 +228,7 @@ class FightSim:
             self.rec_id = torch.zeros(self.B, dtype=torch.long, device=self.d)
             self.t0 = torch.zeros(self.B, dtype=torch.long, device=self.d)
             self.t = torch.zeros(self.B, dtype=torch.long, device=self.d)
+            self.boss_hp = torch.zeros(self.B, device=self.d)
             self.px = torch.full((self.B,), 192.0, device=self.d)
             self.py = torch.full((self.B,), 384.0, device=self.d)
             self.pl_ring = torch.zeros(self.B, self.HIST, 2, device=self.d)
@@ -229,6 +245,8 @@ class FightSim:
         self.py[idx] = 384.0
         self.pl_ring[idx] = torch.tensor([192.0, 384.0], device=self.d)
         self._prev_active[idx] = False
+        if self.total_hp is not None:
+            self.boss_hp[idx] = self.total_hp
         return self._obs()
 
     def _now(self):
@@ -325,8 +343,23 @@ class FightSim:
         hit = hit_b | hit_e
 
         ended = (self.t0 + self.t) >= (self.rec_len_gpu[self.rec_id] - 2)
-        done = hit | ended
         rew = torch.full((self.B,), 0.02, device=self.d) - 5.0 * hit.float()
+
+        # --- damage-phasing: shooting while not hugging the bottom drains boss
+        # HP (ReimuA homing -> no strict firing-lane check). Killing the boss
+        # ends the episode early with a bonus, so a shorter fight = higher return.
+        killed = torch.zeros(self.B, dtype=torch.bool, device=self.d)
+        if self.total_hp is not None:
+            shooting = (act >= 18) & (self.py < 400.0)
+            dmg = SHOT_DPS * shooting.float()
+            dmg = torch.minimum(dmg, self.boss_hp.clamp(min=0))
+            self.boss_hp = self.boss_hp - dmg
+            rew = rew + DMG_REW * dmg
+            killed = self.boss_hp <= 0
+            rew = rew + KILL_BONUS * killed.float()
+
+        done = hit | ended | killed
+        self.last_killed = killed          # which done-episodes were boss kills
         obs = self._obs(now)
         if done.any():
             self.reset(done.nonzero(as_tuple=True)[0])
