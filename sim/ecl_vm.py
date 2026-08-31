@@ -237,6 +237,14 @@ class Boss:
         if op == "call":
             sub = A[0]
             vm.stack.append((vm.ins, vm.pc + 1, vm.t))
+            # ECL calling convention: caller's ARG_* -> callee's PARAM_*
+            for a, p in (("ARG_A", "PARAM_A"), ("ARG_B", "PARAM_B"),
+                         ("ARG_C", "PARAM_C"), ("ARG_D", "PARAM_D"),
+                         ("ARG_R", "PARAM_R"), ("ARG_S", "PARAM_S"),
+                         ("ARG_M", "PARAM_M"), ("ARG_N", "PARAM_N")):
+                vm.freg[p] = vm.freg.get(a, 0.0)
+                if a in vm._taint:
+                    vm._taint.add(p)
             vm.ins = self.subs[int(sub)]
             vm.pc, vm.t = 0, 0
             return True
@@ -386,19 +394,18 @@ class Boss:
         return self.rng
 
     def _jump(self, vm: VM, op, A) -> bool:
-        # arg0 = new sub-time, then a label, then (for cmp/dec) operands
-        new_t = int(A[0]) if isinstance(A[0], (int, float)) else 0
-        label = next((a for a in A if isinstance(a, str) and a.startswith("Sub")), None)
-        do = True
+        # jump(new_t, label); jump_dec(new_t, label, counter);
+        # jump_{int,float}_{cmp}(lhs, rhs, new_t, label)
         if op == "jump":
-            do = True
+            new_t, label, do = int(A[0]), A[1], True
         elif op == "jump_dec":
-            ctr = A[2]
-            self._set(vm, ctr, self._get(vm, ctr) - 1)
-            do = self._get(vm, ctr) > 0
+            new_t, label = int(A[0]), A[1]
+            self._set(vm, A[2], self._get(vm, A[2]) - 1)
+            do = self._get(vm, A[2]) > 0
         else:
-            l, r = self._get(vm, A[2]), self._get(vm, A[3])
-            cmp = op.split("_")[-1]
+            l, r = self._get(vm, A[0]), self._get(vm, A[1])
+            new_t, label = int(A[2]), A[3]
+            cmp = op.rsplit("_", 1)[-1]
             do = {"equ": l == r, "neq": l != r, "lss": l < r, "leq": l <= r,
                   "gre": l > r, "geq": l >= r}.get(cmp, False)
         if not do:

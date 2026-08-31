@@ -94,11 +94,15 @@ def parse(path: str | Path) -> dict[int, list[Instr]]:
 
         tm = _TIME_RE.match(line)
         if tm:
-            delta = int(tm.group(1))
-            # thecl emits either absolute ("12:") or relative ("+6:")
-            t = t + delta if tm.group(1)[0] in "+-" else delta
-            line = line[tm.end():].strip()
-            line = re.sub(r"^//.*$", "", line).strip()
+            rest = line[tm.end():].strip()
+            cm = re.match(r"^//\s*(-?\d+)", rest)
+            if cm:
+                t = int(cm.group(1))              # thecl's absolute-time comment
+            elif tm.group(1)[0] in "+-":
+                t = t + int(tm.group(1))
+            else:
+                t = int(tm.group(1))
+            line = re.sub(r"^//.*$", "", rest).strip()
             if not line:
                 continue
 
