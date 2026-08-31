@@ -94,8 +94,18 @@ constexpr uintptr_t BM_BULLETS       = 0x0000B8C0;  // zBullet[0x401]
 constexpr uintptr_t BM_BULLET_STRIDE = 0x00000D68;
 constexpr uintptr_t BM_BULLET_MAX    = 0x401;       // 1025
 constexpr uintptr_t BM_BULLET_COUNT  = 0x0037A128;  // int32
-constexpr uintptr_t BULLET_POS       = 0x0B8C;      // float x, y (zFloat2)
+constexpr uintptr_t BULLET_POS       = 0x0B8C;      // float x, y, z
+constexpr uintptr_t BULLET_VEL       = 0x0B98;      // float vx, vy   (verified probe_bullet_motion)
+constexpr uintptr_t BULLET_SPEED     = 0x0BB0;      // float
+constexpr uintptr_t BULLET_ACCEL     = 0x0BB4;      // float (0 unless a speed effect is active)
+constexpr uintptr_t BULLET_ANGVEL    = 0x0BB8;      // float
+constexpr uintptr_t BULLET_ANGLE     = 0x0BBC;      // float radians
 constexpr uintptr_t BULLET_STATE     = 0x0BFC;      // uint16 (1/2/3/4/5 = live; 0 empty; 6 sentinel)
+// live bullet_effects state (matches the ECL bullet_effects params):
+constexpr uintptr_t BULLET_FX_P1     = 0x0C2C;      // float - redirect angle / accel
+constexpr uintptr_t BULLET_FX_P2     = 0x0C30;      // float - redirect speed (-999 = keep)
+constexpr uintptr_t BULLET_FX_INT    = 0x0C34;      // int32 - interval / duration
+constexpr uintptr_t BULLET_FX_FLAG   = 0x0C3C;      // int32 - effect flag (16/32/64/128/256)
 
 // --- zEnemyManager ---
 constexpr uintptr_t EM_ENEMIES      = 0x00004F50;   // zEnemy[0x1E1]
