@@ -19,24 +19,36 @@ training run: what changed, what the sim curve did, what transferred, verdict.
 
 | Metric | Value | From |
 |---|---|---|
-| Real playthrough (peak) | **~470 s**, stages 1–3 | `ppo_v12` — retired 212-d obs |
+| Best real playthrough | reached Stage 2–3, ~1.63 M score | `ppo_v12` — record disputed, no logged data. "470 s" matches its sim-survival column |
 | Real transfer, current obs | **~225 s** median (stages 1–2) | `ppo_v27` / `ppo_v29` |
 | Recorded-boss transfer | 150–190 s on real Letty | `fight_letty` (but baseline clears Letty 6/6) |
 
-The current 236-d observation has **not** reproduced `ppo_v12`'s reach. Every
+No current-obs run has cleanly beaten `ppo_v12`'s Stage 2 reach. Every
 domain-randomized run plateaus around "clears stage 1, dies in stage 2."
 
 ## The PPO arc
 
 Read top-to-bottom.
 
-### v12 and the 212-d era — peak
+### v12 and the 212-d era — peak (record disputed)
 
-`ppo_v12` reached **~470 s real, stages 1–3** at ~200 M steps on a 212-d
-observation. `ppo_v22` (an early re-run) hit **~368 s at only 82 M steps**. This
-is the bar everything since has failed to clear. The 212-d obs was later widened
-to 236-d (new enemy/item blocks, focus-aware escape) and `ppo_v12` no longer
-loads against the current code.
+`ppo_v12` (212-d obs, auto-aim) is the deepest a policy has reached on the real
+game. There's **no `realtransfer.npy`** for it, and the surviving notes
+disagree:
+
+- An old project note: *"470 s / 1.63 M score, cleared stages 1–3 and into stage
+  4, moving 95 % of decisions."*
+- A later recollection: *died before the Stage 2 boss (Chen).*
+
+The `~1.63 M` score points past the Chen boss (rough PCB pace: ~1 M end of
+Stage 2, ~2 M end of Stage 3), so it likely got further than the second
+account. But **"470 s" exactly matches this run's `history.npy` sim-survival
+column**, so that figure is probably the sim number, not a real duration.
+Treat v12 as "reached Stage 2–3, ~1.63 M score" and nothing more precise.
+
+`ppo_v22` (an early 236-d re-run) hit **~368 s at only 82 M steps**. The 212-d
+obs was later widened to 236-d and `ppo_v12` no longer loads against the current
+code.
 
 ### v23–v25 — trying to teach shooting, the policy games it
 
@@ -95,7 +107,7 @@ underperforms mid-training snapshots, per the v26 lesson.
 | `ppo_v26` | — | stronger enemy/item rewards, fixed sim stage | worse as sim rose | overfit |
 | `ppo_v25` | — | front-only shot + aimed bursts + spam phase, 1000 M | ~159 s | regressed — stopped engaging |
 | `ppo_v22` | — | early 236-d re-run | ~368 s, 82 M steps | strong; preserved |
-| `ppo_v12` | — | 212-d era | **~470 s**, stages 1–3 | best to date; obs retired |
+| `ppo_v12` | — | 212-d era, auto-aim | reached Stage 2–3, ~1.63 M score | disputed; "470 s" = its sim column |
 
 ### ppo_v27
 

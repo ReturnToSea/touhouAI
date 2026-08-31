@@ -53,33 +53,46 @@ def main():
     import matplotlib.pyplot as plt
 
     x = h[:, sch["x"]] / 1e6
-    fig, ax = plt.subplots(figsize=(7.4, 4.0), dpi=140)
+    rt_path = run / "realtransfer.npy"
+    has_rt = rt_path.exists()
+
+    # sim and real go in stacked panels - real transfer (~200-600s) dwarfs sim
+    # survival (~20-40s) on a shared axis.
+    nrows = 2 if has_rt else 1
+    fig, axes = plt.subplots(nrows, 1, figsize=(7.4, 2.4 * nrows + 0.4),
+                             dpi=140, sharex=True,
+                             gridspec_kw={"hspace": 0.12})
+    axes = np.atleast_1d(axes)
+    ax_sim = axes[0]
+
     colors = ["#ee6ea0", "#67c8e2", "#8b94a1"]
     for i, (col, lbl) in enumerate(sch["series"]):
-        ax.plot(x, h[:, col], color=colors[i % len(colors)], lw=1.6, alpha=.85,
-                label=f"sim {lbl}", marker="o", ms=2.5)
+        ax_sim.plot(x, h[:, col], color=colors[i % len(colors)], lw=1.7,
+                    label=lbl, marker="o", ms=2.5)
+    ax_sim.set_ylabel("sim survival (s)")
+    ax_sim.set_title(name, loc="left", fontsize=11, fontweight="bold")
+    ax_sim.legend(frameon=False, fontsize=8.5)
 
-    # real-game transfer, if it was logged: [wall, step, survival_s, score, flag]
-    rt_path = run / "realtransfer.npy"
-    if rt_path.exists():
-        rt = np.load(rt_path)
+    if has_rt:
+        rt = np.load(rt_path)                 # [wall, step, survival_s, score, flag]
         rs, rv = rt[:, 1] / 1e6, rt[:, 2]
-        ax.scatter(rs, rv, s=9, color="#c9a227", alpha=.35, lw=0,
-                   label="real (each eval)", zorder=2)
-        # binned median
+        ax_real = axes[1]
+        ax_real.scatter(rs, rv, s=10, color="#c9a227", alpha=.30, lw=0,
+                        label="each eval", zorder=2)
         edges = np.linspace(rs.min(), rs.max(), 12)
         mids = 0.5 * (edges[:-1] + edges[1:])
-        med = [np.median(rv[(rs >= a) & (rs < b)]) if ((rs >= a) & (rs < b)).any()
-               else np.nan for a, b in zip(edges[:-1], edges[1:])]
-        ax.plot(mids, med, color="#c9a227", lw=2.2, marker="s", ms=3.5,
-                label="real (binned median)", zorder=3)
+        med = [np.median(rv[(rs >= a) & (rs < b)])
+               if ((rs >= a) & (rs < b)).any() else np.nan
+               for a, b in zip(edges[:-1], edges[1:])]
+        ax_real.plot(mids, med, color="#c9a227", lw=2.3, marker="s", ms=3.5,
+                     label="binned median", zorder=3)
+        ax_real.set_ylabel("real survival (s)")
+        ax_real.legend(frameon=False, fontsize=8.5)
 
-    ax.set_xlabel("training steps (millions)")
-    ax.set_ylabel("survival (seconds)")
-    ax.set_title(name, loc="left", fontsize=11, fontweight="bold")
-    ax.grid(True, alpha=.18, lw=.6)
-    ax.legend(frameon=False, fontsize=8.5, ncol=2)
-    ax.spines[["top", "right"]].set_visible(False)
+    for ax in axes:
+        ax.grid(True, alpha=.18, lw=.6)
+        ax.spines[["top", "right"]].set_visible(False)
+    axes[-1].set_xlabel("training steps (millions)")
     fig.tight_layout()
 
     args.out.mkdir(parents=True, exist_ok=True)

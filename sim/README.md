@@ -73,10 +73,10 @@ player. **All other fire + enemy waves pause** for the phase + a 3 s cooldown.
 
 ## Status (made-up-danmaku sim)
 
-| run | notes | real Lunatic stage 1 |
+| run | notes | real Lunatic transfer |
 |---|---|---|
-| `ppo_v12` | early layout, obs 212, auto-aim | **470 s / 1.63 M** (stages 1–3) |
-| `ppo_v22` | + spam phase, real hitboxes | **368 s / 1.58 M** @ 82M |
+| `ppo_v12` | early layout, obs 212, auto-aim | reached **Stage 2**, ~1.63 M score, died before Chen (boss). "470 s" = its sim survival, unverified real |
+| `ppo_v22` | + spam phase, real hitboxes | **~368 s** @ 82M steps |
 | `ppo_v25` | front-only shot, weak rewards | 159 s — stopped engaging |
 | `ppo_v26` | rebalanced rewards | overfit the fixed stage; transfer got *worse* as sim rose |
 | `ppo_v27` | **per-episode domain randomization** (emitter re-roll, motion profiles, sparse windows) | ~200–320 s, clears Letty; peaked ~30–75 M then mild drift |

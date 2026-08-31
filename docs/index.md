@@ -45,7 +45,7 @@ touch-up tool, not the main training vehicle.
 
 | Milestone | Result | Notes |
 |---|---|---|
-| Best real playthrough (peak) | `~470 s, stages 1–3` | `ppo_v12` — on a now-retired 212-d observation |
+| Best real playthrough (peak) | Stage 2–3, ~1.63M score | `ppo_v12` (retired 212-d obs); record disputed, "470 s" matches its sim column |
 | Current-obs transfer | `~225 s median` | `ppo_v27` / `ppo_v29` — clears Stage 1, dies in Stage 2 |
 | Recorded-boss transfer | `150–190 s` | `fight_letty`, trained only on replayed Letty, dodges real Letty |
 

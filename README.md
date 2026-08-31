@@ -112,9 +112,11 @@ then drop it into the real game.
 - `sim/transfer.py <best.pt> [--watch] [--until-death]` — run a sim-trained
   policy on the real game and report survival.
 
-**Result:** sim-trained policies transfer to the real game — best real Stage 1
-runs: `ppo_v12` **470 s / 1.63 M** (stages 1–3), `ppo_v27`/`ppo_v29` snapshots
-~200–320 s reliably clearing Letty. The sim has been reworked many times
+**Result:** sim-trained policies transfer to the real game — `ppo_v12` reached
+**Stage 2** (~1.63 M score, died before the Chen boss; the often-quoted "470 s"
+is its *sim* survival, not a verified real number), and `ppo_v27`/`ppo_v29`
+snapshots transfer to ~225 s real — clearing Stage 1, into Stage 2. The sim has
+been reworked many times
 (v12→v29): global map added/dropped, real bullet hitboxes, spam phase,
 front-only shot, per-episode domain randomization (v27), then AABB collision +
 focus-aware escape (v29). `ppo_v28` was killed — obs-normalization folded 1e4×

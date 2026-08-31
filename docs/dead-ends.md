@@ -66,10 +66,11 @@ there was nothing left to fine-tune.
 
 ## The base-policy regression — *open*
 
-`ppo_v12` reached ~470 s (stages 1–3) on a 212-d observation that no longer
-exists. The current 236-d runs (v27, v29) transfer to **~225 s median** — they
-clear Stage 1 and die somewhere in Stage 2. A regression from v12, though not
-the "dies at Stage 1 boss" I first reported (that was `best.pt`, which the
+`ppo_v12` reached Stage 2–3 (~1.63 M score) on a 212-d obs that no longer exists
+— though [the exact reach is disputed](experiment-log.md#v12-and-the-212-d-era-peak-record-disputed).
+The current 236-d runs (v27, v29) transfer to **~225 s median** — they clear
+Stage 1 and die somewhere in Stage 2. A regression from v12, though not the
+"dies at Stage 1 boss" I first reported (that was `best.pt`, which the
 [v26 lesson](#v26-stronger-engagement-rewards-overfits) says is the wrong
 checkpoint to pick).
 
