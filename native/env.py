@@ -21,7 +21,7 @@ import time
 import numpy as np
 
 
-def _mute_pid(pid: int, tries: int = 25, delay: float = 0.1) -> bool:
+def _mute_pid(pid: int, tries: int = 40, delay: float = 0.1) -> bool:
     """Mute the game process's Windows audio session (best-effort).
 
     8 instances each blasting the stage BGM is unusable. The session only
@@ -41,6 +41,40 @@ def _mute_pid(pid: int, tries: int = 25, delay: float = 0.1) -> bool:
             pass
         time.sleep(delay)
     return False
+
+
+def _endpoint_mute(on: bool):
+    """Mute/unmute the default render endpoint. Returns the prior mute state
+    (0/1) or None on failure."""
+    try:
+        from pycaw.pycaw import AudioUtilities
+        ep = AudioUtilities.GetSpeakers().EndpointVolume
+        prev = ep.GetMute()
+        ep.SetMute(1 if on else 0, None)
+        return prev
+    except Exception:
+        return None
+
+
+def _silence_launch(pid: int, hold: float = 3.5):
+    """th07 blasts the title BGM at full volume the instant DirectSound inits,
+    and a per-session mute set before that point doesn't stick. So: keep the
+    whole endpoint muted for `hold` seconds after launch (the DLL holds the
+    frame limiter at 60fps for ~3s over the same window), re-applying the
+    per-session mute throughout, then restore the endpoint. The session mute
+    persists; the endpoint mute is only borrowed. Env construction is
+    serialised by _BuildLock so the endpoint borrow never races another env.
+    Returns True if the endpoint was restored to unmuted (or was already)."""
+    ep_prev = _endpoint_mute(True)
+    t_end = time.time() + hold
+    got = False
+    while time.time() < t_end:
+        if _mute_pid(pid, tries=1, delay=0):
+            got = True
+        time.sleep(0.15)
+    if ep_prev is not None and not ep_prev:
+        _endpoint_mute(False)
+    return got
 
 
 class _BuildLock:
@@ -148,14 +182,15 @@ class Th07Env(_Base):
             os.environ.pop("TH07_RENDER", None)
 
         self.pid = 0
+        silence = mute and not render
         try:
             with _BuildLock():
                 self.pid = inject()
                 atexit.register(_kill_pid, self.pid)
+                if silence:
+                    _silence_launch(self.pid)   # endpoint-mute the loud init window
                 self.h = S.Hook(self.pid)
                 s = self.h.s
-                if mute and not render:
-                    _mute_pid(self.pid)
                 if not self.h.autonav():
                     raise RuntimeError(
                         f"auto-nav failed (nav_frames={s.nav_frames}, "
