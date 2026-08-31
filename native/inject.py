@@ -51,25 +51,12 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--exe", type=Path, default=DEFAULT_EXE)
     ap.add_argument("--dll", type=Path, default=DEFAULT_DLL)
-    ap.add_argument("--sound", action="store_true",
-                    help="don't mute the game (default: silence it)")
     args = ap.parse_args()
-
     try:
-        pid = inject(args.exe, args.dll)
+        print(inject(args.exe, args.dll))
     except OSError as e:
         print(e, file=sys.stderr)
         sys.exit(1)
-    # th07 blasts the title BGM the instant DirectSound inits, before any
-    # per-session mute lands - keep the endpoint muted over the launch window,
-    # then restore (mirrors native/env.py).
-    if not args.sound:
-        try:
-            from env import _silence_launch
-            _silence_launch(pid)
-        except Exception:
-            pass
-    print(pid)
 
 
 if __name__ == "__main__":
