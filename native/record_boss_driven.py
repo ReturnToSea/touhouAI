@@ -55,24 +55,27 @@ ENEMY_DT = np.dtype({
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("name")
-    ap.add_argument("--secs", type=float, default=600,
-                    help="hard safety cap on recording length (s). The recorder "
-                    "normally stops on its own when the boss despawns; this is "
-                    "just a backstop so a stuck run can't record forever.")
+    ap.add_argument("--secs", type=float, default=800,
+                    help="hard safety cap on the whole drive-through (s). Each "
+                    "boss normally stops on its own when it despawns; this is "
+                    "just a backstop. Multi-boss to Chen needs ~600+.")
     ap.add_argument("--policy", default="runs_sim/ppo_v29/snap_0092M.pt")
     ap.add_argument("--shoot", choices=("auto", "off", "on"), default="auto",
                     help="off = dodge only (phases run to their full timer)")
     ap.add_argument("--dodge-after-boss", action="store_true",
                     help="shoot to reach the boss, then dodge-only so all its "
                     "phases play their full timer (no damage-phasing)")
-    ap.add_argument("--which", type=int, default=1,
-                    help="which EM_BOSSES[0] appearance to record: 1 Cirno "
-                    "(S1 mid), 2 Letty (S1 boss), 3 Chen (S2 mid), 4 Chen (S2 boss)")
+    ap.add_argument("--which", default="1",
+                    help="EM_BOSSES[0] appearance(s) to record, comma-separated: "
+                    "1 Cirno (S1 mid), 2 Letty (S1 boss), 3 Chen (S2 mid), "
+                    "4 Chen (S2 boss). Multiple -> one drive-through records each "
+                    "to its own <bossname>_<run>.npz (needs --godmode past S1).")
     ap.add_argument("--godmode", action="store_true",
                     help="player can't die (RECORDING ONLY) - lets a weak driver "
                     "reach a Stage 2+ boss. The trained policy never sees this.")
-    ap.add_argument("--n", type=int, default=1, help="record N runs -> <name>_0.npz ...")
+    ap.add_argument("--n", type=int, default=1, help="record N drive-throughs")
     args = ap.parse_args()
+    args.which_list = [int(w) for w in str(args.which).split(",")]
 
     pol = MLPPolicy.load(HERE.parent / args.policy)
     env = Th07Env(frame_skip=1, max_seconds=max(args.secs + 120, 400),
@@ -102,17 +105,22 @@ def main():
     env.close()
 
 
+BOSS_NAME = {1: "cirno", 2: "letty", 3: "chenmid", 4: "chen"}
+
+
 def _record_one(env, pm, pol, boss, args, out, run):
     obs, _ = env.reset(options={"hard": True})
+    want = list(args.which_list)          # appearances still to record
     frames, enemyframes, bosslog, playerlog = [], [], [], []
     recording = False
+    cur_which = None
     max_steps = int(args.secs * 60) + 6000
     step = 0
     appearance = 0                 # how many distinct bosses we've seen
     boss_present = False
     null_run = 999                 # consecutive no-boss frames
     gone = 0
-    while step < max_steps:
+    while step < max_steps and want:
         a = int(pol.act(obs))
         if args.shoot == "off" or (recording and args.dodge_after_boss):
             a = a % 18
@@ -128,9 +136,11 @@ def _record_one(env, pm, pol, boss, args, out, run):
         else:
             if not boss_present and null_run > 90:     # a NEW boss appeared
                 appearance += 1
-                if appearance == args.which and not recording:
+                if appearance in want and not recording:
                     recording = True
-                    print(f"boss #{appearance} up at step {step} - recording"
+                    cur_which = appearance
+                    print(f"boss #{appearance} ({BOSS_NAME.get(appearance,'?')}) "
+                          f"up at step {step} - recording"
                           f"{' (dodge-only)' if args.dodge_after_boss else ''}",
                           flush=True)
             boss_present = True
@@ -138,9 +148,6 @@ def _record_one(env, pm, pol, boss, args, out, run):
         if recording:
             if b is None:
                 gone += 1
-                if gone > 90:                     # ~1.5s null -> this boss done
-                    print(f"boss gone at step {step} - done", flush=True)
-                    break
             else:
                 gone = 0
                 bosslog.append((step, b[0], b[1]))
@@ -182,34 +189,51 @@ def _record_one(env, pm, pol, boss, args, out, run):
                 ef[:, 5:8] = en["hb"][ek]             # ECL enemy_set_hitbox args
                 enemyframes.append(ef)
 
-            if step % 600 == 0:
-                nrows = sum(len(f) for f in frames)
-                ne = sum(len(f) for f in enemyframes)
-                print(f"  step {step}: {nrows} bullet rows, {ne} enemy rows",
+            if gone > 90:                          # ~1.5s null -> this boss done
+                print(f"  {BOSS_NAME.get(cur_which,'?')} gone at step {step}",
                       flush=True)
+                _save(out, args, run, cur_which,
+                      frames, enemyframes, bosslog, playerlog)
+                want.remove(cur_which)
+                frames, enemyframes, bosslog, playerlog = [], [], [], []
+                recording, cur_which, gone = False, None, 0
+
+            if step % 900 == 0:
+                nrows = sum(len(f) for f in frames)
+                print(f"  step {step}: {nrows} bullet rows", flush=True)
         if term or trunc:
-            print(f"  run {run}: player died / episode end at step {step}", flush=True)
+            print(f"  run {run}: episode end at step {step} "
+                  f"(still wanted: {want})", flush=True)
             break
 
-    b = (np.concatenate(frames) if frames
-         else np.zeros((0, 10), np.float32))
-    e = (np.concatenate(enemyframes) if enemyframes
-         else np.zeros((0, 8), np.float32))
-    p = out / (f"{args.name}_{run}.npz" if args.n > 1 else f"{args.name}.npz")
+    if recording:                     # loop hit max_steps mid-fight - keep it
+        print(f"  run {run}: stopped at step {step}, saving partial {cur_which}",
+              flush=True)
+        _save(out, args, run, cur_which,
+              frames, enemyframes, bosslog, playerlog)
+
+
+def _save(out, args, run, which, frames, enemyframes, bosslog, playerlog):
+    b = np.concatenate(frames) if frames else np.zeros((0, 10), np.float32)
+    e = np.concatenate(enemyframes) if enemyframes else np.zeros((0, 8), np.float32)
+    stem = BOSS_NAME.get(which, f"b{which}")
+    if len(args.which_list) == 1:
+        stem = args.name          # single-boss: keep the caller's name
+    p = out / f"{stem}_{run}.npz"
     np.savez_compressed(p, bullets=b, enemies=e,
                         boss=np.array(bosslog, np.float32),
                         player=np.array(playerlog, np.float32))
     if len(b):
         fr = b[:, 0]
-        elethal = e[(e[:, 5] > 0.5) & (e[:, 6] > 0.5)] if len(e) else e
-        print(f"  saved {p.name}: {len(b)} bullet rows / {int(fr.max()-fr.min())}f "
+        eleth = e[(e[:, 5] > 0.5) & (e[:, 6] > 0.5)] if len(e) else e
+        print(f"  saved {p.name}: {len(b)} rows / {int(fr.max()-fr.min())}f "
               f"(~{(fr.max()-fr.min())/60:.0f}s) / avg {len(b)/len(set(fr)):.0f}/f "
-              f"/ fx {sorted(set(b[:,7].astype(int)))} / hb {sorted({round(float(v),1) for v in b[:,8]})[:6]} "
-              f"/ {len(e)} enemy rows ({len(elethal)} lethal), "
-              f"enemy hb {sorted({(round(float(r[5]),0),round(float(r[6]),0)) for r in e})[:6] if len(e) else []}",
+              f"/ hb {sorted({round(float(v),1) for v in b[:,8]})[:6]} "
+              f"/ {len(e)} enemy ({len(eleth)} lethal) "
+              f"hb {sorted({(round(float(r[5])),round(float(r[6]))) for r in e})[:6] if len(e) else []}",
               flush=True)
     else:
-        print(f"  run {run}: NO BULLETS recorded (boss not reached?)", flush=True)
+        print(f"  {p.name}: NO BULLETS", flush=True)
 
 
 if __name__ == "__main__":
