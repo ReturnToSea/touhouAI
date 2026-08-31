@@ -69,13 +69,14 @@ def _load_dense(npz_path):
     boss = np.nan_to_num(boss, nan=192.0)
 
     # enemies: (frame, slot, x, y, life, hbx, hby, hbz) -> dense [F, MAX_EN, 3]
-    # Only satellite sub-enemies (life == 1) with a real hitbox count as lethal
-    # bodies - they fly into the dodge space. The boss body is excluded (you can
-    # point-blank PCB bosses); revisit if transfer suggests otherwise.
+    # Lethal = the small satellite orbs: hitbox x in (0.5, 15]. Excludes the
+    # 0x0 Lingering-Cold orbs (harmless) and the big 24-64 boss box (Letty's
+    # life field reads 1 early in the fight, so filter on hitbox size not life;
+    # point-blanking PCB bosses is legit anyway).
     en = np.full((F, MAX_EN, 3), np.nan, np.float32)
     if "enemies" in d and len(d["enemies"]):
         e = d["enemies"]
-        lethal_all = e[(e[:, 4] == 1) & (e[:, 5] > 0.5)]
+        lethal_all = e[(e[:, 5] > 0.5) & (e[:, 5] <= 15.0)]
         ef = lethal_all[:, 0].astype(np.int64)
         ef -= int(e[:, 0].min())
         ef = np.clip(ef, 0, F - 1)
