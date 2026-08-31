@@ -1,0 +1,36 @@
+/* th07 Agent Handbook — palette + type tuning over mkdocs-material.
+   cherry accent (PCB); mono headings (the "machine-extracted" identity). */
+
+:root {
+  --md-primary-fg-color:        #c1367b;
+  --md-primary-fg-color--light: #d1568f;
+  --md-primary-fg-color--dark:  #a12c66;
+  --md-accent-fg-color:         #17788f;
+}
+
+[data-md-color-scheme="slate"] {
+  --md-primary-fg-color:  #ee6ea0;
+  --md-accent-fg-color:   #67c8e2;
+  --md-default-bg-color:  hsl(222, 22%, 6%);
+  --md-code-bg-color:     hsl(222, 24%, 9%);
+}
+
+.md-typeset h1,
+.md-typeset h2,
+.md-typeset h3,
+.md-typeset h4 {
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
+  font-weight: 600;
+  letter-spacing: -0.005em;
+}
+.md-typeset h1 { font-weight: 700; }
+
+/* uppercase mono labels in tables read as data, not prose */
+.md-typeset table:not([class]) th {
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
+  font-size: .72rem;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+}
+
+.md-typeset .md-content__button { opacity: .5; }

@@ -52,3 +52,6 @@ tools/th07_ecl/*.dat
 runs/
 sim/fights/
 tools/th07_ecl/pytouhou_ref/
+
+# mkdocs build output
+/site/

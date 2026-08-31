@@ -1,0 +1,3 @@
+# Docs site — build with `mkdocs serve` (local preview) or `mkdocs build`.
+# Pulls in mkdocs + pymdown-extensions.
+mkdocs-material>=9.5,<10

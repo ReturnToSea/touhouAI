@@ -1,0 +1,88 @@
+site_name: th07 Agent Handbook
+site_description: >-
+  Technical reference and postmortem for the Touhou 7 (Perfect Cherry Blossom)
+  reinforcement-learning agent.
+site_url: https://returntosea.github.io/touhouAI/
+repo_url: https://github.com/ReturnToSea/touhouAI
+repo_name: ReturnToSea/touhouAI
+edit_uri: edit/main/docs/
+docs_dir: docs
+site_dir: site
+copyright: "working draft"
+
+theme:
+  name: material
+  language: en
+  palette:
+    - media: "(prefers-color-scheme)"
+      toggle:
+        icon: material/brightness-auto
+        name: "Theme: follow system"
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: pink
+      accent: pink
+      toggle:
+        icon: material/brightness-7
+        name: "Theme: light"
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: pink
+      accent: pink
+      toggle:
+        icon: material/brightness-4
+        name: "Theme: dark"
+  font:
+    text: IBM Plex Sans
+    code: IBM Plex Mono
+  features:
+    - navigation.instant
+    - navigation.tracking
+    - navigation.sections
+    - navigation.indexes
+    - navigation.top
+    - toc.follow
+    - content.code.copy
+    - content.action.edit
+    - search.suggest
+    - search.highlight
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - md_in_html
+  - tables
+  - footnotes
+  - pymdownx.details
+  - pymdownx.superfences
+  - pymdownx.inlinehilite
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.keys
+  - pymdownx.smartsymbols
+  - toc:
+      permalink: true
+
+extra_css:
+  - stylesheets/extra.css
+
+plugins:
+  - search
+
+nav:
+  - Overview: index.md
+  - "Part I — The game":
+      - "2 · Reverse-engineering th07": re.md
+      - "3 · Collision": collision.md
+      - "4 · The ECL": ecl.md
+  - "Part II — The harness":
+      - "5 · The control hook": hook.md
+      - "6 · The observation": obs.md
+      - "7 · The environment": env.md
+  - "Part III — Training":
+      - "8 · The GPU danmaku sim": sim.md
+      - "9 · Recording real fights": recording.md
+      - "10 · PPO": ppo.md
+  - "Part IV":
+      - "11 · Dead ends & lessons": dead-ends.md
+      - "12 · Address reference": reference.md
