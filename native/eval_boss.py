@@ -88,9 +88,10 @@ def main():
         if not in_fight:
             print(f"  ep {ep}: never reached boss #{args.which}", flush=True)
             continue
-        # hand over to the test policy, time the fight
+        # hand over to the test policy, time the fight (Letty dodge-only runs
+        # ~179s to the natural end, so give the window room to see a real clear)
         fstart, nf = step, 0
-        while step < fstart + 9000:
+        while step < fstart + 11400:
             obs, r, term, trunc, info = env.step(_mask(int(test.act(obs))))
             step += 1
             b = boss_state(pm)
