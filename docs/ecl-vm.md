@@ -11,8 +11,10 @@ change. The VM replaces *where the bullet positions come from*, nothing else.
 !!! note "What we already have"
     - All six PCB stage ECLs decompiled (`tools/th07_ecl/`), Letty isolated, the
       opcode map `th07.eclm`
-    - A VM skeleton (`sim/ecl_vm.py` + `ecl_parse/expand/bullet`) from the
-      [first attempt](de-ecl-vm.md)
+    - **`sim/ecl/` — the binary parser (Part 1), verified against thtk on every
+      instruction in the game**
+    - A dead VM skeleton (`sim/ecl_vm.py` + `ecl_parse/expand/bullet`) from the
+      [first attempt](de-ecl-vm.md), kept for reference only
     - PyTouhou's TH06 VM as reference (`pytouhou_ref/eclrunner.py`, ~90% opcode
       overlap)
     - The [DLL hook](hook.md) toolchain (MinHook / inject32)
@@ -34,16 +36,24 @@ Letty's decompiled script. The output at the end of Stage A is a full **spawn
 schedule** — every bullet's spawn frame, type, position, angle, speed — plus the
 boss track and sub-enemy spawns. No bullet motion yet; that is Stage B.
 
-### 1 · ECL binary parser · ~1 day · autonomy 95%
+### 1 · ECL binary parser · ✅ done
 
-Port PyTouhou's `formats/ecl.py`. Read `ecldata2.ecl` → header, sub-table, and
-per-sub instruction lists of `(time, opcode, rank_mask, param bytes)`. Parse the
-binary, not our text decompile — no decompiler ambiguity.
+`sim/ecl/` — parses `ecldataN.ecl` straight from the binary into subs,
+timelines, and typed instructions, with no dependency on thtk's text output.
 
-- **Concern:** PCB's ECL header has minor layout differences from EoSD's — a
-  couple hours of byte-fiddling if field offsets shifted.
-- **Verify:** round-trip against `thtk`'s decompile — same sub count, same
-  instruction count per sub, 20 hand-picked instructions decode identically.
+The PCB header does differ from EoSD's: `u16 sub_count`, `u16 timeline_count`,
+a **fixed 0x40-byte** timeline-offset area (EoSD packs it), then the sub-offset
+table at `0x44`. The instruction header is `i32 time · u16 opcode · u16 size ·
+u8 (reserved) · u8 rank_mask · u16 param_mask`; `rank_mask` gates difficulty
+(`E N H L` = bits 0–3). Two things PyTouhou's TH06 reader doesn't cover:
+`bullet_*` / `laser_*` / `anm_set_poses` pack two `int16`s into their first
+slot, and string parameters (spellcard names) are **XOR 0xAA** shift-jis.
+
+- **Verify** (`python -m sim.ecl.verify`): decompile all six stage ECLs +
+  extra + phantasm with `thecl -r`, parse the binaries, compare every
+  instruction. **19,919 / 19,919 instructions match** — time, opcode, rank,
+  every argument, jump-target resolution, and decrypted strings, across all 8
+  files, 0 mismatches.
 
 ### 2 · VM core — control flow · ~2 days · autonomy 90%
 
