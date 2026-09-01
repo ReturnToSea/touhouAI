@@ -3,6 +3,15 @@
 Train a dodging + shooting policy in a fast made-up-danmaku environment on the
 GPU, then transfer it to the real game. Uses the `.venv-cuda` venv (CUDA PyTorch).
 
+> **`sim/ecl/`** is a separate, current effort — a from-scratch VM that runs
+> each boss's real PCB bytecode to *generate* danmaku, since both the
+> made-up-danmaku sim here and the recorded-replay sim (`fight_replay.py`)
+> plateau on transfer. Parser + control-flow VM + spawn emission + movement are
+> done and verified; bullet motion is next. See
+> [`../docs/ecl-vm.md`](../docs/ecl-vm.md) and `python -m sim.ecl.vm_verify`.
+> (The old `ecl_vm.py` / `ecl_parse.py` / `ecl_bullet.py` are the shelved first
+> attempt — kept for reference, not used.)
+
 Motivation: after ~10 from-scratch runs on the live game (PPO and evolution),
 policies plateaued at "freeze in a safe-ish spot". The live game gives one
 scalar of feedback per ~20 s episode at ~1000× real-time — too weak/slow for a

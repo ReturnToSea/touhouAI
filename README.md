@@ -5,33 +5,51 @@ as "survive + score on Stage 1 Lunatic"; **Stage 1 is now solved** (a sim-traine
 policy clears the stage, reaches + usually beats Letty, ~238 s greedy) and the
 goal is a **full Lunatic 1-credit clear**.
 
-## Current direction (2026-08)
+## Current direction (2026-09)
 
-The GPU made-up-danmaku sim (track 2 below) gets a policy through Stage 1 but
-tops out around Stage 2–3 on transfer — generic dodging isn't enough for the
-hand-authored Stage 4–6 spellcards.
+Both simulator approaches — the made-up-danmaku sim (track 2 below) and a
+recorded-replay sim — plateau in the same place: they train on a **fixed
+artefact** (procedural patterns with no real boss structure, or ~20 recordings
+and their symmetries) that the policy learns to exploit in ways the sim eval
+can't see. `fight_letty_seg` v9 ran a full billion steps on replayed Letty and
+got a **7 % real kill-rate** (bimodal, no trend) — the ceiling.
+Full write-up: [`docs/de-letty-replay.md`](docs/de-letty-replay.md),
+[`docs/ceiling.md`](docs/ceiling.md).
 
-- **Real-game PPO fine-tuning** — built (`native/ST_ROLLOUT` runs whole
-  trajectories in the DLL at ~68×/env, `train_ppo_dll.py`, `sb3_bridge.py`).
-  Result: fine-tuning on Stage 1 was a **wash** (238 s → 223 s greedy) — the sim
-  policy is already at the ceiling for content it can handle; PPO only helps
-  where the policy is *failing*.
-- **Import the real boss patterns** — the live path forward.
-  - ECL decompilation (`tools/th07_ecl/`, thtk) gives the boss *scripts*; a CPU
-    ECL VM (`sim/ecl_vm.py`) reconstructs them, but TH07's engine semantics
-    aren't documented well enough to be faithful without weeks of RE.
-  - **Recording the real game instead** (`native/record_boss_driven.py`): the
-    `zBullet` struct holds each bullet's exact velocity + effect state, so
-    reading it every frame captures the real pattern with no interpretation.
-    `sim/fight_replay.py` (`FightSim`) replays those recordings on the GPU at
-    ~66k steps/s; `sim/train_fight.py` trains on them.
-  - **Cirno PoC**: a policy trained on 10 replayed Cirno recordings and a
-    made-up-danmaku policy **both** clear the real Cirno fight dodge-only
-    (~66 s) — no measurable gain, because Cirno is easy enough that generic
-    dodging already handles her. The real test needs a boss the sim policy
-    fails (Stage 2+). Pipeline works; harder target needed.
+**The plan now:** *generate* the danmaku — run each boss's actual PCB bytecode
+so every episode is a novel, correct pattern. `sim/ecl/` is a from-scratch ECL
+VM:
 
-See `sim/README.md` and the memory notes for the detailed history.
+- **binary parser** — decodes every stage's `.ecl`; 19,919 / 19,919
+  instructions match thtk (`python -m sim.ecl.verify`)
+- **control-flow VM** — runs Letty's real script frame by frame: the phase
+  machine (NS1 → Lingering Cold → NS2 → Table-Turning → defeat) lands on the
+  recorded screen-clears, arithmetic + a PRNG, recursion into her sub-enemies,
+  and movement — the boss's own track is **pixel-exact against a recording for
+  127 frames** (`python -m sim.ecl.vm_verify`)
+- **bullet spawn events** come out the other end (frame, type, position, angle,
+  speed) within a few percent of the recorded birth counts
+
+Six of eight Stage-A parts done. Bullet *motion* is Stage B — hooking `th07.exe`
+and measuring, not interpreting `bullet_effects` statically. Full plan + status:
+[`docs/ecl-vm.md`](docs/ecl-vm.md).
+
+Everything downstream — collision, the 236-value obs, PPO, the real-game
+transfer daemon — is unchanged; the VM only replaces *where the bullet positions
+come from*.
+
+<details><summary>Earlier tracks (kept, moved on from)</summary>
+
+- **Real-game PPO fine-tuning** — built (`native/ST_ROLLOUT`, `train_ppo_dll.py`).
+  Fine-tuning Stage 1 was a **wash** (238 s → 223 s greedy) — the sim policy is
+  already at the ceiling for content it can handle.
+- **Recording real boss fights** (`native/record_boss_driven.py` →
+  `sim/fight_replay.py` `FightSim`): reading the `zBullet` struct each frame
+  captures the real pattern with no interpretation. Landed the first real *kills*
+  on a boss, then hit the ceiling above. The recordings are now the VM's
+  validation ground truth.
+
+</details>
 
 - **Perception:** read game state from process memory — exact player / bullet /
   enemy / boss / score data, no computer vision.
@@ -177,8 +195,10 @@ train_ppo_dll.py  PPO fine-tuning on the real game via ST_ROLLOUT
 watch.py        replay a checkpoint in a visible window
 sim/          GPU danmaku sim + PPO/ES + sim-to-real transfer
   danmaku.py, train.py    the made-up-danmaku sim + trainer (ppo_v12..v29)
-  ecl_parse.py, ecl_vm.py, ecl_bullet.py    CPU ECL decompile -> interpreter
-  fight_replay.py (FightSim), train_fight.py, fight_viz.py   replay recorded real fights
-tools/th07_ecl/   thtk-decompiled th07 ECL + the annotate/opcode-map helpers
+  fight_replay.py (FightSim), train_fight.py   replay recorded real fights (fight_letty_seg)
+  ecl/          the ECL VM: parser.py, vm.py, rng.py, opcodes.py, *_verify.py
+  ecl_vm.py, ecl_parse.py, ecl_bullet.py    the shelved first ECL attempt (kept for reference)
+tools/th07_ecl/   thtk-decompiled th07 ECL, the opcode map, and its README
+docs/             the handbook (mkdocs) — plan, results, and everything tried
 feasibility/  early proof-of-concept notes
 ```
