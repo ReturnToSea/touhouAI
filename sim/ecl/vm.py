@@ -93,6 +93,7 @@ class BulletSpawn:
     aimed: bool
     effect: tuple | None      # the bullet_effects args in force at spawn
     source_sub: int
+    source_ip: int = -1       # instruction index within source_sub that fired it
 
 
 class Enemy:
@@ -271,7 +272,7 @@ class VM:
             e.z = m.cz
 
     # -- Part 5: bullet spawning & sub-enemies ---------------------------
-    def _emit_bullets(self, e: Enemy, kind: str, args: list) -> None:
+    def _emit_bullets(self, e: Enemy, kind: str, args: list, source_ip: int = -1) -> None:
         # bullet_{fan,circle,random}[_aimed](t1, t2, count, layers, spd1, spd2,
         #                                    base_angle, span, flags)
         _, _, count, layers, spd1, spd2, base, span, flags = (e.get(a) for a in args)
@@ -301,7 +302,7 @@ class VM:
             self.bullets.append(BulletSpawn(
                 frame=self.frame, kind=k, btype=btype, x=sx, y=sy,
                 angle=ang, speed=sp, aimed=aimed, effect=e.pending_effect,
-                source_sub=e.sub))
+                source_sub=e.sub, source_ip=source_ip))
 
     def _spawn_child(self, parent: Enemy, sub: int, dx: float, dy: float, dz: float) -> None:
         if len(self.enemies) + len(self._pending_children) >= self.max_children:
@@ -596,7 +597,7 @@ _BULLET_KIND = {
 
 @_op(*_BULLET_KIND)
 def _bullet(vm, e, ins):
-    vm._emit_bullets(e, _BULLET_KIND[ins.opcode], ins.args)
+    vm._emit_bullets(e, _BULLET_KIND[ins.opcode], ins.args, source_ip=ins.index)
 
 
 @_op(79)  # bullet_effects(...) — attaches to the next spawn (Stage B models it)
