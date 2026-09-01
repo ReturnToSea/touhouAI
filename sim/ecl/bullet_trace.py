@@ -22,8 +22,9 @@ from pathlib import Path
 
 import numpy as np
 
-# recorded `bullets` columns
+# recorded `bullets` columns — 0-9 always present, 10-16 added for the motion models
 STEP, SLOT, X, Y, VX, VY, CLS, FXF, HBX, HBY = range(10)
+SPEED, ACCEL, ANGVEL, ANGLE, FXP1, FXP2, FXINT = range(10, 17)
 
 
 @dataclass
@@ -36,6 +37,7 @@ class Bullet:
     frames: np.ndarray      # int32 [n]
     xy: np.ndarray          # float32 [n, 2]
     vel: np.ndarray         # float32 [n, 2]
+    motion: np.ndarray | None = None   # float32 [n, 7]: speed,accel,angvel,angle,fxp1,fxp2,fxint (if recorded)
 
     @property
     def life(self) -> int:
@@ -43,10 +45,14 @@ class Bullet:
 
     @property
     def speed(self) -> np.ndarray:
+        if self.motion is not None:
+            return self.motion[:, 0]
         return np.hypot(self.vel[:, 0], self.vel[:, 1])
 
     @property
     def angle(self) -> np.ndarray:
+        if self.motion is not None:
+            return self.motion[:, 3]
         return np.arctan2(self.vel[:, 1], self.vel[:, 0])
 
 
@@ -73,6 +79,8 @@ def load_traces(npz_path: str | Path) -> list[Bullet]:
     for i in range(len(b)):
         row_by_frame.setdefault(int(frame[i]), {})[int(slot[i])] = i
 
+    has_motion = b.shape[1] >= 17
+
     def _finish(sl: int) -> None:
         rows = active.pop(sl)
         active_prev_frame.pop(sl, None)
@@ -84,6 +92,7 @@ def load_traces(npz_path: str | Path) -> list[Bullet]:
             frames=(seg[:, STEP] - f0).astype(np.int32),
             xy=seg[:, X:Y + 1].astype(np.float32),
             vel=seg[:, VX:VY + 1].astype(np.float32),
+            motion=seg[:, SPEED:FXINT + 1].astype(np.float32) if has_motion else None,
         ))
         next_id += 1
 

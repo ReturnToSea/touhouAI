@@ -252,13 +252,25 @@ trajectories `(frame, x, y, vx, vy)` + birth class / fx flag.
   measurably decelerate (median speed 1.8 → 1.2 px/f over 60 frames); `fx=0`
   bullets hold speed. ~15,200 bullets per fight.
 
-!!! note "One recorder tweak still worth doing"
-    The current recordings log `x, y, vx, vy, class, fx` per bullet. Adding
-    `speed`, `angle`, `accel`, `angvel` (`+0xBB0…0xBBC`, all RE'd) and the
-    `bullet_effects` params `p1/p2/interval` (`+0xC2C…0xC34`) makes the
-    per-frame physics fully explicit rather than derived — ~5 lines in
-    `record_boss_driven.py` and one re-record. Not blocking Part 10, but it
-    makes the motion fit exact instead of inferred.
+!!! success "Recorder now logs the full motion state"
+    `record_boss_driven.py`'s per-bullet row grew from 10 columns to 17:
+    added `speed`, `accel`, `angvel`, `angle` (`+0xBB0…0xBBC`) and the
+    `bullet_effects` params `p1/p2/interval` (`+0xC2C…0xC34`). Re-recorded three
+    Letty fights and checked the new fields:
+
+    - `angle` matches `atan2(vy, vx)` **exactly** (median 0, max 0 over 2 M rows)
+    - `fx_p2` is **exactly −999** ("keep speed") and `fx_interval` is **exactly
+      `{60, 120}`** — the literal values from `bullet_effects(…, 60/120, …, −999)`
+      in Letty's script; `fx_p1` holds `{+0.00833, −0.025, +0.01667}`, each
+      traceable to a specific `bullet_effects` call
+    - `speed` matches `hypot(vx, vy)` for steady bullets and leads/lags it
+      during acceleration — it's the engine's scalar-speed variable; Part 10
+      uses `hypot(vx, vy)` as the authoritative per-frame speed
+    - `accel` / `angvel` (`+0xBB4/8`) are zero for every Letty bullet — her
+      speed changes go through the `fx` mechanism, not those fields. Kept in the
+      schema (cost nothing) but unverified until a boss that uses them
+
+    Letty has **no delay bullets** — every bullet moves the frame it spawns.
 
 ### 10 · Per-type motion models · ~2–3 days · autonomy 90% (next)
 

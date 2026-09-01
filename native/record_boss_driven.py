@@ -1,6 +1,11 @@
 """Launch a hooked th07, drive it with a sim policy until a boss is on screen,
-then record the fight frame-by-frame (every live bullet's x,y,vx,vy,class,fxflag
-+ boss + player). Reliable - the hook keeps the game ticking.
+then record the fight frame-by-frame. Reliable - the hook keeps the game ticking.
+
+Per live bullet, per frame (the `bullets` array, one row each):
+    0 step  1 slot  2,3 x,y  4,5 vx,vy  6 class  7 fx_flag  8,9 hitbox_x,y
+    10 speed  11 accel  12 ang_vel  13 angle  14,15,16 bullet_effects p1/p2/interval
+Offsets are all in native/th07_addrs.h. Cols 0-9 are stable (older recordings
+have only those); 10-16 were added for the ECL-VM motion models.
 
     .venv/Scripts/python native/record_boss_driven.py cirno   [--secs 60]
     .venv/Scripts/python native/record_boss_driven.py letty   --secs 90
@@ -25,17 +30,25 @@ from policy import MLPPolicy        # noqa: E402
 BM_BASE = 0x0062F958 + 0x0000B8C0
 BM_STRIDE, BM_MAX = 0x00000D68, 0x401
 B_HITBOX, B_POS, B_VEL, B_CLASS, B_STATE, B_FXFLAG = 0xB7C, 0xB8C, 0xB98, 0xB8A, 0xBFC, 0xC3C
+#   full motion state (all in th07_addrs.h, offsets verified via probe_bullet_motion):
+B_SPEED, B_ACCEL, B_ANGVEL, B_ANGLE = 0xBB0, 0xBB4, 0xBB8, 0xBBC
+B_FX_P1, B_FX_P2, B_FX_INT = 0xC2C, 0xC30, 0xC34   # bullet_effects: redirect angle/accel, redirect speed (-999=keep), interval
 LIVE = (1, 2, 3, 4, 5)
+NBCOL = 17                        # width of a per-bullet row (see the assembly below)
 
 # one strided view over the whole bullet pool - lets us pull every live bullet
 # per frame with numpy instead of 1025 x N struct.unpack_from calls (~10x faster,
 # which is most of the recording-time cost).
 BULLET_DT = np.dtype({
-    "names":    ["cls", "hb", "pos", "vel", "state", "fxf"],
-    "formats":  ["<i2", "<2f4", "<2f4", "<2f4", "<u2", "<i4"],
-    "offsets":  [B_CLASS, B_HITBOX, B_POS, B_VEL, B_STATE, B_FXFLAG],
+    "names":    ["cls", "hb", "pos", "vel", "state", "fxf",
+                 "speed", "accel", "angvel", "angle", "fxp1", "fxp2", "fxint"],
+    "formats":  ["<i2", "<2f4", "<2f4", "<2f4", "<u2", "<i4",
+                 "<f4", "<f4", "<f4", "<f4", "<f4", "<f4", "<i4"],
+    "offsets":  [B_CLASS, B_HITBOX, B_POS, B_VEL, B_STATE, B_FXFLAG,
+                 B_SPEED, B_ACCEL, B_ANGVEL, B_ANGLE, B_FX_P1, B_FX_P2, B_FX_INT],
     "itemsize": BM_STRIDE,
 })
+assert B_FX_INT + 4 <= BM_STRIDE
 
 EM = 0x009A9B00
 EM_ENEMIES, EM_STRIDE, EM_MAX = 0x00004F50, 0x00004F48, 0x1E1
@@ -162,7 +175,7 @@ def _record_one(env, pm, pol, boss, args, out, run):
                     (pos[:, 1] > -100) & (pos[:, 1] < 580))
             sel = np.nonzero(keep)[0]
             if sel.size:
-                fr = np.empty((sel.size, 10), np.float32)
+                fr = np.empty((sel.size, NBCOL), np.float32)
                 fr[:, 0] = step
                 fr[:, 1] = sel
                 fr[:, 2:4] = pos[sel]
@@ -170,6 +183,13 @@ def _record_one(env, pm, pol, boss, args, out, run):
                 fr[:, 6] = arr["cls"][sel]
                 fr[:, 7] = arr["fxf"][sel]
                 fr[:, 8:10] = arr["hb"][sel]          # AABB full size (x, y)
+                fr[:, 10] = arr["speed"][sel]         # cols 10-16: full motion state
+                fr[:, 11] = arr["accel"][sel]
+                fr[:, 12] = arr["angvel"][sel]
+                fr[:, 13] = arr["angle"][sel]         # radians
+                fr[:, 14] = arr["fxp1"][sel]          # bullet_effects redirect angle / accel
+                fr[:, 15] = arr["fxp2"][sel]          # bullet_effects redirect speed (-999 = keep)
+                fr[:, 16] = arr["fxint"][sel]         # bullet_effects interval / duration
                 frames.append(fr)
 
             # satellite sub-enemies (Letty's orbs etc.) - they contact-kill the
@@ -214,7 +234,7 @@ def _record_one(env, pm, pol, boss, args, out, run):
 
 
 def _save(out, args, run, which, frames, enemyframes, bosslog, playerlog):
-    b = np.concatenate(frames) if frames else np.zeros((0, 10), np.float32)
+    b = np.concatenate(frames) if frames else np.zeros((0, NBCOL), np.float32)
     e = np.concatenate(enemyframes) if enemyframes else np.zeros((0, 8), np.float32)
     stem = BOSS_NAME.get(which, f"b{which}")
     if len(args.which_list) == 1:
