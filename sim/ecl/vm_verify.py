@@ -89,23 +89,25 @@ def test_control_flow() -> bool:
     e = _run_sub(ecl, 0, 2)
     ok &= _check("conditional jump on DIFFICULTY", e.ivars[0] == 7, f"I0={e.ivars[0]}")
 
-    # call / ret: args pass through a shared gvar (10029), I0..I7 are snapshotted
+    # call / ret: caller's ARG_A maps to the callee's PARAM_A; locals are restored
     ecl = _synthetic_ecl({
-        0: [
-            _instr(0, 4, __V(10029), 5),        # PARAM_A = 5   (shared)
-            _instr(0, 41, 1),                    # call Sub1
-            _instr(0, 4, __V(10001), __V(10030)),  # I1 = PARAM_B  (Sub1's "return")
-        ],
-        1: [
-            _instr(0, 4, __V(10030), __V(10029)),  # PARAM_B = PARAM_A
-            _instr(0, 4, __V(10000), 99),          # I0 = 99  (local; discarded on ret)
-            _instr(0, 42),
-        ],
+        0: [_instr(0, 4, __V(10037), 4), _instr(0, 41, 1)],
+        1: [_instr(0, 4, __V(10000), __V(10029)),          # I0 = PARAM_A (=4)
+            _instr(0, 65, 0, 0, __V(10000), 1, 1.0, 1.0, 0.0, 0.1, 42),  # fire I0 bullets
+            _instr(0, 4, __V(10000), 99), _instr(0, 42)],
     })
-    e = _run_sub(ecl, 0, 2)
-    ok &= _check("call / ret (shared args, snapshotted locals)",
-                 e.ivars[1] == 5 and e.ivars[0] == 0,
-                 f"I1={e.ivars[1]} I0={e.ivars[0]}")
+    e = _run_sub(ecl, 0, 1)
+    ok &= _check("call maps ARG_A -> callee PARAM_A", len(e.vm.bullets) == 4,
+                 f"{len(e.vm.bullets)} bullets")
+
+    ecl = _synthetic_ecl({
+        0: [_instr(0, 4, __V(10000), 1), _instr(0, 41, 1),
+            _instr(0, 4, __V(10001), __V(10000))],   # I1 = I0 (still 1 if locals restored)
+        1: [_instr(0, 4, __V(10000), 99), _instr(0, 42)],
+    })
+    e = _run_sub(ecl, 0, 1)
+    ok &= _check("call / ret restores caller locals", e.ivars[1] == 1 and e.ivars[0] == 1,
+                 f"I0={e.ivars[0]} I1={e.ivars[1]}")
 
     # wait: an instruction gated to a later frame does not run early
     ecl = _synthetic_ecl({0: [
@@ -209,20 +211,39 @@ def test_letty(path: Path) -> bool:
     missed = (control_ops | math_ops) & set(vm.unhandled)
     ok &= _check("no control-flow / arithmetic opcode unhandled", not missed, f"{missed}")
 
-    # Sub40: the NS1 spawner fires three sub-enemies 120 deg apart
-    vm2 = VM(ecl, difficulty=3)
-    e = Enemy(vm2, 40, is_boss=True)
-    vm2.enemies.append(e)
-    angles: list[float] = []
+    # Sub40: the spawner fires three sub-enemies 120 deg apart (after its call(2))
     import sim.ecl.vm as _M
+    saved = _M._HANDLERS.get(93)
+    angles: list[float] = []
     _M._HANDLERS[93] = lambda vm, en, ins: angles.append(en.extra.get(10033, 0.0))
-    vm2._run_enemy(e)
-    for _ in range(4):
-        vm2.step()
+    try:
+        vm2 = VM(ecl, difficulty=3)
+        e = Enemy(vm2, 40, is_boss=True)
+        vm2.enemies.append(e)
+        vm2._run_enemy(e)
+        for _ in range(200):
+            vm2.step()
+    finally:
+        _M._HANDLERS[93] = saved
     want = [0.0, 2 * math.pi / 3, -2 * math.pi / 3]
-    ok &= _check("Sub40 spawns 3 enemies 120 apart",
+    ok &= _check("Sub40 spawns 3 sub-enemies 120 apart",
                  len(angles) == 3 and all(abs(a - w) < 1e-4 for a, w in zip(angles, want)),
                  f"{[round(a, 4) for a in angles]}")
+
+    # bullet spawn-event counts per phase vs the recordings (sim/fights/letty_*)
+    vm3 = VM(ecl, difficulty=3, seed=20240901)
+    vm3.start_boss(31, interrupt=0)
+    vm3.run(11000)
+    got = vm3.bullets_per_phase([f for f, _s in vm3.phase_transitions()][:4])
+    recorded = [2115, 2861, 2563, 7658]          # mean births/phase, 10 recordings
+    names = ["NS1", "Lingering Cold", "NS2", "Table-Turning"]
+    for name, g, r in zip(names, got, recorded):
+        err = (g - r) / r
+        ok &= _check(f"{name:15} spawn count ~{r}", abs(err) <= 0.22,
+                     f"got {g} ({err:+.0%})")
+    tot_err = (sum(got) - sum(recorded)) / sum(recorded)
+    ok &= _check("total spawn count within 12%", abs(tot_err) <= 0.12,
+                 f"{sum(got)} vs {sum(recorded)} ({tot_err:+.0%})")
     return ok
 
 

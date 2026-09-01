@@ -42,6 +42,9 @@ _CMP = {
 }
 
 
+_ARG_LO, _PARAM_LO, _ARG_N = 10037, 10029, 8   # ARG_A..ARG_N -> PARAM_A..PARAM_N
+
+
 @dataclass
 class _CallFrame:
     sub: int
@@ -49,6 +52,23 @@ class _CallFrame:
     frame: int
     ivars: list
     fvars: list
+    extra: dict
+
+
+@dataclass
+class BulletSpawn:
+    """One spawn event — a bullet coming into existence. Motion (delay, accel,
+    curve from `effect`) is Stage B; here we record the launch parameters."""
+    frame: int
+    kind: str                 # "fan" | "circle" | "random"
+    btype: int                # bullet graphic/type id (the last opcode arg)
+    x: float
+    y: float
+    angle: float              # launch angle (rad); toward the player if aimed
+    speed: float
+    aimed: bool
+    effect: tuple | None      # the bullet_effects args in force at spawn
+    source_sub: int
 
 
 class Enemy:
@@ -81,10 +101,14 @@ class Enemy:
         self.interrupts: dict[int, int] = {}
         self.pending_interrupt: int | None = None
 
+        self.shoot_offset = (0.0, 0.0, 0.0)
+        self.pending_effect: tuple | None = None    # last bullet_effects, attached to the next spawn
+
         # execution state
         self.sub = sub
         self.ip = 0
         self.frame = 0                  # per-sub instruction-time gate
+        self.wait_count = 0             # wait(N): freeze `frame` for N frames
         self.stack: list[_CallFrame] = []
         self.running = True
 
@@ -167,6 +191,9 @@ class VM:
         self.enemies: list[Enemy] = []
         self.trace: list[tuple[int, str, str]] = []
         self.unhandled: dict[int, str] = {}
+        self.bullets: list[BulletSpawn] = []       # the Part 5 spawn schedule
+        self._pending_children: list[Enemy] = []
+        self.max_children = 4000
 
     # -- public ----------------------------------------------------------
     def start_boss(self, sub: int, interrupt: int | None = None) -> Enemy:
@@ -190,13 +217,70 @@ class VM:
             if e.alive:
                 self._run_enemy(e)          # execute this frame, then e.frame += 1
             e.time += 1
+        if self._pending_children:
+            self.enemies.extend(self._pending_children)
+            self._pending_children = []
         self.enemies = [e for e in self.enemies if e.alive and not e.removed]
         self.frame += 1
+
+    # -- Part 5: bullet spawning & sub-enemies ---------------------------
+    def _emit_bullets(self, e: Enemy, kind: str, args: list) -> None:
+        # bullet_{fan,circle,random}[_aimed](t1, t2, count, layers, spd1, spd2,
+        #                                    base_angle, span, flags)
+        _, _, count, layers, spd1, spd2, base, span, flags = (e.get(a) for a in args)
+        count = max(0, int(count))
+        layers = max(1, int(layers))
+        btype = int(flags)
+        aimed = kind.endswith("_aimed")
+        k = "fan" if kind.startswith("fan") else ("circle" if kind.startswith("circle") else "random")
+        ox, oy, _oz = e.shoot_offset
+        sx, sy = e.x + ox, e.y + oy
+        if aimed:
+            base = base + math.atan2(self.player_y - sy, self.player_x - sx)
+        n = count * layers
+        lo, hi = min(base, span), max(base, span)     # bullet_random: base/span are hi/lo
+        for i in range(n):
+            layer = i // max(1, count)
+            idx = i % max(1, count)
+            if k == "random":
+                ang = self.rng.rand_range(lo, hi)      # fresh direction per bullet
+                sp = spd1 + spd2 * self.rng.rand()     # spd2 is the speed variance
+            elif k == "circle":
+                ang = base + (2 * math.pi) * idx / max(1, count)
+                sp = spd1 + (spd2 - spd1) * (layer / max(1, layers - 1) if layers > 1 else 0)
+            else:  # fan
+                ang = base + span * (idx - (count - 1) / 2)
+                sp = spd1 + (spd2 - spd1) * (layer / max(1, layers - 1) if layers > 1 else 0)
+            self.bullets.append(BulletSpawn(
+                frame=self.frame, kind=k, btype=btype, x=sx, y=sy,
+                angle=ang, speed=sp, aimed=aimed, effect=e.pending_effect,
+                source_sub=e.sub))
+
+    def _spawn_child(self, parent: Enemy, sub: int, dx: float, dy: float, dz: float) -> None:
+        if len(self.enemies) + len(self._pending_children) >= self.max_children:
+            return
+        c = Enemy(self, sub, is_boss=False)
+        c.x, c.y, c.z = parent.x + dx, parent.y + dy, parent.z + dz
+        c.extra = dict(parent.extra)          # inherit PARAM_*/ARG_* snapshot
+        self._run_enemy(c)                     # child's frame-0 block runs immediately
+        self._pending_children.append(c)
 
     def phase_transitions(self) -> list[tuple[int, int]]:
         """(frame, sub) for every phase-machine sub entry — the Part 2 verify view."""
         return [(f, int(d.split("Sub", 1)[1].split()[0]))
                 for f, ev, d in self.trace if ev == "enter_sub"]
+
+    def bullets_per_phase(self, boundaries: list[int]) -> list[int]:
+        """Spawn-event counts bucketed by frame into [b0,b1), [b1,b2), ... — the
+        Part 5 verify view. `boundaries` is the list of phase-start frames."""
+        edges = list(boundaries) + [10**9]
+        counts = [0] * (len(edges) - 1)
+        for b in self.bullets:
+            for i in range(len(counts)):
+                if edges[i] <= b.frame < edges[i + 1]:
+                    counts[i] += 1
+                    break
+        return counts
 
     # -- internals -----------------------------------------------------
     def _emit(self, kind: str, detail: str = "") -> None:
@@ -207,6 +291,11 @@ class VM:
             return
         e.time = 0
         e.timer_thresh = None
+        for other in self.enemies:               # phase transition = screen clear
+            if not other.is_boss and other is not e:
+                other.alive = False
+                other.removed = True
+        self._pending_children.clear()
         e.switch_to(target, reason=reason)        # frame -> 0; step() runs the new block
 
     def _service_callbacks(self, e: Enemy) -> None:
@@ -231,6 +320,9 @@ class VM:
             self._fire(e, tgt, "life_callback")
 
     def _run_enemy(self, e: Enemy) -> None:
+        if e.wait_count > 0:                            # wait(N): frame frozen
+            e.wait_count -= 1
+            return
         subs = self.ecl.subs
         guard = 0
         while e.running:
@@ -247,6 +339,8 @@ class VM:
             e.ip += 1
             if ins.time == e.frame and (ins.rank_mask & self.rank_bit or ins.rank_mask == 0):
                 self._dispatch(e, ins)
+                if e.wait_count > 0:                    # wait just started — hold `frame`
+                    return
         e.frame += 1                                   # advance the per-sub time gate
 
     def _dispatch(self, e: Enemy, ins: Instr) -> None:
@@ -309,9 +403,12 @@ def _cond_jump(vm, e, ins):
         e.frame, e.ip = t, tgt
 
 
-@_op(41)  # call(sub)
+@_op(41)  # call(sub) — snapshot locals + args; map ARG_x -> PARAM_x for the callee
 def _call(vm, e, ins):
-    e.stack.append(_CallFrame(e.sub, e.ip, e.frame, list(e.ivars), list(e.fvars)))
+    e.stack.append(_CallFrame(e.sub, e.ip, e.frame,
+                              list(e.ivars), list(e.fvars), dict(e.extra)))
+    for k in range(_ARG_N):
+        e.extra[_PARAM_LO + k] = e.extra.get(_ARG_LO + k, 0)
     e.sub, e.ip, e.frame = int(e.get(ins.args[0])), 0, 0
 
 
@@ -322,12 +419,12 @@ def _ret(vm, e, ins):
         return
     fr = e.stack.pop()
     e.sub, e.ip, e.frame = fr.sub, fr.ip, fr.frame
-    e.ivars, e.fvars = fr.ivars, fr.fvars
+    e.ivars, e.fvars, e.extra = fr.ivars, fr.fvars, fr.extra
 
 
-@_op(45)  # wait(frames)
+@_op(45)  # wait(frames) — freeze `frame` for N frames, then resume at the same time
 def _wait(vm, e, ins):
-    e.frame += int(e.get(ins.args[0]))
+    e.wait_count = max(0, int(e.get(ins.args[0])))
 
 
 # --- arithmetic (Part 3) -------------------------------------------------
@@ -438,6 +535,61 @@ def _float_time(vm, e, ins):
     # don't stall. Revisit if a boss needs the easing curve.
     if len(ins.args) >= 4:
         e.set(ins.args[0], e.get(ins.args[3]))
+
+
+# --- bullets (Part 5) --------------------------------------------------
+
+_BULLET_KIND = {
+    64: "fan_aimed", 65: "fan",
+    66: "circle_aimed", 67: "circle",
+    68: "circle_aimed", 69: "circle",      # bullet_offset_circle[_aimed]
+    70: "random", 71: "random", 72: "random",
+}
+
+
+@_op(*_BULLET_KIND)
+def _bullet(vm, e, ins):
+    vm._emit_bullets(e, _BULLET_KIND[ins.opcode], ins.args)
+
+
+@_op(79)  # bullet_effects(...) — attaches to the next spawn (Stage B models it)
+def _bullet_effects(vm, e, ins):
+    e.pending_effect = tuple(e.get(a) for a in ins.args)
+
+
+@_op(78)  # shoot_offset(x, y, z)
+def _shoot_offset(vm, e, ins):
+    e.shoot_offset = tuple(e.get(a) for a in ins.args[:3])
+
+
+@_op(73, 74, 75, 76, 80, 81, 143, 146)  # shoot_*, bullet_cancel/clear/radius, bullet_sound
+def _shoot_noop(vm, e, ins):
+    pass
+
+
+@_op(94)  # enemy_kill_all — clears every sub-enemy (spell-start screen clear)
+def _kill_all(vm, e, ins):
+    for other in vm.enemies:
+        if not other.is_boss and other is not e:
+            other.alive = False
+            other.removed = True
+    vm._pending_children.clear()
+
+
+@_op(93)  # enemy_create_rel(sub, x, y, z, ...)
+def _create_rel(vm, e, ins):
+    sub, dx, dy, dz = (e.get(a) for a in ins.args[:4])
+    vm._spawn_child(e, int(sub), dx, dy, dz)
+
+
+@_op(92)  # enemy_create_abs(sub, x, y, z, ...)
+def _create_abs(vm, e, ins):
+    sub, x, y, z = (e.get(a) for a in ins.args[:4])
+    c = e.__class__(vm, int(sub), is_boss=False)
+    c.x, c.y, c.z = x, y, z
+    c.extra = dict(e.extra)
+    vm._run_enemy(c)
+    vm._pending_children.append(c)
 
 
 # --- phase machine: callbacks & interrupts ---

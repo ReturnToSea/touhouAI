@@ -105,19 +105,31 @@ Whether PCB draws from *exactly* this stream — and the KS test of 500 VM
 `bullet_random` (Part 5) and is deferred to then. For training only the
 distribution matters, so this is low-stakes.
 
-### 5 · Spawn-event emission · ~2 days · autonomy 85%
+### 5 · Spawn-event emission · ✅ done (Lingering Cold count loose, see below)
 
-`bullet_fan[_aimed]`, `bullet_circle[_aimed]`, `bullet_random*`, `shoot_*` don't
-simulate motion — they append `(frame, type, x, y, angle, speed, aimed_flag)` to
-a list. Decode each opcode's parameter layout from `th07.eclm` + priw8.
+`bullet_{fan,circle,random}[_aimed]` append `BulletSpawn(frame, kind, btype, x,
+y, angle, speed, aimed, effect)` to `vm.bullets` — no motion (Stage B). Parameter
+layout decoded from the difficulty-scaled variants in Letty's own script: arg 0
+is the graphic group, arg 1 a sub-type, **arg 2 the count, arg 3 the layer
+count**, then two speeds, base angle, angular step, and the flags/type word.
+`bullet_effects` is recorded on each spawn for Stage B; `enemy_create_rel`
+spawns a child runner that inherits the parent's `PARAM_*` and fires its own
+bullets (a lighter version of Part 6); `enemy_kill_all` and every phase
+transition clear the sub-enemies (the screen-clear).
 
-- **Concerns:** PCB's bullet opcodes have more params than EoSD's (multi-speed,
-  extra flags) — a mis-decode = wrong count or wrong fan width. The `aimed` flag
-  has to be set for exactly the right opcodes (resolution happens per-episode on
-  the GPU later).
-- **Verify:** VM spawn-event count and timing vs the recordings' bullet-birth
-  count and timing — within ~10%, same phase-boundary frames, overlapping spawn
-  heatmap.
+Two engine details this pinned down: `wait(N)` **freezes** the per-sub frame for
+N frames rather than advancing it (otherwise every instruction after a `wait`
+gets skipped by the time gate), and `call` maps the caller's `ARG_*` onto the
+callee's `PARAM_*` and restores locals on `ret`.
+
+- **Verify** (`python -m sim.ecl.vm_verify`): VM spawn-event count per phase vs
+  the mean bullet-birth count over the ten `sim/fights/letty_*` recordings —
+  **NS1 +1 %, NS2 +1 %, Table-Turning +6 %, total +7 %**. Lingering Cold runs
+  **+18 %** — the `Sub42 → Sub43 → Sub36` orbiting-orb chain over-fires; the
+  interpretation is clearly right (the other three phases land inside 6 %) but
+  the orb fire-rate needs the frame-level check that comes with Part 10's
+  motion models. Also: Sub40 computes its three sub-enemy spawn angles
+  `0, ±2π/3`.
 
 ### 6 · Sub-enemies — `enemy_create_rel` · ~2 days · autonomy 75%
 
