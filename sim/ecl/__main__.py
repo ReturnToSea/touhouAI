@@ -34,7 +34,24 @@ def main(argv: list[str]) -> int:
     ap.add_argument("sub", nargs="?", type=int, help="sub index to dump")
     ap.add_argument("--timeline", type=int, metavar="N", help="dump timeline N instead")
     ap.add_argument("--rank", metavar="E|N|H|L", help="only show lines that run at this difficulty")
+    ap.add_argument("--run", nargs="?", const="31:0", metavar="SUB[:INT]",
+                    help="run the VM from SUB (firing interrupt INT) and print the phase trace")
+    ap.add_argument("--difficulty", type=int, default=3, help="0 Easy .. 3 Lunatic (default 3)")
+    ap.add_argument("--frames", type=int, default=15000)
     args = ap.parse_args(argv[1:])
+
+    if args.run is not None:
+        from .vm import VM
+        sub, _, intr = args.run.partition(":")
+        vm = VM(parse_file(args.ecl), difficulty=args.difficulty)
+        vm.start_boss(int(sub), interrupt=int(intr) if intr else None)
+        vm.run(args.frames)
+        for f, ev, d in vm.trace:
+            print(f"{f:7}  {ev:16} {d}")
+        if vm.unhandled:
+            print("\nunhandled opcodes:", ", ".join(
+                f"{n}({op})" for op, n in sorted(vm.unhandled.items())))
+        return 0
 
     ecl = parse_file(args.ecl)
     rank_bit = {"E": 1, "N": 2, "H": 4, "L": 8}.get((args.rank or "").upper())

@@ -55,18 +55,27 @@ slot, and string parameters (spellcard names) are **XOR 0xAA** shift-jis.
   every argument, jump-target resolution, and decrypted strings, across all 8
   files, 0 mismatches.
 
-### 2 · VM core — control flow · ~2 days · autonomy 90%
+### 2 · VM core — control flow · ✅ done
 
-The interpreter loop from `eclrunner.py`: frame counter, instruction pointer, 32
-variable slots, a call stack. Each tick, run every instruction with
-`time ≤ frame`, then advance. Implement `wait` / `stop`, `jump`, `jump_if`,
-`sub_call`, `sub_ret`, loops.
+`sim/ecl/vm.py` — runs a boss's ECL frame by frame. Instruction pointer,
+per-sub time gate, call stack (args pass through the shared `ARG_*` / `PARAM_*`
+gvars; `I0–I7` / `F0–F9` are snapshotted and restored on `ret`), difficulty
+gate on `rank_mask`, and the piece PyTouhou's TH06 runner doesn't hand you: the
+**phase machine**. Callbacks (`death_callback_sub`, `timer_callback_*`,
+`life_callback_*` / `_ex`, `enemy_interrupt_set`) persist on the enemy across
+sub switches; a spellcard timing out with no explicit timer sub falls through to
+the death callback — which is how Letty's *Lingering Cold → NS2* transition
+works even though Sub42 never names Sub39.
 
-- **Concerns:** PCB renumbered a few flow opcodes vs EoSD (cross-check against
-  `th07.eclm` + priw8's ECL docs); sub-call re-entrancy edge cases.
-- **Verify:** run Letty's top-level sub end to end — it terminates at the
-  expected frame, and a trace shows it entering the Lingering Cold / NS2 /
-  Table-Turning subs at frames that line up with the recorded screen-clears.
+- **Verify** (`python -m sim.ecl.vm_verify`): synthetic subs cover
+  jump / conditional jump / call+ret / `jump_dec` loops; then Letty's real ECL
+  runs end to end. The phase machine walks **NS1 → Lingering Cold → NS2 →
+  Table-Turning → defeat** (Sub 38 → 42 → 39 → 55 → 51), picks the Lunatic
+  spellcard variants off the `DIFFICULTY` branch, and lands every transition at
+  `[0, 2400, 5400, 7800, 10800]` — within ~1 s of the recorded screen-clears
+  (`[2400, 5450, 7820]`; the gap is the repositioning lull the ECL timer
+  doesn't count). Easy/Normal correctly route to Flower Wither Away (Sub48),
+  Hard to Undulation Ray (Sub52).
 
 ### 3 · Arithmetic, comparison & difficulty gate · ~1 day · autonomy 95%
 
