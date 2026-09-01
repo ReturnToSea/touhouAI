@@ -33,11 +33,13 @@ Lunatic:
 The fast `bullet_circle` stream in Table-Turning is what looks like a laser in
 gameplay footage — it's ordinary bullets, and we record it fine.
 
-!!! note "Reference now, runtime next"
+!!! note "Reference then, runtime now"
     The [first interpreter attempt](de-ecl-vm.md) got the control flow right but
-    failed on bullet *motion* — the undocumented `bullet_effects` system. So for
-    now the scripts are a structure map: phase order, HP numbers, which patterns
-    track the player, which orbs are lethal. The
-    [ECL VM plan](ecl-vm.md) keeps the VM for control flow and gets the motion by
+    failed on bullet *motion* — the undocumented `bullet_effects` system. The
+    [current VM](ecl-vm.md) runs these scripts for real: control flow, phase
+    transitions, arithmetic, sub-enemies, and boss/orb movement all execute
+    Letty's actual bytecode frame by frame (Parts 1–3, 5, 6, 8 of the plan).
+    What it still can't do is bullet *motion* — it gets that by
     [hooking the engine and measuring it](ecl-vm.md#stage-b-measuring-the-engine)
-    — the same trick that made [recording](recording.md) work.
+    — the same trick that made [recording](recording.md) work — rather than by
+    interpreting `bullet_effects` statically.

@@ -8,19 +8,31 @@ only when its verification gate passes.
 The downstream pipeline — collision, obs, PPO, the real-game daemon — does not
 change. The VM replaces *where the bullet positions come from*, nothing else.
 
-!!! note "What we already have"
+!!! note "Where Stage A stands"
+    Parts 1, 2, 3, 5, 6, and 8 are done — six of eight in Stage A. `sim/ecl/`
+    parses every stage's binary byte-exact, runs Letty's real script frame by
+    frame (control flow, the phase machine, arithmetic, a working PRNG),
+    recurses into her sub-enemies, and moves both her and them — the boss's own
+    track lands **pixel-exact against a recording for 127 frames**, until the
+    first RNG-driven choice. Bullet **spawn events** come out the other end
+    (count, type, position, angle, speed) within a few percent of the recorded
+    birth counts. What's left in Stage A: Part 4's KS-test validation of the
+    RNG (the generator is built; the statistical check against recorded spreads
+    isn't run yet) and Part 7 (real HP thresholds — wired into the phase
+    machine already, needs a damage model to exercise). No bullet **motion**
+    yet — that's Stage B.
     - All six PCB stage ECLs decompiled (`tools/th07_ecl/`), Letty isolated, the
       opcode map `th07.eclm`
-    - **`sim/ecl/` — the binary parser (Part 1), verified against thtk on every
-      instruction in the game**
     - A dead VM skeleton (`sim/ecl_vm.py` + `ecl_parse/expand/bullet`) from the
       [first attempt](de-ecl-vm.md), kept for reference only
     - PyTouhou's TH06 VM as reference (`pytouhou_ref/eclrunner.py`, ~90% opcode
       overlap)
-    - The [DLL hook](hook.md) toolchain (MinHook / inject32)
+    - The [DLL hook](hook.md) toolchain (MinHook / inject32) — not yet used;
+      Stage B is next
     - The [zBullet struct](re.md#zbullet-stride-0xd68-1025-slots) RE'd
-    - 20 recordings as validation ground truth
-    - ~8 GB of freed VRAM
+    - 20 recordings as validation ground truth — already exercised, not just
+      sitting there: Parts 5/6/8 verify directly against
+      `sim/fights/letty_*.npz`
 
 **Autonomy** below is the share of a part that can be built without a human at a
 debugger — the rest needs eyes on the game or an external RE reference.
@@ -94,16 +106,17 @@ in `enemy.extra`.
   angles as `0, +2π/3, −2π/3` via `math_float_add` + `math_norm_angle`, and
   every arithmetic opcode reachable in the fight being handled.
 
-### 4 · The PRNG · generator done; validation blocked on Part 5
+### 4 · The PRNG · generator done; KS-test validation not yet run
 
 `sim/ecl/rng.py` — the EoSD-family LCG (`state·0x343FD + 0x269EC3`, bits 16–30),
 seeded per VM, wired into every `set_*_rand_*` / `__math_rand*` opcode and
 swappable. It is deterministic per seed and uniform (checked in `vm_verify`).
 
-Whether PCB draws from *exactly* this stream — and the KS test of 500 VM
-`bullet_random` spreads against the spreads measured from the recordings — needs
-`bullet_random` (Part 5) and is deferred to then. For training only the
-distribution matters, so this is low-stakes.
+Whether PCB draws from *exactly* this stream is still open. Part 5 now emits
+real `bullet_random` spreads, so the KS test against the spreads measured from
+the recordings is doable — it just hasn't been run. For training only the
+distribution matters, so this is low-stakes; worth doing before Stage C, not
+urgent before Stage B.
 
 ### 5 · Spawn-event emission · ✅ done (Lingering Cold count loose, see below)
 
