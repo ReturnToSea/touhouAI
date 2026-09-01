@@ -1,4 +1,4 @@
-# 5 · The control hook
+# The control hook
 
 `th07hook.dll` is a 32-bit DLL injected into a running `th07.exe`. It turns the
 game into a step-on-demand environment: the agent asks for one frame, the DLL

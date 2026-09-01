@@ -1,6 +1,6 @@
-# 13 · Experiment log
+# Experiment log
 
-The dated, quantitative companion to [Dead ends & lessons](dead-ends.md). Every
+The dated, quantitative companion to the [Extras](dead-ends.md) section. Every
 training run: what changed, what the sim curve did, what transferred, verdict.
 
 !!! warning "Sim score is not real transfer"
@@ -21,10 +21,12 @@ training run: what changed, what the sim curve did, what transferred, verdict.
 |---|---|---|
 | Best real playthrough | mid-Stage 2, ~1.63 M score | `ppo_v12` — cleared the Chen midboss, died before the Stage 2 boss (watched, not logged) |
 | Real transfer, current obs | **~225 s** median (stages 1–2) | `ppo_v27` / `ppo_v29` |
-| Recorded-boss transfer | 150–190 s on real Letty | `fight_letty` (but baseline clears Letty 6/6) |
+| Recorded-Letty, best checkpoint | ~100 s active fight median, ~15% real kill-rate | `fight_letty_seg` v9 (~189 M / 252 M snapshots) |
 
 No current-obs run has matched `ppo_v12`'s mid-Stage-2 reach. Every
-domain-randomized run plateaus around "clears stage 1, dies in stage 2."
+domain-randomized run plateaus around "clears stage 1, dies in stage 2." The
+recorded-Letty runs move past pure dodging (they land real kills) but
+[hit their own ceiling](ceiling.md).
 
 ## The PPO arc
 
@@ -90,10 +92,56 @@ steps. Basically a wash versus v27 — the plateau is the sim's, not the run's.
 Snapshots saved every 40 M for transfer-testing (`snap_*.pt`); `best.pt` still
 underperforms mid-training snapshots, per the v26 lesson.
 
+## The recorded-Letty era — `fight_letty_seg`
+
+A from-scratch policy trained on ~20 [recorded Letty fights](recording.md) with
+[synthetic damage-phasing](recording.md#synthetic-damage-phasing), aiming to be
+the first run that *kills* a real boss rather than just outlasting it. Numbers
+are **active fight time** — the ~42 s of dialogue is excluded.
+
+### v1–v4 — the mechanics come together
+
+Real phase detection from screen-clears; per-phase armor windows; the
+[realistic ReimuA shot model](recording.md#synthetic-damage-phasing) (20% homing
++ 80% forward needle, ±17.5 px lane); the [kill-only reward](de-shooting.md). Sim
+kill-rate climbed 19% → a noisy 40–100%. Real transfer: from **one** kill in a
+full billion steps (memorisation-prone) to ~11 real kills by 250 M.
+
+### v5–v7 — the re-aim saga
+
+Three attempts to re-aim replayed bullets at the live policy, all abandoned — the
+[full story](de-reaim.md). Each fixed one flicker and introduced another. v7's
+best real checkpoint hit **88 s active-fight median** — the best of any run — then
+PPO thrashed and destroyed it, dropping to ~20 s.
+
+### v8 — stability + a survival floor
+
+γ `0.997 → 0.995`, entropy `0.004 → 0.002`, cosine LR decay, `best_mlp.pt` saved
+on eval-score peaks, and a small `+0.004/frame` survival floor added back (the
+[over-correction](de-shooting.md#the-over-correction-put-a-small-survival-term-back)).
+Still bimodal on the real game.
+
+### v9 — re-aim removed, rigid field rotation
+
+Dropped per-bullet re-aim entirely; replaced with a rigid ±10° per-episode
+rotation of the whole danmaku field. Deleted `spawn`, `aimed`, `launch_ang`,
+`birth`, and the per-episode buffers — freed ~8 GB VRAM, training 94k → 136k
+frames/s. Sim kill-rate **stable at 50–70%** (vs the 0–35% oscillation of v6–v8).
+Real transfer: ~15 kills across checkpoints 157–315 M, but bimodal — consecutive
+checkpoints swing median 104 s → 2.8 s → 83 s while the sim eval barely moves.
+
+> **Realisation.** The anti-memorisation bundle genuinely helps — v9 lands real
+> kills where v5 got one in a billion steps. But the sim eval no longer predicts
+> real performance, which means the policy is exploiting structure that only
+> exists in 20 recordings and their symmetries. This is
+> [the ceiling](ceiling.md), and the response is [generative danmaku](ecl-vm.md).
+
 ## Runs
 
 | Run | Date | What changed | Real transfer | Verdict |
 |---|---|---|---|---|
+| `fight_letty_seg` v9 | 2026-08-31 | re-aim removed → rigid field rotation; stability fixes; ~20 recs | ~100 s active-fight median (bimodal), ~15% real kill-rate | best recorded-boss run; hits the [ceiling](ceiling.md) |
+| `fight_letty_seg` v1–v8 | 2026-08-31 | phase detection + synthetic damage-phasing + kill-only reward + the [re-aim saga](de-reaim.md) | 1 → ~11 real kills; v7 peaked 88 s then thrashed | superseded by v9 |
 | `fight_letty` | 2026-08-31 | recorded-Letty FightSim + re-aiming + real hitboxes + lethal enemy bodies; from scratch | 150–190 s on real Letty | inconclusive — Letty too easy (baseline 6/6) |
 | `ppo_v29` | 2026-08-30 | v27 + AABB collision + focus-aware escape + reward-norm + LR anneal | ~231 s median | wash vs v27 |
 | `ppo_v28` | 2026-08-29 | + obs normalization | ~18 s median | **killed** |

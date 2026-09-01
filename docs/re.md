@@ -1,4 +1,4 @@
-# 2 · Reverse-engineering th07
+# Reverse-engineering th07
 
 `th07.exe` is a 32-bit DirectX 8 binary from 2003 with no meaningful ASLR. Every
 manager and pool is at a static address; every struct field is a fixed offset.
@@ -24,7 +24,7 @@ velocity-diffing and per-bullet tracking possible.
 
 | Offset | Type | Field |
 |---|---|---|
-| `+0x0B7C` | `float×2` | hitbox AABB, full size — collision uses ±½ (see [ch. 3](collision.md)) |
+| `+0x0B7C` | `float×2` | hitbox AABB, full size — collision uses ±½ (see [Collision](collision.md)) |
 | `+0x0B8A` | `int16` | bullet class — stage 1: 3 ball, 4/5 pellet |
 | `+0x0B8C` | `float×3` | position x, y, z |
 | `+0x0B98` | `float×2` | velocity — RE'd by diffing position frame to frame |

@@ -1,4 +1,4 @@
-# 3 · Collision
+# Collision
 
 Touhou's reputation for a "tiny circular hitbox" is a simplification. The check
 at `0x43e260` is an **axis-aligned box overlap**, and it is not only bullets that

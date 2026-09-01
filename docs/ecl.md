@@ -1,8 +1,9 @@
-# 4 · The ECL
+# The ECL format
 
 Every boss is a bytecode program in the "old" TH06–09 ECL format. `thtk`
 (`thdat` + `thecl`) extracts and decompiles `ecldataN.ecl` from `th07.dat` into
-readable script. We do not run it — we read it.
+readable script. Today we read it for structure; [the plan](ecl-vm.md) is to
+run it.
 
 ## What the script tells us
 
@@ -32,7 +33,11 @@ Lunatic:
 The fast `bullet_circle` stream in Table-Turning is what looks like a laser in
 gameplay footage — it's ordinary bullets, and we record it fine.
 
-!!! warning "Reference, not runtime"
-    An early plan was to run the ECL in a CPU interpreter and feed its output to
-    the sim. It did not work ([ch. 11](dead-ends.md)). The scripts survive as a
-    structure map: phase order, HP numbers, which patterns track the player.
+!!! note "Reference now, runtime next"
+    The [first interpreter attempt](de-ecl-vm.md) got the control flow right but
+    failed on bullet *motion* — the undocumented `bullet_effects` system. So for
+    now the scripts are a structure map: phase order, HP numbers, which patterns
+    track the player, which orbs are lethal. The
+    [ECL VM plan](ecl-vm.md) keeps the VM for control flow and gets the motion by
+    [hooking the engine and measuring it](ecl-vm.md#stage-b-measuring-the-engine)
+    — the same trick that made [recording](recording.md) work.

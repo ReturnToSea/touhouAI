@@ -5,8 +5,16 @@
 
 A reinforcement-learning agent for Touhou 7 (PCB) on Lunatic, built from
 process-memory reads, an injected control DLL, a GPU danmaku simulator, and a
-lot of things that did not work. This is the working reference and the record
-of what we tried.
+lot of things that did not work.
+
+## How to read this
+
+The handbook is a linear tour — start at Chapter 1 and go through. **Parts 1–3**
+build up the system: the game, the goal, and how the agent sees, decides, learns,
+and talks to the game. **Part 4** covers training in simulation and the ceiling
+it hits. **Part 5** is the current plan. **Results** is deliberately empty — the
+plan hasn't produced any yet. **Extras** holds every approach that didn't work,
+the lessons, and the engine-internals reference.
 
 | | |
 |---|---|
@@ -18,36 +26,32 @@ of what we tried.
 
 ---
 
-## Overview & thesis
+## In one paragraph
 
 The goal is a full Lunatic 1-credit clear of `th07.exe` v1.00b, ideally no-miss
-no-bomb. PCB is the most "perfectable" of the hard Windows Touhou games and its
-cherry/border mechanic is a scoring tool, not a survival crutch — so a pure-dodge
-policy is a legitimate path to the clear.
-
-### The shape of the system
-
-Perception is process-memory reads — the game has a single fixed layout, so every
-struct sits at a known address. Control is a 32-bit DLL injected into a running
-`th07.exe`; it hooks the per-frame tick and feeds the agent's action in place of
-the keyboard. Training happens in a GPU simulator that runs thousands of danmaku
-episodes in parallel, then the policy is transferred to the real game.
-
-### Why a simulator at all
-
-Headless, the real game runs about **80×** real-time per instance. The GPU sim
-runs about **273,000 env-frames per second** — roughly a thousand parallel games.
-PPO needs hundreds of millions of frames to learn a hard bullet pattern; only the
-sim delivers that in minutes instead of days. Real-game RL stays a targeted
-touch-up tool, not the main training vehicle.
+no-bomb ([Chapter 2](ch-goal.md)). Perception is process-memory reads; control is
+an injected 32-bit DLL that also runs the game headless at ~80× real-time;
+training is a GPU danmaku simulator running ~1000 games in parallel, with the
+policy then transferred to the retail game. It works up to a point — and that
+point, and the plan to get past it, is what Parts 4 and 5 are about.
 
 ### Where it stands
 
 | Milestone | Result | Notes |
 |---|---|---|
 | Best real playthrough | mid-Stage 2, ~1.63M score | `ppo_v12` (retired 212-d obs) — cleared the Chen midboss, died before the Stage 2 boss |
-| Current-obs transfer | `~225 s median` | `ppo_v27` / `ppo_v29` — clears Stage 1, dies in Stage 2 |
-| Recorded-boss transfer | `150–190 s` | `fight_letty`, trained only on replayed Letty, dodges real Letty |
+| [Procedural-sim](sim.md) transfer | `~225 s median` | `ppo_v27` / `ppo_v29` — clears Stage 1, dies in Stage 2 |
+| [Recorded-Letty](recording.md) transfer | ~100 s active-fight, lands real kills | `fight_letty_seg` v9 — first run to *kill* a real boss, not just outlast it |
+
+### What's next
+
+Both simulator approaches — [procedural](sim.md) and
+[replayed recordings](recording.md) — plateau in the same place, and the failure
+mode says it's a [hard limit of transforming a fixed dataset](ceiling.md), not a
+tuning problem. The response ([the plan](ecl-vm.md)) is to **generate** the
+danmaku instead: run each boss's actual PCB bytecode, getting the bullet motion
+by hooking the engine and measuring it. Split into twelve verifiable parts; no
+results yet.
 
 !!! note "Constraints"
     The clear runs on vanilla `th07.exe` with the hook in observe-only mode.

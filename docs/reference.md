@@ -1,4 +1,4 @@
-# 12 · Address reference
+# Address reference
 
 Everything RE'd so far, for `th07.exe` v1.00b. Offsets marked "from" are relative
 to the named base. Mirrors `native/th07_addrs.h`.

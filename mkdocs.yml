@@ -71,19 +71,40 @@ plugins:
 
 nav:
   - Overview: index.md
-  - "Part I — The game":
-      - "2 · Reverse-engineering th07": re.md
-      - "3 · Collision": collision.md
-      - "4 · The ECL": ecl.md
-  - "Part II — The harness":
-      - "5 · The control hook": hook.md
-      - "6 · The observation": obs.md
+  - "Part 1 · The problem":
+      - "1 · The game": ch-game.md
+      - "2 · The goal & the approach": ch-goal.md
+  - "Part 2 · The agent":
+      - "3 · What the agent sees": obs.md
+      - "4 · The policy network": ch-policy.md
+      - "5 · How it learns": ppo.md
+  - "Part 3 · The world":
+      - "6 · Talking to the game": hook.md
       - "7 · The environment": env.md
-  - "Part III — Training":
-      - "8 · The GPU danmaku sim": sim.md
-      - "9 · Recording real fights": recording.md
-      - "10 · PPO": ppo.md
-  - "Part IV":
-      - "11 · Dead ends & lessons": dead-ends.md
-      - "12 · Address reference": reference.md
-      - "13 · Experiment log": experiment-log.md
+      - "8 · Bullet physics & collision": collision.md
+  - "Part 4 · Training in simulation":
+      - "9 · The danmaku simulator": sim.md
+      - "10 · Recording real bosses": recording.md
+      - "11 · The transfer ceiling": ceiling.md
+  - "Part 5 · The plan":
+      - "12 · The ECL format": ecl.md
+      - "13 · Generative danmaku": ecl-vm.md
+  - "Results": results.md
+  - "Extras":
+      - dead-ends.md
+      - "Training & reward lessons":
+          - ex-training.md
+          - "Bolting shooting onto survival": de-shooting.md
+          - "Observation normalization": de-obsnorm.md
+          - "Ranking checkpoints by sim score": de-checkpoints.md
+          - "Real-game fine-tuning": de-realgame.md
+      - "Danmaku-generation attempts":
+          - ex-danmaku.md
+          - "The first ECL interpreter": de-ecl-vm.md
+          - "The re-aim saga": de-reaim.md
+          - "Choosing a proof-of-concept boss": de-poc.md
+      - "Engine internals":
+          - ex-internals.md
+          - "Reverse-engineering th07": re.md
+          - "Address reference": reference.md
+      - "Experiment log": experiment-log.md

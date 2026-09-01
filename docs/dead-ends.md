@@ -1,85 +1,62 @@
-# 11 · Dead ends & lessons
+# Extras
 
-The current design is mostly a fossil record of these. Each one cost real time;
-each one is why something downstream looks the way it does.
+Everything off the main path — the approaches that didn't work, the lessons they
+cost, and the engine-internals reference. The design of the working system is
+mostly a fossil record of what's below: each dead end is why something downstream
+looks the way it does.
 
-## The ECL interpreter — *reference only*
+## How this section is organised
 
-Plan: parse every boss script, run it in a CPU VM, get a spawn schedule to feed
-the sim. The parser and phase-chaining worked. The *motion* did not — TH07's
-bullet-type launch data, difficulty coefficients, and multi-slot `bullet_effects`
-are undocumented, and reversing them is weeks of work. Watching the output: "way
-too fast, they don't pause, the wrong ones rotate."
+<div class="grid cards" markdown>
 
-> **Lesson.** Don't reimplement an undocumented engine. Record its output instead
-> — the hang/curve state is already sitting in the bullet struct.
+- __[Training & reward lessons](ex-training.md)__
 
-## Observation normalization (v28) — *abandoned*
+    ---
 
-Standardizing each obs feature to zero mean / unit variance looked principled.
-But features that are constant in the sim (empty item slots, walls, a sim-only
-zero) got divided by a near-zero std — folding weights up by `1e4×`. On real-game
-obs, where those features aren't constant, the network exploded. Real transfer
-fell to 15–40 s despite a healthy sim curve.
+    Four ways the policy or the training setup fought back: gaming the reward,
+    exploding on normalised inputs, overfitting the sim score, and wasting
+    real-game rollouts on a solved stage.
 
-> **Lesson.** Normalization statistics computed in the sim are a hidden channel
-> for sim-only structure to leak into the weights. Removed entirely; kept
-> reward-norm and LR annealing.
+- __[Danmaku-generation attempts](ex-danmaku.md)__
 
-## Cirno as a proof-of-concept target — *inconclusive*
+    ---
 
-First test of the recording pipeline: does a policy trained on replayed Cirno
-beat the procedural-sim policy at real Cirno? Both cleared the fight at ~66 s,
-identically. Cirno is too easy — generic dodging already handles her, so there
-was no gap for the recordings to close.
+    The efforts to produce novel-but-correct patterns: the first ECL
+    interpreter, the re-aim saga, and the proof-of-concept boss that never
+    proved anything.
 
-> **Lesson.** A PoC target has to be a fight the current policy *fails*. We then
-> repeated the mistake with Letty.
+- __[Engine internals](ex-internals.md)__
 
-## Letty as a proof-of-concept target — *inconclusive*
+    ---
 
-`fight_letty` transferred — 150–190 s on real Letty. But the baseline, a plain
-procedural-sim policy on pure-dodge, cleared real Letty **6 / 6**. The recorded
-policy was actually *worse* (3 / 6). No room to show benefit where the generic
-policy already scores 100%.
+    Reference material — the `th07.exe` memory map and the full address table.
 
-> **Lesson.** The pipeline is validated (it transfers). Whether recordings *help*
-> is still unanswered — needs a Stage 3+ boss the policy can't already dodge.
+- __[Experiment log](experiment-log.md)__
 
-## Best-checkpoint selection — *abandoned*
+    ---
 
-`best.pt` is ranked by sim score. But transfer and sim score diverge — v26 got
-*worse* on the real game as its sim number rose. So `best.pt` is, by
-construction, the most overfit checkpoint in the run.
+    The dated, quantitative companion: every training run, what changed, what
+    the sim curve did, what transferred.
 
-> **Lesson.** Snapshot every N million steps and transfer-test the snapshots. Sim
-> score does not track transfer.
+</div>
 
-## Real-game fine-tuning on Stage 1 — *wash*
+## The lessons, in one table
 
-12M steps of real-game PPO on Stage 1: 238 s → 223 s greedy survival — flat.
-Score doubled, survival didn't. Stage 1 was already at the sim policy's ceiling;
-there was nothing left to fine-tune.
+| What we tried | Verdict | Lesson |
+|---|---|---|
+| [First ECL interpreter](de-ecl-vm.md) | motion failed | don't reimplement an undocumented engine — record or measure its output instead |
+| [The re-aim saga](de-reaim.md) | all three abandoned | a re-aimed replayed bullet desyncs from the recording's slot bookkeeping; rigid field rotation was the escape hatch |
+| [PoC boss choice](de-poc.md) | inconclusive twice | a proof-of-concept target has to be a fight the current policy *fails* |
+| [Bolting shooting onto survival](de-shooting.md) | policy games it | you can't add "shoot" as a minor term to a survival objective; it finds the survive-only optimum |
+| [Observation normalization](de-obsnorm.md) | catastrophic | sim-computed normalisation stats leak sim-only structure into the weights |
+| [Sim-score checkpoints](de-checkpoints.md) | most-overfit checkpoint | snapshot every N M steps, rank by transfer tests, not sim score |
+| [Real-game fine-tuning](de-realgame.md) | wash on a solved stage | real-game RL only pays off on what the sim policy *can't* do |
 
-> **Lesson.** Real-game RL can't improve an already-solved stage. Its value is on
-> the parts the sim policy fails, not the parts it passes.
+## The through-line
 
-## The base-policy regression — *open*
-
-`ppo_v12` reached mid-Stage 2 (past the Chen midboss, ~1.63 M score) on a 212-d
-obs that no longer exists.
-The current 236-d runs (v27, v29) transfer to **~225 s median** — they clear
-Stage 1 and die somewhere in Stage 2. A regression from v12, though not the
-"dies at Stage 1 boss" I first reported (that was `best.pt`, which the
-[v26 lesson](#v26-stronger-engagement-rewards-overfits) says is the wrong
-checkpoint to pick).
-
-Every domain-randomized run plateaus at roughly the same place. Pure-dodge, with
-no shooting at all, dies in the Stage 1 *stage portion* at ~33 s — the
-procedural sim never taught enemy management.
-
-> **Lesson (provisional).** The sim teaches boss-dodging and tops out around
-> "into Stage 2." A 1cc also needs stage-portion enemy management and boss
-> damage-routing, and recording bosses fixes neither. The path being taken:
-> record bosses for dodging *and* add synthetic HP phasing so the policy learns
-> to shoot.
+Every one of these is the same shape: **a fixed artefact — a hand-tuned sim
+stage, an undocumented engine reimplemented, 20 recordings and their symmetries —
+that the policy learns to exploit in ways the sim eval can't see.**
+[The transfer ceiling](ceiling.md) makes that argument in full, and
+[the plan](ecl-vm.md) is the response: generate the danmaku instead of
+transforming a fixed set of it.
