@@ -32,9 +32,9 @@ change. The VM replaces *where the bullet positions come from*, nothing else.
       [first attempt](de-ecl-vm.md), kept for reference only
     - PyTouhou's TH06 VM as reference (`pytouhou_ref/eclrunner.py`, ~90% opcode
       overlap)
-    - The [DLL hook](hook.md) toolchain (MinHook / inject32) — not yet used;
-      Stage B is next
-    - The [zBullet struct](re.md#zbullet-stride-0xd68-1025-slots) RE'd
+    - The [zBullet struct](re.md#zbullet-stride-0xd68-1025-slots) fully RE'd,
+      including the `bullet_effects` fields — enough that Stage B needs no hook,
+      just the existing per-frame recorder
     - 20 recordings as validation ground truth — already exercised, not just
       sitting there: Parts 5/6/8 verify directly against
       `sim/fights/letty_*.npz`
@@ -218,40 +218,58 @@ What's still owed before this is a clean "done":
 
 ## Stage B · Measuring the engine
 
-*Needs the game and a DLL hook.*
+*Needs the game — but not, it turns out, a hook.*
 
 The ECL says "fire type 42." It does **not** say what type 42 does after it
 spawns — delay frames, acceleration, mid-flight speed changes, splitting. That
 lives in `th07.exe`, and it is exactly what broke the
-[last attempt](de-ecl-vm.md) ("bullets way too fast, delay bullets don't hang"). We get it by **hooking and measuring**, not
-static reversing.
+[last attempt](de-ecl-vm.md) ("bullets way too fast, delay bullets don't hang").
+We get it by **measuring**, not static reversing.
 
-### 9 · Bullet-constructor hook · 2 days – 1 week · autonomy 40%
+### 9 · Per-bullet trajectory tracking · ✅ done (no hook needed)
 
-Find `th07.exe`'s function that takes `(type, x, y, angle, speed, …)` and
-initialises a fresh zBullet slot. Hook it (MinHook). Log every call's args plus
-each spawned bullet's per-frame state (`vel`, `speed`, `angle`, the
-effects-state at `+0xC2C`) for its first ~60 frames.
+The original plan was to find and hook `th07.exe`'s bullet constructor
+(40% autonomy, possible x64dbg session). Turns out it isn't necessary:
 
-!!! danger "The crux risk to working solo"
-    Finding the constructor address needs dynamic analysis. Routes to try:
-    (a) pymem memory-diffing — watch for a slot going empty→populated, scan
-    nearby code; (b) published PCB reversing — thpatch / priw8 / thcrap have deep
-    PCB RE, the address may just be documented; (c) byte-pattern scan for the
-    function prologue. **If all three fail, it needs ~30 min of a human in
-    x64dbg** — breakpoint on a bullet-slot write, read the return address — then
-    the rest is routine. This is the first thing to de-risk once Stage A is
-    moving, because [the fallback](#if-stage-b-stalls) needs it too.
+- The [recorder](recording.md) already polls the whole bullet pool every frame,
+  and the [`zBullet` struct](re.md#zbullet-stride-0xd68-1025-slots) — including
+  the `bullet_effects` fields at `+0xC2C` — is already RE'd.
+- A bullet's identity is its pool slot: born when the slot goes empty→occupied,
+  dead when it goes occupied→empty. Measured across ~2 M frame-to-frame
+  transitions in one recording: the worst position residual (actual vs
+  `pos + vel`) is **6.2 px**, and there are **zero** same-slot swaps on
+  consecutive frames — slots sit empty for ~13 frames between reuses. So slot
+  presence alone tracks bullets cleanly; no distance heuristic, no hook.
 
-- **Verify:** drive to Letty, dump the hook log — its spawn events match the
-  VM's emitted events from Part 5 for the same fight. Per-type motion traces
-  captured for every type she uses.
+`sim/ecl/bullet_trace.py` re-keys the recorded pool stream into per-bullet
+trajectories `(frame, x, y, vx, vy)` + birth class / fx flag.
 
-### 10 · Per-type motion models · ~3 days · autonomy 85%
+- **Verify** (`python -m sim.ecl.bullet_trace`): on all ten `letty_*`
+  recordings — every one of ~2 M rows re-keyed with **none lost or
+  duplicated**, the rebuilt `(frame, x, y)` stream is **bit-identical** to the
+  recorded one, frames within a trace are strictly consecutive, and **no trace
+  contains a jump** that would betray a mis-tracked slot reuse. `fx=16` bullets
+  measurably decelerate (median speed 1.8 → 1.2 px/f over 60 frames); `fx=0`
+  bullets hold speed. ~15,200 bullets per fight.
 
-For each of Letty's ~10–20 bullet types, fit a motion model from the Part 9
-traces: `delay_frames`, `accel`, `speed_final`, `turn_rate`, `split_at/into`.
-Express each as a vectorizable `pos(type, spawn, angle, speed, t)`.
+!!! note "One recorder tweak still worth doing"
+    The current recordings log `x, y, vx, vy, class, fx` per bullet. Adding
+    `speed`, `angle`, `accel`, `angvel` (`+0xBB0…0xBBC`, all RE'd) and the
+    `bullet_effects` params `p1/p2/interval` (`+0xC2C…0xC34`) makes the
+    per-frame physics fully explicit rather than derived — ~5 lines in
+    `record_boss_driven.py` and one re-record. Not blocking Part 10, but it
+    makes the motion fit exact instead of inferred.
+
+### 10 · Per-type motion models · ~2–3 days · autonomy 90% (next)
+
+For each of Letty's bullet types, fit a motion model from the Part 9 traces:
+`delay_frames`, `accel`, `speed_final`, `turn_rate`. (No splitting — her
+recordings show only `bullet_effects` flags 0 and 16, never the split flags.)
+Each type is labelled by cross-referencing the trace's birth frame + position
+against the VM's Part 5 spawn schedule, so a fit is "the ECL fired
+`bullet_effects(_, 16, _, 120, _, −0.0208, −999)` then a bullet — here is how
+that bullet actually moved." Express each as a vectorizable
+`pos(type, spawn, angle, speed, t)`.
 
 - **Concerns:** the multi-slot `bullet_effects` system — a bullet can chain
   several effect stages. A type that doesn't fit a simple
@@ -312,28 +330,22 @@ Then `train_fight.py --sim ecl`.
 
 ## If Stage B stalls
 
-Part 9 is the one place this can get genuinely stuck. If it does and the
-constructor address can't be found:
-
-!!! note "Spawn-hook replay — the lighter fallback"
-    Skip the VM. Hook `create_bullet` during real fights, record the *spawn
-    events* (not final positions), replay them through the Part 10 motion models
-    + per-episode re-aim + per-episode RNG perturbation. Bullet paths are
-    generated, re-aiming works, RNG varies — but the spawn *schedule* still comes
-    from recordings, so it isn't fully generative. ~1 week instead of 3. Enough
-    for Letty; the full VM is worth it only because we're committing to all six
-    stages. **This fallback still needs Part 9** — the constructor hook is
-    load-bearing either way.
+The crux risk was Part 9 — finding and hooking the bullet constructor. That's
+**gone**: per-frame polling + slot-identity tracking gets the same data
+(`sim/ecl/bullet_trace.py`), verified bit-exact against the recordings, no
+dynamic analysis. The remaining Stage-B risk is just whether a handful of
+bullet types fit clean motion models (Part 10) — and if one doesn't, the
+fallback is a small piecewise state machine for that type, not a project stall.
 
 ## Totals & risks
 
-**~3 weeks** to a validated generative Letty. Beyond Letty, each new boss = point
-the VM at that stage's ECL sub + hook/measure its ~10–20 new bullet types +
-validate. Lasers (Stages 5–6) are a separate object type — deferred.
+Beyond Letty, each new boss = point the VM at that stage's ECL sub + trace its
+new bullet types + validate. Lasers (Stages 5–6) are a separate object type —
+deferred.
 
-| Risk | Mitigation |
+| Risk | Status / mitigation |
 |---|---|
-| PCB ECL format differs more than expected from TH06 | unlikely — it's the "old" TH06–09 format |
-| Multi-slot `bullet_effects` is genuinely complex to model | hook-and-measure per type, not static RE |
-| PCB's PRNG isn't TH06's | match the distribution, not the stream |
-| Can't find the bullet constructor | ~30 min human in x64dbg |
+| PCB ECL format differs more than expected from TH06 | **resolved** — parser matches thtk on 19,919 / 19,919 instructions |
+| Multi-slot `bullet_effects` is genuinely complex to model | measure per type from the recordings (Part 10), not static RE |
+| PCB's PRNG isn't TH06's | match the distribution, not the stream — Part 4 KS-test still to run |
+| ~~Can't find the bullet constructor~~ | **moot** — no hook needed (Part 9) |
