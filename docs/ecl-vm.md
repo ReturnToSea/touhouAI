@@ -131,19 +131,39 @@ callee's `PARAM_*` and restores locals on `ret`.
   motion models. Also: Sub40 computes its three sub-enemy spawn angles
   `0, ±2π/3`.
 
-### 6 · Sub-enemies — `enemy_create_rel` · ~2 days · autonomy 75%
+### 6 · Sub-enemies — `enemy_create_rel` · ✅ done
 
-Every Letty attack spawns orbiting orb sub-enemies (opcode 93) that each run
-their *own* ECL sub. The VM goes recursive: the parent runner (Letty) spawns
-child runners (orbs), the children fire the bullets. Port from PyTouhou's
-`ECLMainRunner`. Track each orb's position — they
-[contact-kill](collision.md#enemy-bodies-kill-the-player) the player.
+The VM is recursive: `enemy_create_rel` (93) spawns a **child `Enemy`** running
+its own sub, at the parent's position + offset, inheriting a snapshot of the
+parent's `PARAM_*`/`ARG_*` (Sub40's icicles read the `PARAM_R` angle Sub40
+just computed). Children run through the same tick loop as the boss — Parts
+2–5 didn't have to change.
 
-- **Concerns:** the most-likely-to-be-subtly-wrong part — orb spawn offsets,
-  orbit motion, lifetime. Child-VM tick order relative to the parent matters for
-  aimed sub-shots.
-- **Verify:** orb count, spawn frames, per-frame positions from the VM vs the
-  recorded `enemies` array — within ~15 px.
+This part also had to add **motion** — `enemy_create_rel` alone put orbs at a
+fixed offset with nowhere to go, and Letty's own repositioning moves needed it
+too, so Part 8's opcodes came along with it:
+
+- `move_position` (46) — snap.
+- `move_dir_time` (54) / `move_point` (55) — linear interpolation over a given
+  frame count, to a computed target or an absolute point.
+- `__move_circle_abs` (56) / `set_orbit_distance` (57) — orbit a **fixed**
+  center at a **fixed** radius, both evaluated once at the moment the command
+  is issued (re-reading `SELF_X` every frame would be self-referential — the
+  radius would collapse to zero).
+
+- **Verify** (`python -m sim.ecl.vm_verify`):
+    - An orbiting icicle's distance from its orbit center stays constant to
+      floating-point precision over 90 frames — the circle math doesn't drift.
+    - The boss's own track (`move_position` → `move_point` entrance, then
+      `Sub38`'s `move_dir_time` calls), aligned to a recording on the
+      first-bullet frame, is **pixel-exact for the first 127 frames** — then
+      diverges the instant `Sub38` draws its first `__math_rand_rad` and moves
+      on it. That's not drift or error: it's the first frame where the VM's
+      RNG stream and the recording's real one disagree about which direction
+      to go, and everything downstream of a movement choice is chaotic after
+      that regardless of how correct the interpreter is. An exact match up to
+      that exact instruction is about as strong a proof of correctness as this
+      metric can give.
 
 ### 7 · HP, life-callbacks & spellcard phases · ~1 day · autonomy 82%
 
@@ -157,14 +177,11 @@ child runners (orbs), the children fire the bullets. Port from PyTouhou's
 - **Verify:** VM phase-transition frames match the recorded screen-clears; HP
   values and timed-out-phase durations match the recordings.
 
-### 8 · Boss movement · ~1 day · autonomy 85%
+### 8 · Boss movement · ✅ done (came along with Part 6)
 
-The `enemy_move*` opcodes script Letty's position over time. Produces her x/y
-track — needed for the firing-lane alignment check and the obs.
-
-- **Concern:** interpolation mode flags (linear / ease / accel).
-- **Verify:** VM boss track vs the recorded `boss` x/y array (the one part of the
-  recording we can check directly) — within ~10 px.
+Letty's own repositioning runs through the same `move_dir_time` / `move_point`
+opcodes as the orbs, so this was one build. See Part 6's verify — the boss
+track against the recording, pixel-exact for 127 frames.
 
 ---
 

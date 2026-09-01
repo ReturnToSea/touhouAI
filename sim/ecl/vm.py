@@ -56,6 +56,30 @@ class _CallFrame:
 
 
 @dataclass
+class _Motion:
+    """A movement command in progress. `kind='linear'` interpolates position
+    over `duration` frames from `(x0,y0,z0)` to `(x1,y1,z1)`; `kind='circle'`
+    orbits `(cx,cy,cz)` at `radius`, `angle0 + ang_speed*t` — the center and
+    radius are fixed at the moment the command was issued (evaluating a
+    self-referential `SELF_X` every frame would collapse the radius to 0)."""
+    kind: str
+    start_frame: int
+    duration: int
+    x0: float
+    y0: float
+    z0: float
+    x1: float
+    y1: float
+    z1: float
+    cx: float = 0.0
+    cy: float = 0.0
+    cz: float = 0.0
+    angle0: float = 0.0
+    radius: float = 0.0
+    ang_speed: float = 0.0
+
+
+@dataclass
 class BulletSpawn:
     """One spawn event — a bullet coming into existence. Motion (delay, accel,
     curve from `effect`) is Stage B; here we record the launch parameters."""
@@ -103,6 +127,7 @@ class Enemy:
 
         self.shoot_offset = (0.0, 0.0, 0.0)
         self.pending_effect: tuple | None = None    # last bullet_effects, attached to the next spawn
+        self.motion: _Motion | None = None
 
         # execution state
         self.sub = sub
@@ -213,6 +238,7 @@ class VM:
         for e in list(self.enemies):
             if not e.alive:
                 continue
+            self._update_motion(e)          # apply any move_* command from a prior frame
             self._service_callbacks(e)      # may switch sub (frame -> 0); does not execute
             if e.alive:
                 self._run_enemy(e)          # execute this frame, then e.frame += 1
@@ -222,6 +248,27 @@ class VM:
             self._pending_children = []
         self.enemies = [e for e in self.enemies if e.alive and not e.removed]
         self.frame += 1
+
+    def boss(self) -> Enemy | None:
+        return next((e for e in self.enemies if e.is_boss), None)
+
+    def _update_motion(self, e: Enemy) -> None:
+        m = e.motion
+        if m is None:
+            return
+        t = self.frame - m.start_frame
+        if m.kind == "linear":
+            f = 1.0 if m.duration <= 0 else min(1.0, t / m.duration)
+            e.x = m.x0 + (m.x1 - m.x0) * f
+            e.y = m.y0 + (m.y1 - m.y0) * f
+            e.z = m.z0 + (m.z1 - m.z0) * f
+            if t >= m.duration:
+                e.motion = None
+        elif m.kind == "circle":
+            ang = m.angle0 + m.ang_speed * t
+            e.x = m.cx + m.radius * math.cos(ang)
+            e.y = m.cy + m.radius * math.sin(ang)
+            e.z = m.cz
 
     # -- Part 5: bullet spawning & sub-enemies ---------------------------
     def _emit_bullets(self, e: Enemy, kind: str, args: list) -> None:
@@ -593,6 +640,47 @@ def _create_abs(vm, e, ins):
 
 
 # --- phase machine: callbacks & interrupts ---
+
+# --- movement (Part 6/8) -------------------------------------------------
+
+@_op(46)  # move_position(x, y, z) — snap, cancels any motion in progress
+def _move_position(vm, e, ins):
+    e.x, e.y, e.z = (e.get(a) for a in ins.args)
+    e.motion = None
+
+
+@_op(54)  # move_dir_time(duration, _, angle, speed) — constant heading for `duration` frames
+def _move_dir_time(vm, e, ins):
+    dur, _u, angle, speed = (e.get(a) for a in ins.args)
+    dur = int(dur)
+    tx = e.x + math.cos(angle) * speed * dur
+    ty = e.y + math.sin(angle) * speed * dur
+    e.motion = _Motion("linear", vm.frame, dur, e.x, e.y, e.z, tx, ty, e.z)
+
+
+@_op(55)  # move_point(duration, _, x, y, z) — linear move to an absolute point
+def _move_point(vm, e, ins):
+    dur, _u, x, y, z = (e.get(a) for a in ins.args)
+    e.motion = _Motion("linear", vm.frame, int(dur), e.x, e.y, e.z, x, y, z)
+
+
+@_op(56)  # __move_circle_abs(mode, cx, cy, cz, angle, radius, _, ang_speed)
+def _move_circle(vm, e, ins):
+    _mode, cx, cy, cz, angle, radius, _u, ang_speed = (e.get(a) for a in ins.args)
+    e.motion = _Motion("circle", vm.frame, 1 << 30, e.x, e.y, e.z, e.x, e.y, e.z,
+                       cx=cx, cy=cy, cz=cz, angle0=angle, radius=radius, ang_speed=ang_speed)
+
+
+@_op(57)  # set_orbit_distance(new_radius, ...) — retarget an active circle's radius
+def _orbit_distance(vm, e, ins):
+    if e.motion is not None and e.motion.kind == "circle":
+        e.motion.radius = e.get(ins.args[0])
+
+
+@_op(43, 44, 48, 49, 50, 53, 58, 59, 60, 61, 62, 63)  # boss-relative set, ang-vel/accel/speed
+def _move_misc_noop(vm, e, ins):                       # tuning knobs Letty doesn't lean on; no-op
+    pass
+
 
 @_op(107)  # death_callback_sub
 def _death_cb(vm, e, ins):

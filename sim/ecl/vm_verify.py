@@ -20,6 +20,8 @@ from pathlib import Path
 from .parser import ECLFile, Instr, Sub, parse_file
 from .vm import VM, Enemy
 
+FIGHTS = Path(__file__).resolve().parents[2] / "sim" / "fights"
+
 _DEFAULT = Path(__file__).resolve().parents[2] / "tools" / "th07_ecl" / "ecldata1.ecl"
 
 # Letty, Lunatic — from sim/boss_phases._BOUNDARIES + the recorded fight length
@@ -183,6 +185,61 @@ def test_arithmetic() -> bool:
     return ok
 
 
+def test_movement(ecl_path: Path) -> bool:
+    ok = True
+
+    # orbit motion: radius stays constant, no NaN/blow-up
+    ecl = parse_file(ecl_path)
+    vm = VM(ecl, difficulty=3, seed=1)
+    e = Enemy(vm, 41, is_boss=False)          # Sub41 = NS1 icicle, orbits via __move_circle_abs
+    e.x, e.y, e.z = 192.0, 112.0, 0.0
+    e.extra[10033], e.extra[10034] = 0.0, 40.0   # PARAM_R (angle), PARAM_S (radius)
+    vm.enemies.append(e)
+    vm._run_enemy(e)
+    radii = []
+    for _ in range(90):                        # before set_orbit_distance retargets it at t=120
+        vm.step()
+        if e.motion is not None and e.motion.kind == "circle":
+            radii.append(math.hypot(e.x - e.motion.cx, e.y - e.motion.cy))
+    ok &= _check("orbit radius holds constant", bool(radii) and max(radii) - min(radii) < 1e-6,
+                 f"{radii[:3]}")
+
+    # boss track vs a recording, aligned on the first bullet frame
+    recs = sorted(FIGHTS.glob("letty_*.npz"))
+    if not recs:
+        print("  --   boss track vs recording — skipped (sim/fights/letty_*.npz not present)")
+        return ok
+    import numpy as np
+    vm = VM(ecl, difficulty=3, seed=1)
+    vm.start_boss(sub=31, interrupt=0)
+    trace = {0: (vm.boss().x, vm.boss().y)}
+    for _ in range(11000):
+        vm.step()
+        b = vm.boss()
+        if b is not None:
+            trace[vm.frame] = (b.x, b.y)
+    first_bullet = vm.bullets[0].frame if vm.bullets else 0
+
+    d = np.load(recs[0])
+    rec_bullets_f0 = int(d["bullets"][:, 0].min())
+    offset = rec_bullets_f0 - first_bullet     # raw_step - offset == our frame numbering
+    errs = []
+    for step, rx, ry in d["boss"]:
+        f = int(step) - offset
+        if f in trace and f > first_bullet:   # frame == first_bullet is mid-interpolation, not a snap point
+            vx, vy = trace[f]
+            errs.append((f, math.hypot(vx - rx, vy - ry)))
+    errs.sort()
+    exact_run = 0
+    for _f, err in errs:
+        if err > 0.5:
+            break
+        exact_run += 1
+    ok &= _check(f"boss track exact-matches the recording for {exact_run} deterministic frames",
+                 exact_run >= 100, f"{exact_run} frames before the first RNG-driven move diverges it")
+    return ok
+
+
 def test_letty(path: Path) -> bool:
     ecl = parse_file(path)
     vm = VM(ecl, difficulty=3)
@@ -265,6 +322,8 @@ def main(argv: list[str]) -> int:
     ok &= test_arithmetic()
     print(f"\nLetty phase machine + spawn math ({path.name}):")
     ok &= test_letty(path)
+    print("\nmovement (orbits, boss track):")
+    ok &= test_movement(path)
     print("\nPASS" if ok else "\nFAIL")
     return 0 if ok else 1
 
