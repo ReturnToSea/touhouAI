@@ -17,13 +17,14 @@ looks the way it does.
     exploding on normalised inputs, overfitting the sim score, and wasting
     real-game rollouts on a solved stage.
 
-- __[Danmaku-generation attempts](ex-danmaku.md)__
+- __[Reproducing real danmaku](ex-danmaku.md)__
 
     ---
 
-    The efforts to produce novel-but-correct patterns: the first ECL
-    interpreter, the re-aim saga, and the proof-of-concept boss that never
-    proved anything.
+    Getting a specific boss into the sim: the first ECL interpreter, the full
+    [replay pipeline for Letty](de-letty-replay.md) (the main postmortem — it
+    landed real kills then plateaued), the re-aim detour, and the
+    proof-of-concept boss that never proved anything.
 
 - __[Engine internals](ex-internals.md)__
 
@@ -45,6 +46,7 @@ looks the way it does.
 | What we tried | Verdict | Lesson |
 |---|---|---|
 | [First ECL interpreter](de-ecl-vm.md) | motion failed | don't reimplement an undocumented engine — record or measure its output instead |
+| [Porting Letty into the sim](de-letty-replay.md) | real kills, then plateaued | 20 recordings + their symmetries is an affine transform of a fixed set, not real Letty; the sim score stops predicting transfer |
 | [The re-aim saga](de-reaim.md) | all three abandoned | a re-aimed replayed bullet desyncs from the recording's slot bookkeeping; rigid field rotation was the escape hatch |
 | [PoC boss choice](de-poc.md) | inconclusive twice | a proof-of-concept target has to be a fight the current policy *fails* |
 | [Bolting shooting onto survival](de-shooting.md) | policy games it | you can't add "shoot" as a minor term to a survival objective; it finds the survive-only optimum |
@@ -57,6 +59,7 @@ looks the way it does.
 Every one of these is the same shape: **a fixed artefact — a hand-tuned sim
 stage, an undocumented engine reimplemented, 20 recordings and their symmetries —
 that the policy learns to exploit in ways the sim eval can't see.**
-[The transfer ceiling](ceiling.md) makes that argument in full, and
-[the plan](ecl-vm.md) is the response: generate the danmaku instead of
+[Porting Letty into the sim](de-letty-replay.md) is that argument with the
+receipts; [Why simulation isn't enough](ceiling.md) is the short version on the
+main path. [The plan](ecl-vm.md) is the response: generate the danmaku instead of
 transforming a fixed set of it.

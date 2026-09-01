@@ -98,9 +98,10 @@ nav:
           - "Observation normalization": de-obsnorm.md
           - "Ranking checkpoints by sim score": de-checkpoints.md
           - "Real-game fine-tuning": de-realgame.md
-      - "Danmaku-generation attempts":
+      - "Reproducing real danmaku":
           - ex-danmaku.md
           - "The first ECL interpreter": de-ecl-vm.md
+          - "Porting Letty into the sim": de-letty-replay.md
           - "The re-aim saga": de-reaim.md
           - "Choosing a proof-of-concept boss": de-poc.md
       - "Engine internals":

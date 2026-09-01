@@ -61,8 +61,8 @@ used for everything else, which keeps the [action space](ch-policy.md) small —
 but "get under the boss and shoot" is a genuine part of the task, not free.
 
 This is why the character is fixed: a fixed shot type means the
-[sim's shot model](recording.md#synthetic-damage-phasing) is one fixed 20/80
-split rather than something that changes with the loadout.
+[sim's shot model](de-letty-replay.md#synthetic-damage-phasing) is one fixed
+20/80 split rather than something that changes with the loadout.
 
 ## Current scope
 

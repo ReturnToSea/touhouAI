@@ -28,10 +28,10 @@ transfer score are measuring different things, and past a point they anti-correl
 > **transfer tests** — run them on the real game — not by sim score. Keep a
 > `best_mlp.pt` if you like, but treat it as one candidate, not the answer.
 
-The [real-game transfer daemon](recording.md#the-transfer-daemon) exists for
-exactly this — it plays every new checkpoint against the real boss and logs the
-result, so the "which checkpoint" question has a data-driven answer instead of a
-sim number.
+The [real-game transfer daemon](de-letty-replay.md#the-transfer-daemon) exists
+for exactly this — it plays every new checkpoint against the real boss and logs
+the result, so the "which checkpoint" question has a data-driven answer instead
+of a sim number.
 
-See also the [transfer ceiling](ceiling.md) — this is one symptom of the same
-underlying problem.
+See also [Why simulation isn't enough](ceiling.md) — this is one symptom of the
+same underlying problem.

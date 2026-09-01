@@ -1,81 +1,44 @@
-# Why replay hit a ceiling
+# Why simulation isn't enough
 
-The [record → FightSim → real](recording.md) pipeline works — a policy trained on
-nothing but replayed Letty transfers to the real game and dodges real Letty. But
-across a dozen training variants it plateaus in the same place, and the failure
-mode points at a hard limit of the approach rather than a tuning problem.
+Both ways of feeding the [simulator](sim.md) — procedurally generated danmaku and
+[replayed recordings](recording.md) — plateau in the same place, and the failure
+mode is the same.
 
-## What "it works" looks like
+## The plateau
 
-`fight_letty_seg` — a from-scratch policy trained on ~20 recorded Letty fights
-with synthetic damage-phasing — reaches, on the real game:
-
-| | Sim eval | Real game |
+| Approach | Best real transfer | Where it stops |
 |---|---|---|
-| survival | ~120 s median | **bimodal** — many runs 100–130 s (into Spell 2), many 15–40 s, ~2–7 outright faceplants per checkpoint |
-| kill-rate | 45–70%, stable | ~15 real kills across checkpoints 157–315 M |
+| procedural generation | ~225–231 s median (`ppo_v27` / `ppo_v29`) | clears Stage 1, dies in Stage 2 |
+| recorded replay | ~100 s active-fight median, ~15 % real kill-rate (`fight_letty_seg` v9) | lands real Letty kills, but bimodal — consecutive checkpoints swing "kills Letty" ↔ "faceplants" |
 
-That is a real improvement — a memorisation-prone earlier run got exactly **one**
-real kill in a full billion steps; the version with the anti-memorisation bundle
-got ~15 by 315 M. So the mitigations below help. They just do not close the gap.
+Neither is a tuning problem. In both cases the **sim eval stops predicting real
+performance**: the procedural sim's score keeps rising while transfer stalls or
+regresses ([obs normalisation](de-obsnorm.md),
+[fixed-stage overfitting](de-checkpoints.md)), and the replay sim's kill-rate
+sits flat at 50–70 % while real checkpoints swing from 104 s to 2.8 s to 83 s.
 
-## The tell: sim score stops predicting real score
+## The reason
 
-The sim eval is stable — ~50–70% kill-rate the whole run. The **real** number is
-not:
+When the sim eval can't tell a good policy from a bad one, the policy is
+exploiting structure that only exists in the sim. That structure is unavoidable
+with either approach, because both train on a **fixed artefact**:
 
-| Checkpoint | Real median | Faceplants | Real kills |
-|---|---|---|---|
-| 189 M | **104 s** | 2 | 1 |
-| 236 M | **2.8 s** | 7 | 0 |
-| 252 M | **83 s** | 0 | 2 |
-| 315 M | 23 s | 1 | 0 |
+- procedural generation makes plausible bullets but no real boss *structure* — no
+  phases, no spellcard declarations, no satellite-orb choreography;
+- replay is 20 recordings, and every anti-memorisation measure
+  ([mirror, rotation, mid-phase starts, damage randomisation](de-letty-replay.md#fighting-memorisation))
+  is an affine transform of those 20 — not new data.
 
-Consecutive checkpoints swing from "kills Letty" to "faceplants every run" while
-the sim eval barely moves. When the sim eval can no longer tell a good policy
-from a bad one, the policy is exploiting structure that only exists in the sim.
+Real Letty's RNG produces genuinely different danmaku every run. No transform of
+a fixed set covers that.
 
-!!! note "Measure the fight, not the intro"
-    PCB puts ~42 s of boss entrance + un-skippable dialogue before Letty's first
-    bullet. Early transfer numbers counted it. The real fight numbers above
-    exclude it — the timer starts when bullets appear. A quoted "102 s" was
-    really ~60 s of danmaku.
+The full replay-training postmortem — every step, and the
+checkpoint-by-checkpoint transfer numbers — is
+[Porting Letty into the sim](de-letty-replay.md).
 
-## Why the ceiling exists
+## The response
 
-Every anti-memorisation measure we added is an **affine transform of a fixed
-dataset**, not new data:
-
-| Measure | What it does | What it can't do |
-|---|---|---|
-| x-mirror | flips the fight left↔right (10 recs → 20) | still the same 20 fights |
-| rigid field rotation ±10° | rotates the whole danmaku field per episode | a rotation of fight #3 is still fight #3 |
-| mid-phase random starts | drops the policy in at any frame with random HP | doesn't change what the bullets *are* |
-| damage randomisation | fast/slow kill, 20% pure-survival episodes | doesn't change the pattern |
-
-On the real game Letty's RNG produces **genuinely different** danmaku every run —
-different spread widths, bullet counts, sub-wave timing. No flip or rotation of
-20 recordings covers that. The policy learns "handle these 20 fights and their
-symmetries", which is a narrow slice of "handle real Letty", and small weight
-changes that don't hurt the sim can wreck the transfer.
-
-!!! warning "The re-aim detour"
-    Re-aiming replayed bullets at the *live* policy — instead of the recorded
-    player — seemed like the fix for the biggest memorisation vector. Three
-    implementations, all abandoned: a rotated bullet's screen-lifetime stops
-    matching the recording's slot bookkeeping, so bullets vanish mid-screen or
-    flicker. The full story is in
-    [The re-aim saga](de-reaim.md). Rigid field rotation was
-    the escape hatch — it moves every bullet without changing any trajectory.
-
-## What actually moves the needle
-
-1. **More recordings.** 20 → 60–100. More RNG samples is a genuinely wider
-   distribution, not symmetries of a fixed one. Cheap now that the re-aim
-   machinery is gone (~8 GB of VRAM freed). Helps at the margin.
-2. **Generative danmaku.** Run Letty's actual bytecode so every episode is a
-   novel, correct pattern. This is [the plan](ecl-vm.md).
-
-The [old ECL VM attempt](de-ecl-vm.md) failed on bullet *motion*, not on the VM. The new attempt gets motion by hooking the
-game and measuring it, the same way [recording](recording.md) got bullet physics
-without understanding `bullet_effects`.
+Generate the danmaku instead: run each boss's **actual PCB bytecode**, so every
+episode is a novel, correct pattern. The [first attempt](de-ecl-vm.md) at that
+failed on bullet motion; [the plan](ecl-vm.md) gets the motion by hooking the
+engine and measuring it, the same way recording did.

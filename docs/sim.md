@@ -41,8 +41,9 @@ Record the real game's bullet positions frame by frame and replay them on the
 GPU. This reproduces a **specific** boss exactly, including the undocumented
 motion effects the [ECL interpreter](de-ecl-vm.md) couldn't, and it is what
 landed the first real *kills* on Letty. It has its own ceiling — a fixed set of
-recordings and their symmetries. [Chapter 10](recording.md) covers the pipeline;
-[Chapter 11](ceiling.md) covers why it isn't enough.
+recordings and their symmetries. [Chapter 10](recording.md) covers the recorder;
+the full pipeline and the transfer analysis are in
+[Porting Letty into the sim](de-letty-replay.md).
 
 ## Throughput
 

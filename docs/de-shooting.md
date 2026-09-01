@@ -26,7 +26,7 @@ the [transfer-ceiling](ceiling.md) argument in miniature.)
 
 ## `fight_letty_seg` — remove the survival reward entirely
 
-The [damage-phased Letty sim](recording.md#synthetic-damage-phasing) went the other way:
+The [damage-phased Letty sim](de-letty-replay.md#synthetic-damage-phasing) went the other way:
 **no per-frame survival reward at all**. Just
 
 ```

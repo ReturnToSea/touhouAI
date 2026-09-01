@@ -95,15 +95,18 @@ underperforms mid-training snapshots, per the v26 lesson.
 ## The recorded-Letty era — `fight_letty_seg`
 
 A from-scratch policy trained on ~20 [recorded Letty fights](recording.md) with
-[synthetic damage-phasing](recording.md#synthetic-damage-phasing), aiming to be
-the first run that *kills* a real boss rather than just outlasting it. Numbers
-are **active fight time** — the ~42 s of dialogue is excluded.
+[synthetic damage-phasing](de-letty-replay.md#synthetic-damage-phasing), aiming
+to be the first run that *kills* a real boss rather than just outlasting it. The
+full pipeline and the transfer analysis are in
+[Porting Letty into the sim](de-letty-replay.md); this is the run-by-run.
+Numbers are **active fight time** — the ~42 s of dialogue is excluded.
 
 ### v1–v4 — the mechanics come together
 
 Real phase detection from screen-clears; per-phase armor windows; the
-[realistic ReimuA shot model](recording.md#synthetic-damage-phasing) (20% homing
-+ 80% forward needle, ±17.5 px lane); the [kill-only reward](de-shooting.md). Sim
+[realistic ReimuA shot model](de-letty-replay.md#synthetic-damage-phasing) (20%
+homing + 80% forward needle, ±17.5 px lane); the
+[kill-only reward](de-shooting.md). Sim
 kill-rate climbed 19% → a noisy 40–100%. Real transfer: from **one** kill in a
 full billion steps (memorisation-prone) to ~11 real kills by 250 M.
 
