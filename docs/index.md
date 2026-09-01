@@ -51,10 +51,11 @@ mode says it's a [hard limit of transforming a fixed dataset](ceiling.md), not a
 tuning problem. The response ([the plan](ecl-vm.md)) is to **generate** the
 danmaku instead: run each boss's actual PCB bytecode, getting the bullet motion
 by hooking the engine and measuring it. Split into twelve verifiable parts —
-**six done**: a byte-exact binary parser, a control-flow VM that runs Letty's
-real script (phase transitions, arithmetic, a PRNG), bullet spawn-event
-emission, and sub-enemy + boss movement whose track lands pixel-exact against a
-recording for 127 frames. No bullet *motion* yet, and no trained policy — see
+**five done and verified**: a byte-exact binary parser, a control-flow VM that
+runs Letty's real script (phase transitions, arithmetic, a PRNG), bullet
+spawn-event emission, and sub-enemy recursion. Movement (Part 8) is built —
+the boss track lands pixel-exact against a recording for 127 frames — but not
+yet its own verified pass. No bullet *motion* yet, and no trained policy — see
 [the plan](ecl-vm.md) for exactly where each part stands.
 
 !!! note "Constraints"

@@ -9,18 +9,23 @@ The downstream pipeline — collision, obs, PPO, the real-game daemon — does n
 change. The VM replaces *where the bullet positions come from*, nothing else.
 
 !!! note "Where Stage A stands"
-    Parts 1, 2, 3, 5, 6, and 8 are done — six of eight in Stage A. `sim/ecl/`
-    parses every stage's binary byte-exact, runs Letty's real script frame by
-    frame (control flow, the phase machine, arithmetic, a working PRNG),
-    recurses into her sub-enemies, and moves both her and them — the boss's own
-    track lands **pixel-exact against a recording for 127 frames**, until the
-    first RNG-driven choice. Bullet **spawn events** come out the other end
-    (count, type, position, angle, speed) within a few percent of the recorded
-    birth counts. What's left in Stage A: Part 4's KS-test validation of the
-    RNG (the generator is built; the statistical check against recorded spreads
-    isn't run yet) and Part 7 (real HP thresholds — wired into the phase
-    machine already, needs a damage model to exercise). No bullet **motion**
-    yet — that's Stage B.
+    **Parts 1, 2, 3, 5, 6 are done and verified.** `sim/ecl/` parses every
+    stage's binary byte-exact, runs Letty's real script frame by frame (control
+    flow, the phase machine, arithmetic, a working PRNG), recurses into her
+    sub-enemies, and moves both her and them — the boss's own track lands
+    **pixel-exact against a recording for 127 frames**, until the first
+    RNG-driven choice. Bullet **spawn events** come out the other end (count,
+    type, position, angle, speed) within a few percent of the recorded birth
+    counts.
+
+    Partial: **Part 4** (the PRNG generator is built; the KS test against
+    recorded spreads isn't run yet), **Part 7** (HP thresholds — the callback
+    mechanism is wired into the phase machine, but nothing exercises it without
+    a damage model), **Part 8** (the movement system is built and matches the
+    recording on the deterministic frames, but it hasn't had its own verify
+    pass and a few move-tuning opcodes are stubbed).
+
+    No bullet **motion** yet — that's Stage B.
     - All six PCB stage ECLs decompiled (`tools/th07_ecl/`), Letty isolated, the
       opcode map `th07.eclm`
     - A dead VM skeleton (`sim/ecl_vm.py` + `ecl_parse/expand/bullet`) from the
@@ -190,11 +195,24 @@ too, so Part 8's opcodes came along with it:
 - **Verify:** VM phase-transition frames match the recorded screen-clears; HP
   values and timed-out-phase durations match the recordings.
 
-### 8 · Boss movement · ✅ done (came along with Part 6)
+### 8 · Boss movement · core built with Part 6; not yet its own verified pass
 
 Letty's own repositioning runs through the same `move_dir_time` / `move_point`
-opcodes as the orbs, so this was one build. See Part 6's verify — the boss
-track against the recording, pixel-exact for 127 frames.
+/ `move_position` opcodes as the orbs, so the movement system was one build —
+and Part 6's verify already shows the boss track pixel-exact against a
+recording for 127 frames (until the first RNG-driven move).
+
+What's still owed before this is a clean "done":
+
+- **A dedicated verify pass.** So far it rode along on Part 6's single check.
+  Need: a proper diff of the whole boss track against the recording,
+  RNG-stream-matched where possible, and a look at whether the real engine
+  decelerates near a `move_point` target (PyTouhou has a `move_to_decel`
+  variant — the current model is pure linear).
+- **Stubbed opcodes.** `move_speed` (49), `move_acceleration` (50),
+  `set_angle` (58), and the `__move_change_*` family are no-ops. `move_speed`
+  appears once in the Stage 1 script; the rest may not matter for Letty but
+  will for later bosses.
 
 ---
 

@@ -58,12 +58,14 @@ Sub-enemies: `Sub40→Sub41` (NS1 icicles, `bullet_random`), `Sub43→Sub36`
 
 ## Status
 
-`sim/ecl/` runs all of the above frame-by-frame — Parts 1–3, 5, 6, 8 of the
-plan are done and verified against the `sim/fights/letty_*` recordings (phase
-timing, spawn counts within a few %, boss track pixel-exact for 127 frames).
-What's left: Part 4's PRNG KS-test, Part 7 (HP thresholds — mechanism wired, needs
-a damage model), and **Stage B** — bullet *motion*, which comes from hooking
-`th07.exe` and measuring, not from interpreting `bullet_effects` statically.
+`sim/ecl/` runs all of the above frame-by-frame — Parts 1–3, 5, 6 of the plan
+are done and verified against the `sim/fights/letty_*` recordings (phase timing,
+spawn counts within a few %, boss track pixel-exact for 127 frames). Part 8's
+movement system is built (that pixel-exact track is it) but hasn't had its own
+verify pass; Part 4's PRNG KS-test and Part 7 (HP thresholds — mechanism wired,
+needs a damage model) are also outstanding. Then **Stage B** — bullet *motion*,
+from hooking `th07.exe` and measuring, not from interpreting `bullet_effects`
+statically.
 
 ## Refs
 

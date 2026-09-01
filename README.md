@@ -30,8 +30,10 @@ VM:
 - **bullet spawn events** come out the other end (frame, type, position, angle,
   speed) within a few percent of the recorded birth counts
 
-Six of eight Stage-A parts done. Bullet *motion* is Stage B — hooking `th07.exe`
-and measuring, not interpreting `bullet_effects` statically. Full plan + status:
+Parts 1–3, 5, 6 done and verified; movement (Part 8) is built but not yet its
+own verified pass; Part 4 (PRNG) and Part 7 (HP thresholds) are partial. Bullet
+*motion* is Stage B — hooking `th07.exe` and measuring, not interpreting
+`bullet_effects` statically. Full plan + status:
 [`docs/ecl-vm.md`](docs/ecl-vm.md).
 
 Everything downstream — collision, the 236-value obs, PPO, the real-game
