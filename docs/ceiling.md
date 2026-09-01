@@ -9,13 +9,14 @@ mode is the same.
 | Approach | Best real transfer | Where it stops |
 |---|---|---|
 | procedural generation | ~225–231 s median (`ppo_v27` / `ppo_v29`) | clears Stage 1, dies in Stage 2 |
-| recorded replay | ~100 s active-fight median, ~15 % real kill-rate (`fight_letty_seg` v9) | lands real Letty kills, but bimodal — consecutive checkpoints swing "kills Letty" ↔ "faceplants" |
+| recorded replay | 60 s active-fight median / 7 % kill-rate over 631 fights; best checkpoint ~103 s / 33 % (`fight_letty_seg` v9, full 1 B steps) | lands real Letty kills, but bimodal — consecutive checkpoints swing "kills Letty" ↔ "faceplants" |
 
 Neither is a tuning problem. In both cases the **sim eval stops predicting real
 performance**: the procedural sim's score keeps rising while transfer stalls or
 regresses ([obs normalisation](de-obsnorm.md),
 [fixed-stage overfitting](de-checkpoints.md)), and the replay sim's kill-rate
-sits flat at 50–70 % while real checkpoints swing from 104 s to 2.8 s to 83 s.
+sits flat at 50–83 % while real per-checkpoint kill-rate swings between 0 % and
+33 % with no trend across a billion steps.
 
 ## The reason
 

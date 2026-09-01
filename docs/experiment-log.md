@@ -21,7 +21,7 @@ training run: what changed, what the sim curve did, what transferred, verdict.
 |---|---|---|
 | Best real playthrough | mid-Stage 2, ~1.63 M score | `ppo_v12` — cleared the Chen midboss, died before the Stage 2 boss (watched, not logged) |
 | Real transfer, current obs | **~225 s** median (stages 1–2) | `ppo_v27` / `ppo_v29` |
-| Recorded-Letty, best checkpoint | ~100 s active fight median, ~15% real kill-rate | `fight_letty_seg` v9 (~189 M / 252 M snapshots) |
+| Recorded-Letty, full 1 B-step run | 60 s active-fight median / 7% kill-rate over 631 real fights; best checkpoint (~724 M) ~103 s / 33% | `fight_letty_seg` v9 |
 
 No current-obs run has matched `ppo_v12`'s mid-Stage-2 reach. Every
 domain-randomized run plateaus around "clears stage 1, dies in stage 2." The
@@ -129,21 +129,24 @@ Still bimodal on the real game.
 Dropped per-bullet re-aim entirely; replaced with a rigid ±10° per-episode
 rotation of the whole danmaku field. Deleted `spawn`, `aimed`, `launch_ang`,
 `birth`, and the per-episode buffers — freed ~8 GB VRAM, training 94k → 136k
-frames/s. Sim kill-rate **stable at 50–70%** (vs the 0–35% oscillation of v6–v8).
-Real transfer: ~15 kills across checkpoints 157–315 M, but bimodal — consecutive
-checkpoints swing median 104 s → 2.8 s → 83 s while the sim eval barely moves.
+frames/s. **Trained the full 1 B steps.** Sim kill-rate **stable at 50–83%** (vs
+the 0–35% oscillation of v6–v8); median drifted ~128 s → ~118 s as the LR
+annealed. Real transfer over 631 daemon fights: **7% kill-rate (47 kills),
+60 s median**, but per-checkpoint kill-rate swings 0% → 33% with no trend —
+best at ~724 M / ~818 M (4/12), while the sim's `best_mlp.pt` (~598 M, 83% sim)
+lands 1/10 real.
 
 > **Realisation.** The anti-memorisation bundle genuinely helps — v9 lands real
-> kills where v5 got one in a billion steps. But the sim eval no longer predicts
-> real performance, which means the policy is exploiting structure that only
-> exists in 20 recordings and their symmetries. This is
+> kills where v5 got one in a billion steps. But over a full billion steps the
+> sim eval never predicts real performance, which means the policy is exploiting
+> structure that only exists in 20 recordings and their symmetries. This is
 > [the ceiling](ceiling.md), and the response is [generative danmaku](ecl-vm.md).
 
 ## Runs
 
 | Run | Date | What changed | Real transfer | Verdict |
 |---|---|---|---|---|
-| `fight_letty_seg` v9 | 2026-08-31 | re-aim removed → rigid field rotation; stability fixes; ~20 recs | ~100 s active-fight median (bimodal), ~15% real kill-rate | best recorded-boss run; hits the [ceiling](ceiling.md) |
+| `fight_letty_seg` v9 | 2026-08-31 | re-aim removed → rigid field rotation; stability fixes; ~20 recs; full 1 B steps | 60 s median / 7% kill-rate over 631 fights; best ckpt ~103 s / 33% | best recorded-boss run; hits the [ceiling](ceiling.md) |
 | `fight_letty_seg` v1–v8 | 2026-08-31 | phase detection + synthetic damage-phasing + kill-only reward + the [re-aim saga](de-reaim.md) | 1 → ~11 real kills; v7 peaked 88 s then thrashed | superseded by v9 |
 | `fight_letty` | 2026-08-31 | recorded-Letty FightSim + re-aiming + real hitboxes + lethal enemy bodies; from scratch | 150–190 s on real Letty | inconclusive — Letty too easy (baseline 6/6) |
 | `ppo_v29` | 2026-08-30 | v27 + AABB collision + focus-aware escape + reward-norm + LR anneal | ~231 s median | wash vs v27 |

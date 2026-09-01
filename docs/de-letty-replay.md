@@ -1,10 +1,11 @@
 # Porting Letty into the sim
 
 **Verdict:** record-and-replay is the furthest a policy has gone against a real
-boss — it landed ~15 real kills on Letty where a memorisation-prone run got one
-in a billion steps. It still didn't transfer *reliably*, for a reason that
-turned out to be structural, and that reason is [the plan](ecl-vm.md)'s whole
-justification.
+boss — over a full 1 B-step run it killed real Letty **47 times in 631 fights**,
+where a memorisation-prone earlier run got one kill in a billion steps. It still
+didn't transfer *reliably* (7 % overall, wildly checkpoint-dependent), for a
+reason that turned out to be structural — and that reason is
+[the plan](ecl-vm.md)'s whole justification.
 
 This is the end-to-end walkthrough: how ~20 recorded Letty fights became a GPU
 training environment, and why the policy it produced swings between "kills
@@ -143,7 +144,7 @@ reward. Getting here from a survival-weighted reward was
 | v1–v4 | mechanics: phase detection, armor windows, the 20/80 shot model, kill-only reward | sim kill-rate 19 % → noisy 40–100 %; real kills 1-in-a-billion → ~11 by 250 M |
 | v5–v7 | the [re-aim saga](de-reaim.md) | v7 peaked at **88 s** active-fight median — best of any run — then PPO thrashed it to ~20 s |
 | v8 | stability: γ 0.997→0.995, entropy 0.004→0.002, cosine LR, `best_mlp.pt` on eval peaks, + the survival floor | still bimodal |
-| v9 | re-aim removed → rigid field rotation | sim kill-rate **stable 50–70 %** (vs the 0–35 % oscillation of v6–v8) |
+| v9 | re-aim removed → rigid field rotation; trained the full 1 B steps | sim kill-rate **stable 50–83 %** (vs the 0–35 % oscillation of v6–v8) |
 
 The [experiment log](experiment-log.md) has the full run-by-run.
 
@@ -160,29 +161,37 @@ It exists because **the sim score stopped predicting transfer.**
 
 ### What "it works" looks like
 
-`fight_letty_seg` v9 reaches, on the real game:
+`fight_letty_seg` v9 trained the full **1 billion steps**. The transfer daemon
+played **631 real Letty fights** across 53 checkpoints along the way:
 
-| | Sim eval | Real game |
+| | Sim eval | Real game (all 631 fights) |
 |---|---|---|
-| survival | ~120 s median | **bimodal** — many runs 100–130 s (into Table-Turning), many 15–40 s, ~2–7 outright faceplants per checkpoint |
-| kill-rate | 45–70 %, stable | ~15 real kills across checkpoints 157–315 M |
+| survival | ~120 s median, drifting to ~118 s | median **60 s** active-fight, p90 114 s, max 148 s |
+| kill-rate | flat 50–83 % the whole run | **7 %** overall (47 kills); **26 %** of runs clear 100 s+, **11 %** faceplant under 10 s |
 
-That is a real improvement — a memorisation-prone earlier run got exactly **one**
-real kill in a full billion steps. The mitigations help; they don't close the
-gap.
+That is still a real improvement — a memorisation-prone earlier run got exactly
+**one** real kill in a full billion steps; v9 got 47. The mitigations help; they
+don't close the gap.
 
 ### The tell: sim score stops predicting real score
 
-| Checkpoint | Real median | Faceplants | Real kills |
-|---|---|---|---|
-| 189 M | **104 s** | 2 | 1 |
-| 236 M | **2.8 s** | 7 | 0 |
-| 252 M | **83 s** | 0 | 2 |
-| 315 M | 23 s | 1 | 0 |
+Per-checkpoint real kill-rate swings **0 % → 33 %** with no trend over the run,
+while the sim eval sits flat at 50–83 %:
 
-Consecutive checkpoints swing from "kills Letty" to "faceplants every run" while
-the sim eval barely moves. When the sim eval can't tell a good policy from a bad
-one, the policy is exploiting structure that only exists in the sim.
+| Checkpoint | Real median | Faceplants | Real kills / 12 |
+|---|---|---|---|
+| 235 M | **2.8 s** | 7 | 0 |
+| 251 M | 83 s | 0 | 2 |
+| 707 M | 17 s | 0 | 0 |
+| 723 M | **103 s** | 0 | 4 |
+| 927 M | 19 s | 2 | 0 |
+
+The best checkpoint for transfer was ~724 M (also ~818 M) — 4/12 kills — but the
+sim's own `best_mlp.pt`, picked on an 83 % sim kill-rate at ~598 M, lands 1/10 on
+the real game. Consecutive checkpoints swing from "kills Letty a third of the
+time" to "faceplants every run" while the sim eval barely moves. When the sim
+eval can't tell a good policy from a bad one, the policy is exploiting structure
+that only exists in the sim.
 
 ### Why the ceiling exists
 

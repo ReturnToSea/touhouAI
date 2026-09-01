@@ -41,7 +41,7 @@ point, and the plan to get past it, is what Parts 4 and 5 are about.
 |---|---|---|
 | Best real playthrough | mid-Stage 2, ~1.63M score | `ppo_v12` (retired 212-d obs) — cleared the Chen midboss, died before the Stage 2 boss |
 | [Procedural-sim](sim.md) transfer | `~225 s median` | `ppo_v27` / `ppo_v29` — clears Stage 1, dies in Stage 2 |
-| [Recorded-Letty](recording.md) transfer | ~100 s active-fight, lands real kills | `fight_letty_seg` v9 — first run to *kill* a real boss, not just outlast it |
+| [Recorded-Letty](de-letty-replay.md) transfer | 60 s median / 7% kill-rate (631 fights); best checkpoint ~103 s / 33% | `fight_letty_seg` v9 — first run to *kill* a real boss, not just outlast it; then [plateaued](ceiling.md) |
 
 ### What's next
 
