@@ -128,7 +128,14 @@ class Enemy:
 
         self.shoot_offset = (0.0, 0.0, 0.0)
         self.pending_effect: tuple | None = None    # last bullet_effects, attached to the next spawn
-        self.motion: _Motion | None = None
+        self.motion: _Motion | None = None          # move_point interpolator / orbit
+        # free-flight physics (used when `motion` is None) — the engine integrates
+        # these every frame: speed += accel, angle += ang_vel, pos += speed·[cos,sin]
+        self.mspeed = 0.0
+        self.mangle = 0.0
+        self.maccel = 0.0
+        self.mangvel = 0.0
+        self.stop_at: int | None = None             # frame to zero `mspeed` (move_dir_time duration)
 
         # execution state
         self.sub = sub
@@ -255,21 +262,29 @@ class VM:
 
     def _update_motion(self, e: Enemy) -> None:
         m = e.motion
-        if m is None:
+        if m is not None:
+            t = self.frame - m.start_frame
+            if m.kind == "linear":                 # move_point: interpolate to a target
+                f = 1.0 if m.duration <= 0 else min(1.0, t / m.duration)
+                e.x = m.x0 + (m.x1 - m.x0) * f
+                e.y = m.y0 + (m.y1 - m.y0) * f
+                e.z = m.z0 + (m.z1 - m.z0) * f
+                if t >= m.duration:
+                    e.motion = None
+            elif m.kind == "circle":               # orbit a fixed centre
+                ang = m.angle0 + m.ang_speed * t
+                e.x = m.cx + m.radius * math.cos(ang)
+                e.y = m.cy + m.radius * math.sin(ang)
+                e.z = m.cz
             return
-        t = self.frame - m.start_frame
-        if m.kind == "linear":
-            f = 1.0 if m.duration <= 0 else min(1.0, t / m.duration)
-            e.x = m.x0 + (m.x1 - m.x0) * f
-            e.y = m.y0 + (m.y1 - m.y0) * f
-            e.z = m.z0 + (m.z1 - m.z0) * f
-            if t >= m.duration:
-                e.motion = None
-        elif m.kind == "circle":
-            ang = m.angle0 + m.ang_speed * t
-            e.x = m.cx + m.radius * math.cos(ang)
-            e.y = m.cy + m.radius * math.sin(ang)
-            e.z = m.cz
+        # free flight — the engine's per-frame integration
+        if e.stop_at is not None and self.frame >= e.stop_at:
+            e.mspeed, e.stop_at = 0.0, None
+        e.mspeed += e.maccel
+        e.mangle += e.mangvel
+        if e.mspeed:
+            e.x += e.mspeed * math.cos(e.mangle)
+            e.y += e.mspeed * math.sin(e.mangle)
 
     # -- Part 5: bullet spawning & sub-enemies ---------------------------
     def _emit_bullets(self, e: Enemy, kind: str, args: list, source_ip: int = -1) -> None:
@@ -600,9 +615,13 @@ def _bullet(vm, e, ins):
     vm._emit_bullets(e, _BULLET_KIND[ins.opcode], ins.args, source_ip=ins.index)
 
 
-@_op(79)  # bullet_effects(...) — attaches to the next spawn (Stage B models it)
-def _bullet_effects(vm, e, ins):
-    e.pending_effect = tuple(e.get(a) for a in ins.args)
+@_op(79)  # bullet_effects(enable, flag, _, interval, _, p1, p2) — attaches to
+def _bullet_effects(vm, e, ins):      # the next spawn (Stage B models it)
+    args = tuple(e.get(a) for a in ins.args)
+    # arg0 is an enable bit: every arg0==0 call in Letty's script (incl. the
+    # `(0,1,0,-1,…)` sentinel) leaves the recorded bullets with fx_flag 0;
+    # every arg0==1 call's flag/interval/p1/p2 match the recording exactly.
+    e.pending_effect = args if args and int(args[0]) == 1 else None
 
 
 @_op(78)  # shoot_offset(x, y, z)
@@ -644,30 +663,50 @@ def _create_abs(vm, e, ins):
 
 # --- movement (Part 6/8) -------------------------------------------------
 
-@_op(46)  # move_position(x, y, z) — snap, cancels any motion in progress
+@_op(46)  # move_position(x, y, z) — snap
 def _move_position(vm, e, ins):
     e.x, e.y, e.z = (e.get(a) for a in ins.args)
     e.motion = None
 
 
-@_op(54)  # move_dir_time(duration, _, angle, speed) — constant heading for `duration` frames
-def _move_dir_time(vm, e, ins):
-    dur, _u, angle, speed = (e.get(a) for a in ins.args)
-    dur = int(dur)
-    tx = e.x + math.cos(angle) * speed * dur
-    ty = e.y + math.sin(angle) * speed * dur
-    e.motion = _Motion("linear", vm.frame, dur, e.x, e.y, e.z, tx, ty, e.z)
+@_op(49)  # move_speed(speed)
+def _move_speed(vm, e, ins):
+    e.mspeed, e.motion = e.get(ins.args[0]), None
+
+
+@_op(50)  # move_acceleration(accel)
+def _move_accel(vm, e, ins):
+    e.maccel, e.motion = e.get(ins.args[0]), None
+
+
+@_op(48)  # move_angular_velocity(ang_vel)
+def _move_angvel(vm, e, ins):
+    e.mangvel, e.motion = e.get(ins.args[0]), None
+
+
+@_op(58)  # set_angle(angle)
+def _set_angle(vm, e, ins):
+    e.mangle, e.motion = e.get(ins.args[0]), None
+
+
+@_op(54)  # move_dir_time(duration, _, angle, speed) — set heading+speed for
+def _move_dir_time(vm, e, ins):   # `duration` frames then stop. The recorded orbs
+    dur, _u, angle, speed = (e.get(a) for a in ins.args)   # that call this with
+    e.mangle, e.mspeed, e.maccel, e.mangvel = angle, speed, 0.0, 0.0  # duration 0
+    e.stop_at = vm.frame + max(0, int(dur))   # sit ~still — so 0 == stop next frame
+    e.motion = None
 
 
 @_op(55)  # move_point(duration, _, x, y, z) — linear move to an absolute point
 def _move_point(vm, e, ins):
     dur, _u, x, y, z = (e.get(a) for a in ins.args)
     e.motion = _Motion("linear", vm.frame, int(dur), e.x, e.y, e.z, x, y, z)
+    e.mspeed = 0.0
 
 
-@_op(56)  # __move_circle_abs(mode, cx, cy, cz, angle, radius, _, ang_speed)
-def _move_circle(vm, e, ins):
-    _mode, cx, cy, cz, angle, radius, _u, ang_speed = (e.get(a) for a in ins.args)
+@_op(56)  # __move_circle_abs(_, cx, cy, cz, angle, radius, _, ang_speed) — orbit a
+def _move_circle(vm, e, ins):     # fixed centre (evaluated once; see _Motion docstring)
+    _a0, cx, cy, cz, angle, radius, _u, ang_speed = (e.get(a) for a in ins.args)
     e.motion = _Motion("circle", vm.frame, 1 << 30, e.x, e.y, e.z, e.x, e.y, e.z,
                        cx=cx, cy=cy, cz=cz, angle0=angle, radius=radius, ang_speed=ang_speed)
 
@@ -678,8 +717,8 @@ def _orbit_distance(vm, e, ins):
         e.motion.radius = e.get(ins.args[0])
 
 
-@_op(43, 44, 48, 49, 50, 53, 58, 59, 60, 61, 62, 63)  # boss-relative set, ang-vel/accel/speed
-def _move_misc_noop(vm, e, ins):                       # tuning knobs Letty doesn't lean on; no-op
+@_op(43, 44, 47, 53, 59, 60, 61, 62, 63)  # set-from-boss, move_at_player, __move_change_*,
+def _move_misc_noop(vm, e, ins):          # bounds — Letty doesn't lean on these; no-op
     pass
 
 

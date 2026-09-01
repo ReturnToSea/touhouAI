@@ -70,14 +70,11 @@ def run_vm(ecl_path: str = str(_ECL), seed: int = 0, frames: int = 13000
 
 def _eff_sig(effect) -> tuple:
     """(fx_flag, fx_p1, fx_interval) from a VM `bullet_effects` tuple, matching
-    what the recorder logs at `+0xC3C / +0xC2C / +0xC34`. `flag == 1` and the
-    `-1` sentinel tuple both mean "no active effect" → flag 0."""
+    what the recorder logs at `+0xC3C / +0xC2C / +0xC34`. The VM already nulls a
+    disabled (arg0==0) effect, so a tuple here means it applied."""
     if effect is None:
         return (0, 0.0, 0)
-    flag, interval, p1 = int(effect[1]), int(effect[3]), float(effect[5])
-    if flag == 1 or interval < 0:
-        return (0, 0.0, 0)
-    return (flag, round(p1, 4), interval)
+    return (int(effect[1]), round(float(effect[5]), 4), int(effect[3]))
 
 
 def _bul_sig(b: Bullet) -> tuple:
