@@ -16,7 +16,7 @@ dodging already handles her, so there was no gap for the recordings to close.
 ## Letty — inconclusive
 
 `fight_letty` transferred: 150–190 s on real Letty, essentially clearing the
-fight. But the baseline — a plain procedural-sim policy on pure-dodge — cleared
+fight. But the baseline — a plain survival-only procedural-sim policy — outlasted
 real Letty **6 / 6**. The recorded-boss policy was actually *worse*, 3 / 6.
 
 No room to show benefit where the generic policy already scores 100%.

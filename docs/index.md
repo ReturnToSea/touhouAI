@@ -1,7 +1,7 @@
 # th07 Agent Handbook
 
 !!! quote ""
-    Teaching a machine to dodge *Perfect Cherry Blossom*.
+    Teaching a machine to clear *Perfect Cherry Blossom* on Lunatic.
 
 A reinforcement-learning agent for Touhou 7 (PCB) on Lunatic, built from
 process-memory reads, an injected control DLL, a GPU danmaku simulator, and a
@@ -57,5 +57,6 @@ results yet.
     The clear runs on vanilla `th07.exe` with the hook in observe-only mode.
     `thtk` and `thprac` are used only as offline tools — script extraction, and
     (planned) jumping to a boss to record it. No vpatch, no thcrap, no runtime
-    patches to the game logic. Character is fixed to **ReimuA** (homing shot —
-    decouples "shoot" from "aim").
+    patches to the game logic. Character is fixed to **ReimuA** — a fixed shot
+    type (~20% homing, ~80% forward), so there's no aim axis to learn, though
+    positioning under a boss to land the forward fire is still part of the task.

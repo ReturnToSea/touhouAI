@@ -35,20 +35,19 @@ On **Lunatic**, the hardest difficulty, this is the benchmark of mastery. The
 ideal is **no-miss no-bomb (NMNB)**: the full game without losing a life or
 using a bomb.
 
-## Why PCB, and why pure dodging is a legitimate path
+## Why PCB
 
 PCB is widely considered the most "perfectable" of the hard Windows *Touhou*
 games: its patterns are readable and its timing is stable. Its signature
-mechanic — the **cherry/border** system — rewards precise flying with score and
-supernatural-border bonuses, but it is a *scoring* tool, not a survival crutch.
-Nothing in PCB forces you to fight back on a timer.
+mechanic — the **cherry/border** system — is a *scoring* tool, not a survival
+crutch, and nothing in PCB forces you to fight back on a timer.
 
-That matters for this project: a policy that only ever **dodges** — never
-optimising score, rarely even shooting — can in principle clear the game. That
-removes aiming from the problem and lets the agent focus on the one hard thing,
-survival. (We fix the character to **ReimuA**, whose shot homes on its own, so
-even the shooting that *does* happen doesn't require aiming — see
-[the approach](ch-goal.md).)
+That shapes the project: the hard part of a clear is almost entirely
+**survival**, so dodging is where the effort goes. But a clear still isn't pure
+dodging — you have to damage each boss enough to end its phases and manage power
+and enemies through the stage sections. PCB's design just means the agent can
+prioritise not dying and fit the shooting around it. See
+[the goal](ch-goal.md) for how that translates into the objective.
 
 ## The bosses
 

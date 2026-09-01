@@ -49,8 +49,10 @@ rew =  DMG_REW · boss-HP drained          # dense progress toward the kill
      + SURV_REW · alive                     # thin floor, ~30× smaller than aligned shooting
 ```
 
-For the pure-dodge [procedural-sim](sim.md) policies there is no damage term —
-just survival, graze, and a light bottom-camping penalty.
+The [procedural-sim](sim.md) policies use a survival-only version — survival,
+graze, a light bottom-camping penalty, no damage term — which is why they only
+learn to dodge. Teaching one policy to both dodge *and* engage is the whole
+subject of [the reward saga](de-shooting.md).
 
 ## Real-game PPO
 

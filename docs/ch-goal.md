@@ -3,9 +3,14 @@
 ## The goal
 
 A full **Lunatic 1-credit clear** of `th07.exe` v1.00b — six stages, no
-continues — ideally **no-miss, no-bomb**. As explained in [The game](ch-game.md),
-PCB permits a pure-dodge solution, so the target policy is one that survives, not
-one that optimises score.
+continues — ideally **no-miss, no-bomb**.
+
+This is **not** a pure-dodge target. A clear requires killing each boss (damaging
+them fast enough to end their phases before the timer), and getting through the
+stage sections — enemy waves, power items. What [PCB's design](ch-game.md) buys
+us is that none of that is *time-pressured*: survival is the dominant difficulty
+and the agent can fit the shooting around it. **Score optimisation** — grazing,
+the cherry/border bonuses — would be nice but is out of current scope.
 
 The clear must run on the **unmodified retail executable** with our tooling in
 observe-only mode. `thtk` and `thprac` are used only as offline tools (script
@@ -47,17 +52,24 @@ those hundreds of millions of frames, which shapes the whole system below.
 
 ## Character: ReimuA
 
-The character is fixed to **ReimuA**. Her shot type homes on the nearest enemy
-automatically, which **decouples "shoot" from "aim"** — the agent never has to
-point at anything. Combined with PCB's dodge-friendly design, this keeps the
-action space down to *move* and *focus* (plus an almost-free *shoot* bit) and
-keeps the sim's shot model simple.
+The character is fixed to **ReimuA**. A *portion* of her shot — roughly 20% of
+the damage — homes on the nearest enemy; the rest is fired **straight ahead**.
+So there is no separate aim axis to control, but aiming still matters: to deal
+real damage to a boss the agent has to manoeuvre into the firing lane *under*
+the target while it dodges. That aiming happens through the same *move* actions
+used for everything else, which keeps the [action space](ch-policy.md) small —
+but "get under the boss and shoot" is a genuine part of the task, not free.
+
+This is why the character is fixed: a fixed shot type means the
+[sim's shot model](recording.md#synthetic-damage-phasing) is one fixed 20/80
+split rather than something that changes with the loadout.
 
 ## Current scope
 
 The end goal is all six stages, but everything currently in flight targets
-**Stage 1 and its boss, Letty**. Stage 1 is effectively solved by the
-[procedural-sim](sim.md) policies (~238 s, clears Letty); the
-[recorded-Letty](recording.md) work went further and landed the first real
-*kills* on a boss. Both approaches then hit
+**Stage 1 and its boss, Letty**. The [procedural-sim](sim.md) policies clear
+Stage 1 at ~238 s by *outlasting* Letty — every phase timed out, no real damage
+dealt. That works on Letty but won't on later bosses, so the
+[recorded-Letty](recording.md) work added a damage model and landed the first
+real *kills* on a boss. Both approaches then hit
 [the same ceiling](ceiling.md), which is what [the plan](ecl-vm.md) responds to.

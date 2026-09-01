@@ -58,9 +58,12 @@ The action is a single categorical draw factored as **9 × 2 × 2**:
 Flattened to one 36-way softmax rather than three independent heads — the
 choices interact (focused + up-left is a different tactic from unfocused +
 up-left) and a single categorical lets the policy represent that jointly.
-Because ReimuA's shot [aims itself](ch-goal.md), "shoot" carries no aiming
-decision; it is nearly free to leave on, and the reward — not the action space —
-decides when engaging matters.
+
+The "shoot" bit carries no *aiming* sub-choice — [ReimuA has no aim
+axis](ch-goal.md#character-reimua) — but aiming still happens, through the
+*direction* actions: most of her damage is forward fire, so dealing it means
+manoeuvring into the lane under the boss while dodging. When that trade-off is
+worth making is shaped by the [reward](ppo.md), not the action space.
 
 ## Training vs deployment
 
