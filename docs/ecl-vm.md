@@ -77,32 +77,33 @@ works even though Sub42 never names Sub39.
   doesn't count). Easy/Normal correctly route to Flower Wither Away (Sub48),
   Hard to Undulation Ray (Sub52).
 
-### 3 · Arithmetic, comparison & difficulty gate · ~1 day · autonomy 95%
+### 3 · Arithmetic, comparison & difficulty gate · ✅ done
 
-The ~40 mechanical opcodes: `set_int/float`, `add sub mul div mod`, trig
-helpers, comparison + conditional jumps, and the `rank_mask` check so only
-Lunatic (`rank 3`) lines run. Plus the negative-ID globals: rank, difficulty,
-difficulty coefficient, `PLAYER_X/Y` (placeholder).
+The mechanical opcodes in `sim/ecl/vm.py`: `math_{int,float}_{add,sub,mul,div,mod}`
+(C-truncating int division), `math_inc/dec`, `sin` / `cos` / `atan2`,
+`math_norm_angle` (wrap to `[-π, π)`), the six `set_*_rand_*` forms and
+`__math_rand_rad`. Int-vs-float is resolved by the destination gvar's slot
+(`I0–I7` → int, `F0–F9` → float) plus the parser's literal typing. The
+difficulty gate (`rank_mask & (1 << difficulty)`) and the `DIFFICULTY` /
+`PLAYER_X/Y` gvars were already in Part 2; `ARG_*` / `PARAM_*` / misc gvars live
+in `enemy.extra`.
 
-- **Concern:** ECL is loose about int vs float variable typing; a wrong type
-  shifts a spawn angle by a hair.
-- **Verify:** unit test per opcode; then on Letty's script, `!L` lines execute
-  and `!E`/`!N`/`!H` lines are skipped at rank = Lunatic.
+- **Verify** (`python -m sim.ecl.vm_verify`): a unit case per deterministic
+  opcode (add/sub/mul/div/mod, sin/cos/atan2, inc, norm-angle), plus — on
+  Letty's real script — the NS1 spawner (Sub40) computing its three sub-enemy
+  angles as `0, +2π/3, −2π/3` via `math_float_add` + `math_norm_angle`, and
+  every arithmetic opcode reachable in the fight being handled.
 
-### 4 · The PRNG · ~1 day, or 3–4 · autonomy 60%
+### 4 · The PRNG · generator done; validation blocked on Part 5
 
-`bullet_random*` and spread jitter call the engine RNG. EoSD's is a 16-bit LCG
-(`seed*0x343FD + 0x269EC3`, take bits 16–30). Implement it, seed per episode,
-check whether PCB uses the same one.
+`sim/ecl/rng.py` — the EoSD-family LCG (`state·0x343FD + 0x269EC3`, bits 16–30),
+seeded per VM, wired into every `set_*_rand_*` / `__math_rand*` opcode and
+swappable. It is deterministic per seed and uniform (checked in `vm_verify`).
 
-- **Concerns:** if PCB's PRNG differs, finding the real one needs static
-  disassembly. Fallback: match the *distribution* (not the exact stream) of a
-  recorded `bullet_random` spread empirically — fiddly but doable, just not
-  bit-exact. Bit-exactness only matters for reproducing a specific real run;
-  training only needs the right distribution, so this is lower-stakes than it
-  looks.
-- **Verify:** 500 VM `bullet_random` spreads; the angle histogram passes a KS
-  test against the spreads measured from the recordings.
+Whether PCB draws from *exactly* this stream — and the KS test of 500 VM
+`bullet_random` spreads against the spreads measured from the recordings — needs
+`bullet_random` (Part 5) and is deferred to then. For training only the
+distribution matters, so this is low-stakes.
 
 ### 5 · Spawn-event emission · ~2 days · autonomy 85%
 

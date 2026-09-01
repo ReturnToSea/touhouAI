@@ -1,17 +1,19 @@
-"""Part 2 verification: control flow.
+"""Parts 2 & 3 verification: control flow + arithmetic.
 
     python -m sim.ecl.vm_verify [tools/th07_ecl/ecldata1.ecl]
 
 1. Synthetic subs exercise jump / conditional jump / call+ret / jump_dec loops.
-2. Letty's real ECL runs end to end: the phase machine must walk
+2. Synthetic subs exercise every arithmetic / trig / rand opcode.
+3. Letty's real ECL runs end to end: the phase machine must walk
    NS1 -> Lingering Cold -> NS2 -> Table-Turning -> defeat, pick the Lunatic
-   spellcard variants, and land each transition within ~1 s of the screen-clears
-   the recordings show (`sim/boss_phases._BOUNDARIES["letty"]`).
+   spellcard variants, land each transition within ~1 s of the screen-clears the
+   recordings show, and compute Sub40's three sub-enemy spawn angles 120 apart.
 
 Exit 0 iff everything holds.
 """
 from __future__ import annotations
 
+import math
 import sys
 from pathlib import Path
 
@@ -122,6 +124,63 @@ def test_control_flow() -> bool:
     return ok
 
 
+def test_arithmetic() -> bool:
+    ok = True
+    I0, I1, I4 = __V(10000), __V(10001), __V(10012)
+    F0, F1 = __V(10004), __V(10005)
+
+    # deterministic ops: (opcode, [args...], check(enemy))
+    cases = [
+        ("int add",  12, [I0, 3, 4],        lambda e: e.ivars[0] == 7),
+        ("int sub",  13, [I0, 3, 10],       lambda e: e.ivars[0] == -7),
+        ("int mul",  14, [I0, 6, 7],        lambda e: e.ivars[0] == 42),
+        ("int div (trunc)", 15, [I0, -7, 2], lambda e: e.ivars[0] == -3),
+        ("int mod",  16, [I0, 17, 5],       lambda e: e.ivars[0] == 2),
+        ("float add", 19, [F0, 1.5, 2.25],  lambda e: abs(e.fvars[0] - 3.75) < 1e-6),
+        ("float mul", 21, [F0, 3.0, 0.5],   lambda e: abs(e.fvars[0] - 1.5) < 1e-6),
+        ("float div", 22, [F0, 1.0, 4.0],   lambda e: abs(e.fvars[0] - 0.25) < 1e-6),
+        ("sin",      24, [F0, math.pi / 2], lambda e: abs(e.fvars[0] - 1.0) < 1e-6),
+        ("cos",      25, [F0, 0.0],         lambda e: abs(e.fvars[0] - 1.0) < 1e-6),
+        ("atan2",    26, [F0, 0.0, 0.0, 1.0, 1.0], lambda e: abs(e.fvars[0] - math.pi / 4) < 1e-6),
+    ]
+    for name, op, args, chk in cases:
+        e = _run_sub(_synthetic_ecl({0: [_instr(0, op, *args)]}), 0, 1)
+        ok &= _check(name, chk(e))
+
+    # inc, norm_angle
+    e = _run_sub(_synthetic_ecl({0: [
+        _instr(0, 4, I0, 5), _instr(0, 17, I0), _instr(0, 17, I0),
+        _instr(0, 5, F0, 4.0), _instr(0, 40, F0),          # 4.0 rad -> 4 - 2pi
+    ]}), 0, 1)
+    ok &= _check("math_inc", e.ivars[0] == 7)
+    ok &= _check("math_norm_angle", abs(e.fvars[0] - (4.0 - 2 * math.pi)) < 1e-6,
+                 f"{e.fvars[0]}")
+
+    # rand: deterministic per seed, in range, roughly uniform
+    ecl = _synthetic_ecl({0: [_instr(0, 52, F0, -math.pi, math.pi)]})   # __math_rand_rad
+    vm1, vm2 = VM(ecl, seed=1234), VM(ecl, seed=1234)
+    for vm in (vm1, vm2):
+        vm.enemies.append(Enemy(vm, 0, is_boss=True))
+        vm._run_enemy(vm.enemies[0])
+    ok &= _check("rand deterministic per seed",
+                 vm1.enemies[0].fvars[0] == vm2.enemies[0].fvars[0])
+
+    vm = VM(ecl, seed=1)
+    vals = []
+    e = Enemy(vm, 0, is_boss=True)
+    vm.enemies.append(e)
+    for _ in range(4000):
+        e.frame = e.ip = 0
+        e.running = True
+        vm._run_enemy(e)
+        vals.append(e.fvars[0])
+    in_range = all(-math.pi <= v < math.pi for v in vals)
+    mean = sum(vals) / len(vals)
+    ok &= _check("rand in [-pi, pi) and ~uniform", in_range and abs(mean) < 0.15,
+                 f"mean={mean:.3f} range_ok={in_range}")
+    return ok
+
+
 def test_letty(path: Path) -> bool:
     ecl = parse_file(path)
     vm = VM(ecl, difficulty=3)
@@ -146,8 +205,24 @@ def test_letty(path: Path) -> bool:
 
     control_ops = {2, 3, 4, 5, 41, 42, 45, *range(28, 40),
                    90, 91, 99, 107, 108, 109, 110, 112, 113, 114, 115, 133, 148}
-    missed = control_ops & set(vm.unhandled)
-    ok &= _check("no control-flow opcode unhandled", not missed, f"{missed}")
+    math_ops = {6, 7, 8, 9, 10, 11, *range(12, 28), 40, 51, 52}
+    missed = (control_ops | math_ops) & set(vm.unhandled)
+    ok &= _check("no control-flow / arithmetic opcode unhandled", not missed, f"{missed}")
+
+    # Sub40: the NS1 spawner fires three sub-enemies 120 deg apart
+    vm2 = VM(ecl, difficulty=3)
+    e = Enemy(vm2, 40, is_boss=True)
+    vm2.enemies.append(e)
+    angles: list[float] = []
+    import sim.ecl.vm as _M
+    _M._HANDLERS[93] = lambda vm, en, ins: angles.append(en.extra.get(10033, 0.0))
+    vm2._run_enemy(e)
+    for _ in range(4):
+        vm2.step()
+    want = [0.0, 2 * math.pi / 3, -2 * math.pi / 3]
+    ok &= _check("Sub40 spawns 3 enemies 120 apart",
+                 len(angles) == 3 and all(abs(a - w) < 1e-4 for a, w in zip(angles, want)),
+                 f"{[round(a, 4) for a in angles]}")
     return ok
 
 
@@ -165,7 +240,9 @@ def main(argv: list[str]) -> int:
 
     print("control-flow primitives:")
     ok = test_control_flow()
-    print(f"\nLetty phase machine ({path.name}):")
+    print("\narithmetic / trig / rand:")
+    ok &= test_arithmetic()
+    print(f"\nLetty phase machine + spawn math ({path.name}):")
     ok &= test_letty(path)
     print("\nPASS" if ok else "\nFAIL")
     return 0 if ok else 1

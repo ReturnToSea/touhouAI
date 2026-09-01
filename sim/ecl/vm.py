@@ -20,9 +20,11 @@ recorded once in `vm.unhandled` and otherwise ignored, so later parts plug in.
 """
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 
 from .parser import ECLFile, Instr, Var
+from .rng import EclRng
 
 # gvar id ranges (th07.eclm !gvar_names)
 _I_LO, _I_HI = 10000, 10003        # I0..I3  -> slots 0..3
@@ -160,6 +162,7 @@ class VM:
         self.rank_bit = 1 << difficulty
         self.player_x, self.player_y, self.player_z = player
         self.seed = seed
+        self.rng = EclRng(seed)
         self.frame = 0
         self.enemies: list[Enemy] = []
         self.trace: list[tuple[int, str, str]] = []
@@ -325,6 +328,116 @@ def _ret(vm, e, ins):
 @_op(45)  # wait(frames)
 def _wait(vm, e, ins):
     e.frame += int(e.get(ins.args[0]))
+
+
+# --- arithmetic (Part 3) -------------------------------------------------
+
+def _c_idiv(a, b):
+    return 0 if b == 0 else int(a / b)          # C truncates toward zero
+
+
+def _c_imod(a, b):
+    return 0 if b == 0 else int(a - _c_idiv(a, b) * b)
+
+
+_BINOP = {
+    12: lambda a, b: int(a + b),  13: lambda a, b: int(a - b),
+    14: lambda a, b: int(a * b),  15: _c_idiv,  16: _c_imod,
+    19: lambda a, b: a + b,  20: lambda a, b: a - b,
+    21: lambda a, b: a * b,  22: lambda a, b: a / b if b else 0.0,
+    23: lambda a, b: math.fmod(a, b) if b else 0.0,
+}
+
+
+@_op(*_BINOP)  # math_{int,float}_{add,sub,mul,div,mod}  (dst, a, b)
+def _binop(vm, e, ins):
+    dst, a, b = ins.args
+    e.set(dst, _BINOP[ins.opcode](e.get(a), e.get(b)))
+
+
+@_op(17)  # math_inc(dst)
+def _inc(vm, e, ins):
+    e.set(ins.args[0], int(e.get(ins.args[0])) + 1)
+
+
+@_op(18)  # math_dec(dst)
+def _dec(vm, e, ins):
+    e.set(ins.args[0], int(e.get(ins.args[0])) - 1)
+
+
+@_op(24)  # math_sin(dst, angle)
+def _sin(vm, e, ins):
+    e.set(ins.args[0], math.sin(e.get(ins.args[1])))
+
+
+@_op(25)  # math_cos(dst, angle)
+def _cos(vm, e, ins):
+    e.set(ins.args[0], math.cos(e.get(ins.args[1])))
+
+
+@_op(26)  # math_atan2(dst, x1, y1, x2, y2) -> atan2(y2-y1, x2-x1)
+def _atan2(vm, e, ins):
+    d, x1, y1, x2, y2 = (e.get(a) for a in ins.args)
+    e.set(ins.args[0], math.atan2(y2 - y1, x2 - x1))
+
+
+@_op(40)  # math_norm_angle(dst) — wrap into [-pi, pi)
+def _norm_angle(vm, e, ins):
+    v = e.get(ins.args[0])
+    e.set(ins.args[0], (v + math.pi) % (2 * math.pi) - math.pi)
+
+
+# --- random (Part 3; the generator itself is Part 4) --------------------
+
+@_op(6)  # set_int_rand_bound(dst, bound) -> [0, bound)
+def _rand_i(vm, e, ins):
+    e.set(ins.args[0], vm.rng.rand_int(int(e.get(ins.args[1]))))
+
+
+@_op(7)  # set_int_rand_bound_min(dst, range, min) -> min + [0, range)
+def _rand_i_min(vm, e, ins):
+    lo = e.get(ins.args[2])
+    e.set(ins.args[0], int(lo) + vm.rng.rand_int(int(e.get(ins.args[1]))))
+
+
+@_op(8)  # set_float_rand_bound(dst, bound) -> [0, bound)
+def _rand_f(vm, e, ins):
+    e.set(ins.args[0], e.get(ins.args[1]) * vm.rng.rand())
+
+
+@_op(9)  # set_float_rand_bound_min(dst, range, min) -> min + [0, range)
+def _rand_f_min(vm, e, ins):
+    e.set(ins.args[0], e.get(ins.args[2]) + e.get(ins.args[1]) * vm.rng.rand())
+
+
+@_op(10)  # set_int_rand_sign(dst, value) -> +/- value
+def _rand_i_sign(vm, e, ins):
+    v = int(e.get(ins.args[1]))
+    e.set(ins.args[0], v if vm.rng.rand() < 0.5 else -v)
+
+
+@_op(11)  # set_float_rand_sign(dst, value) -> +/- value
+def _rand_f_sign(vm, e, ins):
+    v = e.get(ins.args[1])
+    e.set(ins.args[0], v if vm.rng.rand() < 0.5 else -v)
+
+
+@_op(52)  # __math_rand_rad(dst, lo, hi) -> uniform [lo, hi)
+def _rand_rad(vm, e, ins):
+    e.set(ins.args[0], vm.rng.rand_range(e.get(ins.args[1]), e.get(ins.args[2])))
+
+
+@_op(51)  # __math_rand(dst, bound) -> [0, bound)  (float)
+def _rand(vm, e, ins):
+    e.set(ins.args[0], e.get(ins.args[1]) * vm.rng.rand())
+
+
+@_op(27)  # float_time(dst, mode, duration, ...) — time-interpolation; approximate
+def _float_time(vm, e, ins):
+    # not used by stage 1; snap to the final target so patterns that do use it
+    # don't stall. Revisit if a boss needs the easing curve.
+    if len(ins.args) >= 4:
+        e.set(ins.args[0], e.get(ins.args[3]))
 
 
 # --- phase machine: callbacks & interrupts ---
