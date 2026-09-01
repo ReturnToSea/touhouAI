@@ -40,6 +40,71 @@ def boss_state(pm):
     return None
 
 
+def run_episode(env, pm, drive, test, which, mask, drive_budget=16000,
+                fight_budget=12000):
+    """One drive-to-boss-#which then hand-to-`test` episode. Returns a dict:
+    reached (bool), active_s, total_s, dialogue_s, hp0, hp_min, dmg,
+    lives0, lives_end, stage_end, killed (bool - boss gone, not a player death)."""
+    obs, _ = env.reset(options={"hard": True})
+    step, appear, present, nullrun, in_fight = 0, 0, False, 999, False
+    while step < drive_budget:
+        obs, r, term, trunc, info = env.step(int(drive.act(obs)))
+        step += 1
+        b = boss_state(pm)
+        if b is None:
+            nullrun += 1
+            if nullrun > 90:
+                present = False
+        else:
+            if not present and nullrun > 90:
+                appear += 1
+                if appear == which:
+                    in_fight = True
+                    break
+            present = True
+            nullrun = 0
+        if term or trunc:              # drive policy died / game over on the way
+            break
+    if not in_fight:
+        return {"reached": False}
+
+    s0 = env.h.s
+    lives0 = s0.lives
+    b = boss_state(pm)
+    hp0 = b[2] if b else -1
+    hp_min = hp0
+    live_frame = None          # first frame the boss is actually attacking
+    fstart, nf = step, 0
+    while step < fstart + fight_budget:
+        obs, r, term, trunc, info = env.step(mask(int(test.act(obs))))
+        step += 1
+        s = env.h.s
+        # "the fight is live" = bullets on screen OR a lethal enemy body (NS1
+        # orbs). Everything before this is entrance + dialogue + declaration.
+        if live_frame is None and (s.bullet_count >= 8 or s.enemy_count >= 3):
+            live_frame = step
+        b = boss_state(pm)
+        if b is None:
+            nf += 1
+            if nf > 90:
+                break
+            continue
+        nf = 0
+        if b[2] > 0:
+            hp_min = min(hp_min, b[2])
+        if term or trunc:
+            break
+    s = env.h.s
+    lead_in = ((live_frame or fstart) - fstart) / 60.0
+    total = max(0.0, (step - fstart - nf) / 60.0)
+    return {"reached": True, "lead_in_s": lead_in, "total_s": total,
+            "active_s": max(0.0, total - lead_in),
+            "hp0": hp0, "hp_min": hp_min,
+            "dmg": max(0, hp0 - hp_min) if hp0 > 0 else 0,
+            "lives0": lives0, "lives_end": s.lives, "stage_end": s.stage,
+            "killed": nf > 90}
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("policy", type=Path)
@@ -64,50 +129,18 @@ def main():
 
     survs = []
     for ep in range(args.eps):
-        obs, _ = env.reset(options={"hard": True})
-        # drive until the Nth boss appearance
-        step, appear, present, nullrun, in_fight = 0, 0, False, 999, False
-        while step < 12000:
-            obs, r, term, trunc, info = env.step(int(drive.act(obs)))
-            step += 1
-            b = boss_state(pm)
-            if b is None:
-                nullrun += 1
-                if nullrun > 90:
-                    present = False
-            else:
-                if not present and nullrun > 90:
-                    appear += 1
-                    if appear == args.which:
-                        in_fight = True
-                        break
-                present = True
-                nullrun = 0
-            if term or trunc:
-                break
-        if not in_fight:
+        r = run_episode(env, pm, drive, test, args.which, _mask)
+        if not r["reached"]:
             print(f"  ep {ep}: never reached boss #{args.which}", flush=True)
             continue
-        # hand over to the test policy, time the fight (Letty dodge-only runs
-        # ~179s to the natural end, so give the window room to see a real clear)
-        fstart, nf = step, 0
-        while step < fstart + 11400:
-            obs, r, term, trunc, info = env.step(_mask(int(test.act(obs))))
-            step += 1
-            b = boss_state(pm)
-            if b is None:
-                nf += 1
-                if nf > 90:
-                    break
-                continue
-            nf = 0
-            if term or trunc:
-                break
-        surv = max(0.0, (step - fstart - nf) / 60.0)
-        survs.append(surv)
-        print(f"  ep {ep}: boss-fight survival {surv:.1f}s"
-              f"{'  (fight ended - cleared/timed out)' if nf > 90 else '  (died)'}",
-              flush=True)
+        survs.append(r["active_s"])
+        why = ("boss gone (cleared/timed out)" if r["killed"]
+               else f"died (lost {r['lives0'] - r['lives_end']:.0f} life, "
+                    f"stage {r['stage_end']})")
+        print(f"  ep {ep}: {r['active_s']:5.1f}s active fight  "
+              f"(+{r['lead_in_s']:.0f}s entrance/dialogue, {r['total_s']:.0f}s total)  "
+              f"boss HP {r['hp0']:.0f}->{r['hp_min']:.0f} (dmg {r['dmg']:.0f})  "
+              f"lives {r['lives0']:.0f}->{r['lives_end']:.0f}  {why}", flush=True)
     env.close()
 
     s = np.array(survs)

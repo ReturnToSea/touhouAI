@@ -45,7 +45,24 @@ def load(name):
     n = len(h)
     nan = np.full(n, np.nan)
     med = p90 = f60 = f120 = f180 = wallf = enemyf = nan
-    if algo == "ppo" and h.shape[1] >= 12:
+    is_fight = algo == "ppo_fight" or (h.shape[1] in (4, 5)
+                                       and not (d / "meta.json").exists())
+    if is_fight:
+        # train_fight.py (FightSim). new 6-col: wall,steps,med,mean,kill,ktime.
+        # old: [steps,med,mean,kill(,ktime)].  (sim/fight_hud.py is the better
+        # view - two charts incl. real-game transfer.)
+        if h.shape[1] >= 6:
+            wall, steps, med, p90, ret, f120 = (h[:, 0], h[:, 1], h[:, 2],
+                                                h[:, 3], h[:, 4], h[:, 5])
+        else:
+            wall = nan
+            steps, med, p90, ret = h[:, 0], h[:, 1], h[:, 2], h[:, 3]
+            if h.shape[1] == 5:
+                f120 = h[:, 4]
+        surv = med
+        ent = nan
+        f60 = ret
+    elif algo == "ppo" and h.shape[1] >= 12:
         # v17+ cols 0-11: wall_s, steps, mean_s, sampled_dec, ent, med_s, p90_s,
         #   f60, f120, f180, wallf, enemyf.  v28 cols 12-15: med1, p90_1, f60_1, mean1
         #   (first-episode-per-env - the honest metric; 5-6 are the biased pooled one)
@@ -98,6 +115,7 @@ def load(name):
             pass
 
     return dict(name=name, algo=algo, meta=meta, wall=wall, steps=steps,
+               fight=is_fight,
                surv=surv, ret=ret, ent=ent, dcap=nan,
                med=med, p90=p90, f60=f60, f120=f120, f180=f180,
                wallf=wallf, enemyf=enemyf,
@@ -144,7 +162,17 @@ class Hud:
                 f"    time {('%.1f min' % (wall / 60)) if not np.isnan(wall) else '  ? '}"
                 f"   steps {steps / 1e6:6.1f}M" + (f" / {tgt / 1e6:.0f}M" if tgt else "") +
                 (f"   {sps:.0f}k/s" if not np.isnan(sps) else ""))
-            if not np.isnan(r["med"][-1]):
+            if r.get("fight"):
+                lines.append(
+                    f"    survival   median {r['med'][-1]:5.1f}s   mean {r['p90'][-1]:5.1f}s"
+                    f"   (best median {np.nanmax(r['med']):.0f}s)")
+                kt = r["f120"][-1]
+                ktxt = (f"   kill-time {kt:.0f}s (best {np.nanmin(r['f120']):.0f})"
+                        if not np.isnan(kt) else "   kill-time --")
+                lines.append(
+                    f"    boss kill  {r['f60'][-1] * 100:4.0f}%"
+                    f"   (best {np.nanmax(r['f60']) * 100:.0f}%){ktxt}")
+            elif not np.isnan(r["med"][-1]):
                 lines.append(
                     f"    median {r['med'][-1]:5.1f}s   p90 {r['p90'][-1]:6.1f}s"
                     f" (best p90 {np.nanmax(r['p90']):.0f})"
@@ -174,7 +202,10 @@ class Hud:
             return
         xmax = max(r["steps"][-1] for r in runs) / 1e6 or 1.0
         def _mx(r):
-            m = np.nanmax(r["p90"]) if not np.all(np.isnan(r["p90"])) else r["surv"].max()
+            cands = [np.nanmax(v) for v in (r.get("p90"), r.get("med"),
+                                            r.get("surv"), r.get("f120"))
+                     if v is not None and not np.all(np.isnan(v))]
+            m = max(cands) if cands else 2.0
             if r.get("rt_hi") is not None and len(r["rt_hi"]):
                 m = max(m, float(np.max(r["rt_hi"])))   # the drawn "best" line must fit
             return m
@@ -208,7 +239,17 @@ class Hud:
                        for coord in (X(s), Y(y))]
                 if len(pts) >= 4:
                     cv.create_line(*pts, fill=c, width=w, smooth=True, dash=dash)
-            lab = r["name"] + ("  (— p90  ·· med)" if has_pct else "")
+            if r.get("fight") and not np.all(np.isnan(r["f120"])):
+                # median kill-time among the episodes that killed the boss
+                v = r["f120"]
+                pts = [co for s, y in zip(sm, v) if not np.isnan(y)
+                       for co in (X(s), Y(y))]
+                if len(pts) >= 4:
+                    cv.create_line(*pts, fill="#ffd24d", width=2, smooth=True)
+                    cv.create_text(X(sm[-1]), Y(np.nan_to_num(v[-1])) - 8, anchor="e",
+                                   fill="#ffd24d", font=("Consolas", 8), text="kill-time")
+            lab = r["name"] + ("  (— mean  ·· median  — kill-time)" if r.get("fight")
+                               else "  (— p90  ·· med)" if has_pct else "")
             yv = r["p90"][-1] if has_pct else r["surv"][-1]
             cv.create_text(X(sm[-1]), Y(yv) - 8, anchor="e",
                            fill=c, font=("Consolas", 8), text=lab)

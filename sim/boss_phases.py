@@ -1,64 +1,125 @@
-"""Per-boss phase tables for FightSim's synthetic damage-phasing.
+"""Per-boss phase windows for FightSim's synthetic damage-phasing.
 
-Each phase: (start_frame, end_frame, max_hp, kill_threshold, armored_frames)
-  start/end  - frame offsets into a dodge-only recording (all recordings of a
-               given boss are the same length, phases are timer-based)
-  max_hp     - HP the phase starts at (from ECL enemy_life_set)
-  threshold  - HP at which it transitions early (ECL life_callback); 0 = only
-               the timer / running the bar to empty ends it
-  armored    - frames at phase start where damage doesn't register
-               (ECL enemy_flag_armored)
+A "phase" is one HP bar in the real fight (a nonspell, or a spellcard). We can't
+read the recorded boss HP (the recorder only logs x/y, and Letty's EM_BOSSES[0]
+is null for most of the fight), so per phase we synthesise an HP pool and let
+the agent drain it by shooting.
 
-When the agent shoots while positioned under the boss, FightSim drains the
-phase HP; on hp<=threshold OR frame>=end it clears bullets and jumps t to the
-next phase's start_frame. Numbers are approximate - tune SHOT_DPS against real
-damage-phased fight lengths.
+`phase_windows(name, nb)` takes the per-frame active-bullet count of ONE
+recording and returns, per phase:
+
+    (clear_start, first_attack, phase_end)   -- all frame indices into that
+                                                recording (post lead-in trim)
+
+  clear_start   frame the previous attack's bullets have cleared -> where we
+                jump the recording to when the agent damage-phases INTO this
+                phase. For phase 0 this is 0.
+  first_attack  frame this phase's first bullet appears. Between clear_start and
+                first_attack the boss is repositioning / declaring the card:
+                she deals no damage and TAKES no damage (armored).
+  phase_end     frame this phase's attack ends (the next screen-clear starts).
+                Draining the phase HP OR reaching this frame advances.
+
+Boundaries are found from real screen-clears (bullet count collapsing to ~0),
+snapped per-recording near the boss's known phase times, so small timer jitter
+between recordings is handled. Nonspells have short internal wave-gaps that are
+deliberately NOT treated as phase boundaries - the whole nonspell is one HP bar.
 """
 
-# spellcard HP where the ECL value wasn't pinned down - a placeholder that
-# gives a sane damage-phase length at the default DPS.
-_SPELL_HP = 2200
+import numpy as np
 
-PHASES = {
-    # Letty - 10750-frame recording, 4 phases
-    "letty": [
-        (0,    2500,  15000, 1700, 0),     # NS1
-        (2600, 7700,  _SPELL_HP, 0, 300),  # Lingering Cold (aimed fans)
-        (7800, 8700,  15000, 2000, 0),     # NS2
-        (8700, 10750, _SPELL_HP, 0, 300),  # Table-Turning
-    ],
-    # Cirno midboss - 63s / 3780-frame recording, one nonspell
-    "cirno": [
-        (0, 3780, 8000, 0, 0),
-    ],
-    # Chen midboss - 39s / 2340-frame recording
-    "chenmid": [
-        (0, 2340, 14500, 2100, 120),
-    ],
-    # Chen boss - 233s / ~13980-frame recording. ECL: 17000 -> 1500,
-    # 13000 -> 2900, plus spellcards. Rough 5-phase split.
-    "chen": [
-        (0,     2400,  17000, 1500, 0),
-        (2500,  6000,  _SPELL_HP, 0, 240),
-        (6100,  8400,  13000, 2900, 0),
-        (8500,  11500, _SPELL_HP, 0, 240),
-        (11600, 13980, _SPELL_HP, 0, 240),
-    ],
+# Kill fraction: continuous fully-lined-up fire clears a phase in this fraction
+# of its recorded attack duration. One number for all bosses - tune against real
+# damage-phased fight lengths, don't chase exact ECL HP.
+KILL_FRAC = 0.45
+
+# approximate phase-boundary frames (60fps). phase_windows snaps each to the
+# real screen-clear within +-500 frames of these, per recording.
+_BOUNDARIES = {
+    "letty": [2400, 5450, 7820],                 # NS1|LingeringCold|NS2|Spell2
+    "chen":  [2450, 6050, 8450, 11550],          # rough, not screen-clear-verified
+    # cirno / chenmid: single phase, no boundaries
+}
+
+_LOW = 15.0        # smoothed bullet count below this = "cleared"
+_SMOOTH = 15
+
+# Phases (0-indexed into phase_windows output) that are AIMED attacks in the ECL
+# - `bullet_fan_aimed` etc. FightSim re-aims EVERY bullet born in these phases at
+# the live policy (not just the ~5% the geometric heuristic catches), so the
+# phase genuinely tracks the player and can't be memorised.
+#   letty: 1 = "Cold Sign - Lingering Cold" (bullet_fan_aimed from the orbs)
+# DISABLED for now: re-aiming a slow, continuously-fired pattern conflicts with
+# the replay/slot architecture (re-aimed bullets outlive or underlive their
+# recorded slot -> visible despawns). Kept for reference; needs a proper
+# generative (ECL VM) sim to do this right.
+_AIMED_PHASES = {
+    # "letty": {1},
 }
 
 
-def phases_for(name):
-    """recording name (cirno_0, letty_3, ...) -> phase list, or None."""
-    for key, ph in PHASES.items():
-        if name.startswith(key):
-            return ph
+def aimed_phases(name):
+    """set of phase indices that are fully-aimed attacks for this boss."""
+    return _AIMED_PHASES.get(_key(name), set())
+
+
+def _smooth(nb):
+    return np.convolve(nb.astype(float), np.ones(_SMOOTH) / _SMOOTH, mode="same")
+
+
+def _first_attack(sm, frm=0):
+    """first frame at/after `frm` where bullets are actually flying."""
+    a = np.argmax(sm[frm:] > 30.0)
+    return int(frm + a) if sm[frm:].size and (sm[frm:] > 30.0).any() else frm
+
+
+def _longest_lull(sm, lo, hi):
+    """(start, end) of the longest run of sm < _LOW within [lo, hi), or None."""
+    best = None
+    i = lo
+    while i < hi:
+        if sm[i] < _LOW:
+            j = i
+            while j < hi and sm[j] < _LOW:
+                j += 1
+            if best is None or (j - i) > (best[1] - best[0]):
+                best = (i, j)
+            i = j
+        else:
+            i += 1
+    return best
+
+
+def _key(name):
+    for k in ("letty", "chenmid", "cirno", "chen"):
+        if name.startswith(k):
+            return k
     return None
 
 
-def total_hp(name):
-    """total effective HP to drain to defeat this boss = sum over phases of
-    (max_hp - kill_threshold). None if the boss isn't in the table."""
-    ph = phases_for(name)
-    if ph is None:
+def has_phases(name):
+    return _key(name) is not None
+
+
+def phase_windows(name, nb):
+    """-> list of (clear_start, first_attack, phase_end) frame triples, or None."""
+    key = _key(name)
+    if key is None:
         return None
-    return float(sum(mx - th for (_, _, mx, th, _) in ph))
+    sm = _smooth(nb)
+    F = len(nb)
+    approx = _BOUNDARIES.get(key)
+    if not approx:                                   # single-phase boss
+        return [(0, _first_attack(sm), F)]
+
+    cuts = []
+    for a in approx:
+        lull = _longest_lull(sm, max(0, a - 500), min(F, a + 500))
+        if lull is not None:
+            cuts.append(lull)
+    cuts.sort()
+
+    starts = [0] + [c[0] for c in cuts]
+    firsts = [_first_attack(sm)] + [c[1] for c in cuts]
+    ends = [c[0] for c in cuts] + [F]
+    return list(zip(starts, firsts, ends))

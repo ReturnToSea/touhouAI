@@ -36,25 +36,60 @@ else:
                                     mode="max-autotune-no-cudagraphs")
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from boss_phases import total_hp as _boss_total_hp   # noqa: E402
+from boss_phases import phase_windows, has_phases, KILL_FRAC   # noqa: E402
+MAX_PHASES = 6
+MIR_AXIS = 384.0                 # x-mirror reflects about the playfield centre
 
 FIGHTS = Path(__file__).resolve().parent / "fights"
 POOL = 1025                      # th07 bullet pool size
+PW, PH = 384.0, 448.0           # playfield size (re-aimed bullets despawn off it)
 MAX_EN = 48                      # max satellite sub-enemies tracked per frame
 PLAYER_HB = 1.8                  # measured player half-extent
 BULLET_HB_DEFAULT = 2.5          # fallback when a recording has no hitbox column
 ENEMY_BODY_SCALE = 2.0 / 3.0     # player-body vs enemy-body box (pytouhou)
 
-# synthetic damage-phasing (ReimuA, homing shot). Numbers are approximate -
-# tune SHOT_DPS against real damage-phased fight lengths (Letty ~50-70s).
-SHOT_DPS = 14.0                  # HP/frame while the shoot bit is held
-DMG_REW = 0.003                  # reward per HP dealt
-KILL_BONUS = 150.0               # for defeating the boss (drives "kill, don't just dodge")
+# episode spawn box - randomised so the policy can't memorise one trajectory
+SPAWN_X_LO, SPAWN_X_HI = 40.0, 344.0
+SPAWN_Y_LO, SPAWN_Y_HI = 160.0, 420.0
+
+# synthetic damage-phasing (ReimuA). Her shot is ~20% homing amulets (connect
+# from anywhere on screen) + ~80% forward needle shot (only lands when she's
+# roughly lined up in x under the boss). So dodging in a corner still chips, but
+# a real kill needs positioning. Numbers approximate - tune SHOT_DPS against
+# real damage-phased fight lengths (Letty ~50-70s).
+SHOT_DPS = 14.0                  # peak HP/frame (fully lined up, shoot held)
+HOMING_FRAC = 0.20              # fraction of DPS that lands regardless of x
+LANE_HALF = 17.5               # |px - boss_x| under this -> the forward shot lands
+
+# reward: "kill the boss, don't get hit". Terms:
+#   * SURV_REW / frame alive - a SMALL floor so the 60-70% of episodes that die
+#     before they can kill still get a "don't die in Lingering Cold" gradient.
+#     Kept ~30x smaller than aligned-shooting damage so it can't cause stalling.
+#   * DMG_REW * HP drained   - the dense progress signal, guides it to shoot
+#   * KILL_BONUS on defeat   - "finish her"
+#   * -HIT_PEN on death      - the big stick
+SURV_REW = 0.004             # reward += this every frame alive
+DMG_REW = 0.012               # reward += this * boss-HP drained this frame
+HIT_PEN = 12.0                # reward -= this on death (bullet or enemy body)
+KILL_BONUS = 120.0           # reward += this on final-phase defeat
+
+# --- anti-memorisation randomisation (per episode) ---
+# The whole danmaku field is rotated RIGIDLY about screen-centre by a random
+# angle each episode. A rigid rotation preserves every trajectory and every gap
+# exactly (no bullet's lifetime or shape changes), so it's the safe way to make
+# absolute positions unmemorisable - unlike per-bullet re-aim, which desynced
+# bullets from the recording's slot lifecycle and made them vanish/flicker.
+FIELD_ROT_DEG = 10.0
+FIELD_ROT = np.radians(FIELD_ROT_DEG)
+CX, CY = 192.0, 192.0         # rotation centre (approx Letty's home position)
+DPS_LO, DPS_HI = 0.5, 1.1      # random damage multiplier - biased low (real DPS
+#                               is a guess and probably slower than SHOT_DPS)
+NOPHASE_FRAC = 0.2            # fraction of episodes where shooting deals 0 damage
+#                               (pure survival - forces training on the full
+#                               phase, not just the part a fast kill skips)
+
 _DIRS = torch.tensor([[0, 0], [0, -1], [1, -1], [1, 0], [1, 1],
                       [0, 1], [-1, 1], [-1, 0], [-1, -1]], dtype=torch.float32)
-
-
-AIM_TOL = np.radians(24.0)          # spawn-vel within this of the rec player -> aimed
 
 
 def _load_dense(npz_path):
@@ -66,16 +101,15 @@ def _load_dense(npz_path):
     if len(b) == 0:
         return None
     f = b[:, 0].astype(np.int64)
-    f -= f.min()
-    F = int(f.max()) + 1
-    slot = np.clip(b[:, 1].astype(np.int64), 0, POOL - 1)
+    f0 = int(f.min())                # the bullet origin - EVERYTHING aligns here.
+    f -= f0                          # (boss/player/enemy logs can start earlier -
+    F = int(f.max()) + 1             #  a bullet-less lead-in - so aligning each to
+    slot = np.clip(b[:, 1].astype(np.int64), 0, POOL - 1)   # its own .min() was a
+    #                                  40s misalignment that wrecked re-aiming.
 
     pos = np.full((F, POOL, 2), np.nan, np.float32)
     pos[f, slot, 0] = b[:, 2]
     pos[f, slot, 1] = b[:, 3]
-    vel = np.zeros((F, POOL, 2), np.float32)
-    vel[f, slot, 0] = b[:, 4]
-    vel[f, slot, 1] = b[:, 5]
 
     half = np.full((F, POOL), BULLET_HB_DEFAULT, np.float32)
     if b.shape[1] >= 10:                       # cols 8,9 = AABB full size x,y
@@ -83,46 +117,11 @@ def _load_dense(npz_path):
         hb[hb <= 0] = BULLET_HB_DEFAULT
         half[f, slot] = hb
 
-    # --- per-bullet birth + aim classification (for re-aiming at replay) ------
-    rp = np.full((F, 2), np.nan, np.float32)
-    if "player" in d and len(d["player"]):
-        p = d["player"]
-        pf = np.clip((p[:, 0] - p[:, 0].min()).astype(int), 0, F - 1)
-        rp[pf] = p[:, 1:3]
-    for i in range(1, F):
-        if np.isnan(rp[i, 0]):
-            rp[i] = rp[i - 1]
-    rp = np.nan_to_num(rp, nan=192.0)
-
-    present = ~np.isnan(pos[:, :, 0])                       # [F, POOL]
-    born = present.copy()
-    born[1:] &= ~present[:-1]
-    fr_idx = np.arange(F, dtype=np.int64)[:, None]
-    birth = np.where(present,
-                     np.maximum.accumulate(np.where(born, fr_idx, 0), axis=0),
-                     0)                                     # [F, POOL] rec-frame
-    bi, si = np.where(born)
-    aim_map = np.zeros((F, POOL), bool)
-    ang_map = np.zeros((F, POOL), np.float32)
-    if len(bi):
-        p0 = pos[bi, si]                                    # [K, 2]
-        v = vel[bi, si]
-        va = np.arctan2(v[:, 1], v[:, 0])
-        ta = np.arctan2(rp[bi, 1] - p0[:, 1], rp[bi, 0] - p0[:, 0])
-        dd = np.abs((va - ta + np.pi) % (2 * np.pi) - np.pi)
-        aim_map[bi, si] = (dd < AIM_TOL) & ((v[:, 0] != 0) | (v[:, 1] != 0))
-        ang_map[bi, si] = ta
-    aimed = np.take_along_axis(aim_map, birth, axis=0) & present
-    rec_ang = np.take_along_axis(ang_map, birth, axis=0)
-    spawn = np.stack([np.take_along_axis(pos[:, :, 0], birth, axis=0),
-                      np.take_along_axis(pos[:, :, 1], birth, axis=0)], -1)
-
     boss = np.full((F, 2), np.nan, np.float32)
     if len(d["boss"]):
-        bf = d["boss"][:, 0].astype(np.int64)
-        bf -= bf.min()
-        bf = np.clip(bf, 0, F - 1)
-        boss[bf] = d["boss"][:, 1:3]
+        bf = d["boss"][:, 0].astype(np.int64) - f0
+        m = (bf >= 0) & (bf < F)
+        boss[bf[m]] = d["boss"][m, 1:3]
     for i in range(1, F):
         m = np.isnan(boss[i, 0])
         boss[i] = np.where(m, boss[i - 1], boss[i])
@@ -137,9 +136,9 @@ def _load_dense(npz_path):
     if "enemies" in d and len(d["enemies"]):
         e = d["enemies"]
         lethal_all = e[(e[:, 5] > 0.5) & (e[:, 5] <= 15.0)]
-        ef = lethal_all[:, 0].astype(np.int64)
-        ef -= int(e[:, 0].min())
-        ef = np.clip(ef, 0, F - 1)
+        ef = lethal_all[:, 0].astype(np.int64) - f0
+        keep = (ef >= 0) & (ef < F)
+        lethal_all, ef = lethal_all[keep], ef[keep]
         order = np.argsort(ef, kind="stable")
         lethal_all, ef = lethal_all[order], ef[order]
         idx = np.searchsorted(ef, np.arange(F + 1))
@@ -151,74 +150,123 @@ def _load_dense(npz_path):
             en[fr, :n, 2] = rows[:, 5] * 0.5 * ENEMY_BODY_SCALE   # (hbx/2)*2/3
 
     # trim a quiet lead-in (boss entrance / intro with ~no bullets)
-    nb = present.sum(1)
+    nb = (~np.isnan(pos[:, :, 0])).sum(1)
     busy = np.where(nb >= 15)[0]
     s0 = 0
     if len(busy) and busy[0] > 30:
         s0 = max(0, busy[0] - 30)
+    stem = Path(npz_path).stem
+    # phase windows from the real screen-clears in THIS recording (trim-relative)
+    phw = phase_windows(stem, nb[s0:])
     return dict(pos=pos[s0:], half=half[s0:], boss=boss[s0:], en=en[s0:],
-               spawn=(spawn[s0:] - 0), aimed=aimed[s0:],
-               rec_ang=rec_ang[s0:], birth=(birth[s0:] - s0))
+               trim=s0, name=stem, phases=phw)
+
+
+def _mirror_rec(r):
+    """x-flipped copy of a recording (about the playfield centre). Letty's
+    patterns are near-symmetric, so this doubles the effective training set for
+    free. Timing (phases/birth) is unchanged; only x-coords + angles flip."""
+    m = dict(r)
+    for k in ("pos", "boss", "en"):
+        a = r[k].copy()
+        a[..., 0] = MIR_AXIS - a[..., 0]
+        m[k] = a
+    m["name"] = r["name"] + "_mir"
+    return m
 
 
 class FightSim:
     def __init__(self, B=8192, name="cirno", device="cuda", max_frames=11000,
-                 min_start=0, seed=0):
+                 min_start=0, seed=0, phase_start_mix=0.5, mirror=True,
+                 randomize=True):
         self.B, self.d = B, device
+        self.randomize = randomize        # eval instance passes False (clean metric)
         self._g = torch.Generator(device="cpu").manual_seed(seed)
         paths = sorted(glob.glob(str(FIGHTS / f"{name}*.npz")))
         recs = [_load_dense(p) for p in paths]
         recs = [r for r in recs if r is not None and r["pos"].shape[0] > 600]
         assert recs, f"no usable recordings matching {name}*"
+        if mirror:
+            recs = recs + [_mirror_rec(r) for r in recs]   # x-flipped copies
         self.n_rec = len(recs)
         self.rec_len = torch.tensor([r["pos"].shape[0] for r in recs])
         self.maxF = min(max(r["pos"].shape[0] for r in recs), max_frames)
 
         nF = (self.n_rec, self.maxF, POOL)
         self.pos = torch.full((*nF, 2), float("nan"))
-        self.spawn = torch.full((*nF, 2), float("nan"))
         self.bhalf = torch.full(nF, BULLET_HB_DEFAULT)
-        self.aimed = torch.zeros(nF, dtype=torch.bool)
-        self.rec_ang = torch.zeros(nF)
-        self.birth = torch.full(nF, -1, dtype=torch.int32)
         self.boss = torch.full((self.n_rec, self.maxF, 2), 192.0)
         self.en = torch.full((self.n_rec, self.maxF, MAX_EN, 3), float("nan"))
         for i, r in enumerate(recs):
             L = min(r["pos"].shape[0], self.maxF)
             self.pos[i, :L] = torch.from_numpy(r["pos"][:L])
-            self.spawn[i, :L] = torch.from_numpy(r["spawn"][:L])
             self.bhalf[i, :L] = torch.from_numpy(r["half"][:L])
-            self.aimed[i, :L] = torch.from_numpy(r["aimed"][:L])
-            self.rec_ang[i, :L] = torch.from_numpy(r["rec_ang"][:L])
-            self.birth[i, :L] = torch.from_numpy(r["birth"][:L].astype(np.int32))
             self.boss[i, :L] = torch.from_numpy(r["boss"][:L])
             self.en[i, :L] = torch.from_numpy(r["en"][:L])
-        for k in ("pos", "spawn", "bhalf", "aimed", "rec_ang", "birth",
-                  "boss", "en"):
+        for k in ("pos", "bhalf", "boss", "en"):
             setattr(self, k, getattr(self, k).to(device))
         self.rec_len_gpu = self.rec_len.to(device)  # step() reads it without a sync
         self.min_start = min_start
-        self.HIST = 320             # re-aim window: how far back we keep the sim
-        #                            player's path so an aimed bullet can lock
-        #                            onto where the player was AT ITS SPAWN
-        self.total_hp = _boss_total_hp(name)       # None -> no damage-phasing
+        # per-recording phase table [n_rec, MAX_PHASES, 4]:
+        #   (clear_start, first_attack, phase_end, synthetic_hp)  all trim-relative
+        #   frame indices. clear_start = where t0 jumps to on advancing INTO this
+        #   phase; first_attack = when its bullets begin (armored until then);
+        #   phase_end = when its attack ends. hp = SHOT_DPS * attack_dur * KILL_FRAC.
+        self.phasing = has_phases(recs[0]["name"]) and recs[0]["phases"] is not None
+        self.phase_start_mix = phase_start_mix   # fraction of resets that begin
+        #   at a random later phase (curriculum so phases 2+ get trained while
+        #   the policy still dies early); eval instance passes 0.0.
+        self.ph = torch.zeros(self.n_rec, MAX_PHASES, 4)
+        self.n_ph = torch.ones(self.n_rec, dtype=torch.long)
+        if self.phasing:
+            for i, r in enumerate(recs):
+                pw = r["phases"] or [(0, 0, self.maxF)]
+                self.n_ph[i] = min(len(pw), MAX_PHASES)
+                for j, (cs, fa, e) in enumerate(pw[:MAX_PHASES]):
+                    cs = max(0, min(cs, self.maxF - 4))
+                    fa = max(cs, min(fa, self.maxF - 3))
+                    e = min(self.maxF - 2, max(fa + 1, e))
+                    hp = SHOT_DPS * (e - fa) * KILL_FRAC
+                    self.ph[i, j] = torch.tensor([cs, fa, e, hp],
+                                                 dtype=torch.float32)
+        self.ph_cpu = self.ph.clone()
+        self.ph = self.ph.to(device)
+        self.n_ph_gpu = self.n_ph.to(device)
+
         n_en = int((~torch.isnan(self.en[..., 0])).any(-1).float().mean() * 100)
-        n_aim = int(self.aimed.float().mean() * 1000) / 10
         print(f"[FightSim] {self.n_rec} recs, {self.maxF} frames, B={B}, "
-              f"enemy bodies ~{n_en}% of frames, aimed bullet-frames ~{n_aim}%, "
-              f"boss HP {self.total_hp}", flush=True)
+              f"enemy bodies ~{n_en}% of frames, field-rot +-{FIELD_ROT_DEG:.0f}deg, "
+              f"phasing {'on' if self.phasing else 'off'} "
+              f"({int(self.n_ph.float().mean())} phases)", flush=True)
         self._dirs = _DIRS.to(device)
         self.reset()
 
     def _sample_starts(self, idx):
-        rid = torch.randint(0, self.n_rec, (len(idx),), generator=self._g)
-        if self.total_hp is not None:
-            # damage-phasing on -> start from the top so the whole fight + HP
-            # pool is available; the agent shortens it by shooting.
-            off = torch.full((len(idx),), self.min_start, dtype=torch.long)
+        n = len(idx)
+        rid = torch.randint(0, self.n_rec, (n,), generator=self._g)
+        if self.phasing:
+            npj = self.n_ph[rid]                                    # [n]
+            rand_later = torch.rand(n, generator=self._g) < self.phase_start_mix
+            pj = torch.where(
+                rand_later,
+                (torch.rand(n, generator=self._g) * npj).long().clamp(max=npj - 1),
+                torch.zeros(n, dtype=torch.long))
+            row = self.ph_cpu[rid, pj]                              # [n, 4]
+            cs, fa, pe, hp = row[:, 0], row[:, 1], row[:, 2], row[:, 3]
+            # rand_later episodes drop in at ANY frame of the phase (not just its
+            # start) with a random slice of HP left - so a phase can't be
+            # memorised as a fixed sequence and phases 2+ get seen mid-flow.
+            u = torch.rand(n, generator=self._g)
+            mid = fa + u * (pe - fa - 400).clamp(min=1.0)
+            off = torch.where(rand_later, mid, cs).long()
+            hpf = torch.where(rand_later,
+                              0.1 + 0.9 * torch.rand(n, generator=self._g),
+                              torch.ones(n))
+            self.phase_idx[idx] = pj.to(self.d)
+            self.boss_hp[idx] = (hp * hpf).to(self.d)
         else:
             maxstart = (self.rec_len[rid] - 800).clamp(min=self.min_start + 1)
-            off = (torch.rand(len(idx), generator=self._g) *
+            off = (torch.rand(n, generator=self._g) *
                    (maxstart - self.min_start) + self.min_start).long()
         self.rec_id[idx] = rid.to(self.d)
         self.t0[idx] = off.to(self.d)
@@ -229,11 +277,16 @@ class FightSim:
             self.t0 = torch.zeros(self.B, dtype=torch.long, device=self.d)
             self.t = torch.zeros(self.B, dtype=torch.long, device=self.d)
             self.boss_hp = torch.zeros(self.B, device=self.d)
+            self.phase_idx = torch.zeros(self.B, dtype=torch.long, device=self.d)
+            self.armored = torch.zeros(self.B, dtype=torch.bool, device=self.d)
+            self.focus = torch.zeros(self.B, device=self.d)   # last action's focus bit
+            self.field_rot = torch.zeros(self.B, device=self.d)
+            self._rot_cs = torch.ones(self.B, 1, device=self.d)
+            self._rot_sn = torch.zeros(self.B, 1, device=self.d)
+            self.dps_mult = torch.ones(self.B, device=self.d)
+            self.no_phase = torch.zeros(self.B, dtype=torch.bool, device=self.d)
             self.px = torch.full((self.B,), 192.0, device=self.d)
             self.py = torch.full((self.B,), 384.0, device=self.d)
-            self.pl_ring = torch.zeros(self.B, self.HIST, 2, device=self.d)
-            self.pl_ring[..., 0] = 192.0
-            self.pl_ring[..., 1] = 384.0
             self._prev_bp = torch.zeros(self.B, POOL, 2, device=self.d)
             self._prev_active = torch.zeros(self.B, POOL, dtype=torch.bool,
                                             device=self.d)
@@ -241,12 +294,22 @@ class FightSim:
             idx = self._bi
         self._sample_starts(idx.cpu())
         self.t[idx] = 0
-        self.px[idx] = 192.0
-        self.py[idx] = 384.0
-        self.pl_ring[idx] = torch.tensor([192.0, 384.0], device=self.d)
+        # random spawn: the policy must handle being anywhere on the lower field,
+        # not memorise a path from one fixed point. Kept out of the top strip
+        # (too close to the boss) and off the walls.
+        k = len(idx)
+        rx = torch.rand(k, device=self.d) * (SPAWN_X_HI - SPAWN_X_LO) + SPAWN_X_LO
+        ry = torch.rand(k, device=self.d) * (SPAWN_Y_HI - SPAWN_Y_LO) + SPAWN_Y_LO
+        self.px[idx] = rx
+        self.py[idx] = ry
         self._prev_active[idx] = False
-        if self.total_hp is not None:
-            self.boss_hp[idx] = self.total_hp
+        self.focus[idx] = 0.0
+        if self.randomize:
+            self.field_rot[idx] = (torch.rand(k, device=self.d) * 2 - 1) * FIELD_ROT
+            self.dps_mult[idx] = DPS_LO + (DPS_HI - DPS_LO) * torch.rand(k, device=self.d)
+            self.no_phase[idx] = torch.rand(k, device=self.d) < NOPHASE_FRAC
+        self._rot_cs = torch.cos(self.field_rot)[:, None]
+        self._rot_sn = torch.sin(self.field_rot)[:, None]
         return self._obs()
 
     def _now(self):
@@ -259,36 +322,32 @@ class FightSim:
         en_active = ~torch.isnan(en[..., 0])
         en = torch.nan_to_num(en, nan=-9999.0)
 
-        # --- re-aim: aimed bullets born during this episode lock onto where the
-        # sim player was AT THAT SPAWN, then fly the rest of the recorded path
-        # rotated by the angle delta. Bullets already in flight at episode start
-        # (birth < t0) keep their recorded aim.
-        aim = self.aimed[self.rec_id, f] & active               # [B, POOL]
-        birth = self.birth[self.rec_id, f].long()               # [B, POOL]
-        bstep = birth - self.t0[:, None]                        # sim step at spawn
-        age = self.t[:, None] - bstep
-        use = aim & (bstep >= 0) & (age >= 0) & (age < self.HIST)   # [B, POOL]
-        ring_i = (bstep.clamp(min=0) % self.HIST)               # [B, POOL]
-        pxb = torch.gather(self.pl_ring[..., 0], 1, ring_i)
-        pyb = torch.gather(self.pl_ring[..., 1], 1, ring_i)
-        sp = self.spawn[self.rec_id, f]                         # [B, POOL, 2]
-        new_ang = torch.atan2(pyb - sp[..., 1], pxb - sp[..., 0])
-        dth = torch.where(use, new_ang - self.rec_ang[self.rec_id, f],
-                          torch.zeros_like(new_ang))
-        cs, sn = torch.cos(dth), torch.sin(dth)
-        rel = bp - sp
-        rx = rel[..., 0] * cs - rel[..., 1] * sn
-        ry = rel[..., 0] * sn + rel[..., 1] * cs
-        bp = torch.where(use[..., None],
-                         torch.stack([sp[..., 0] + rx, sp[..., 1] + ry], -1), bp)
+        # rigid per-episode rotation of the whole danmaku field about (CX,CY).
+        # Preserves every trajectory/gap exactly; just makes absolute positions
+        # unmemorisable. Applied to bullets AND the lethal enemy orbs.
+        cs, sn = self._rot_cs, self._rot_sn                     # [B,1] each
+        bdx, bdy = bp[..., 0] - CX, bp[..., 1] - CY
+        bp = torch.where(active[..., None], torch.stack(
+            [CX + bdx * cs - bdy * sn, CY + bdx * sn + bdy * cs], -1), bp)
+        edx, edy = en[..., 0] - CX, en[..., 1] - CY
+        en = torch.cat([torch.where(en_active[..., None], torch.stack(
+            [CX + edx * cs - edy * sn, CY + edx * sn + edy * cs], -1),
+            en[..., :2]), en[..., 2:3]], -1)
         return bp, active, bh, en, en_active, f
+
+    def _boss_xy(self, f):
+        """recorded boss position at frame f, rotated by this episode's field rot."""
+        b = self.boss[self.rec_id, f]                            # [B, 2]
+        dx, dy = b[:, 0] - CX, b[:, 1] - CY
+        cs, sn = self._rot_cs[:, 0], self._rot_sn[:, 0]
+        return torch.stack([CX + dx * cs - dy * sn, CY + dx * sn + dy * cs], -1)
 
     def _obs(self, now=None):
         bp, active, bh, en, en_a, f = now if now is not None else self._now()
         both = (active & self._prev_active)[..., None]
         bv = torch.where(both, bp - self._prev_bp, torch.zeros_like(bp))
         self._prev_bp, self._prev_active = bp, active
-        bx = self.boss[self.rec_id, f]                           # [B, 2]
+        bx = self._boss_xy(f)                                    # [B, 2] rotated
         pl = torch.stack([self.px, self.py], -1)
         head = torch.zeros(self.B, 9, device=self.d)
         head[:, 4] = 1.0
@@ -309,13 +368,14 @@ class FightSim:
         items = torch.zeros(self.B, 24, device=self.d)
         return build_obs_batch(
             pl, torch.zeros(self.B, 2, device=self.d),
-            torch.zeros(self.B, device=self.d),
+            self.focus,                       # real focus bit (escape scalars use it)
             bp, bv, active.float(), head, enemies, items)
 
     def step(self, act):
         act = act.long()
         dd = act % 9
         focus = (act // 9) % 2
+        self.focus = focus.to(self.focus.dtype)
         mv = self._dirs[dd]
         ln = mv.norm(dim=1, keepdim=True).clamp(min=1e-6)
         spd = torch.where(focus[:, None] > 0,
@@ -326,8 +386,6 @@ class FightSim:
         self.px = (self.px + mstep[:, 0]).clamp(PX_LO, PX_HI)
         self.py = (self.py + mstep[:, 1]).clamp(PY_LO, PY_HI)
         self.t += 1
-        self.pl_ring[self._bi, self.t % self.HIST, 0] = self.px
-        self.pl_ring[self._bi, self.t % self.HIST, 1] = self.py
 
         now = self._now()
         bp, active, bh, en, en_a, f = now
@@ -343,24 +401,50 @@ class FightSim:
         hit = hit_b | hit_e
 
         ended = (self.t0 + self.t) >= (self.rec_len_gpu[self.rec_id] - 2)
-        rew = torch.full((self.B,), 0.02, device=self.d) - 5.0 * hit.float()
+        rew = SURV_REW - HIT_PEN * hit.float()
 
-        # --- damage-phasing: shooting while not hugging the bottom drains boss
-        # HP (ReimuA homing -> no strict firing-lane check). Killing the boss
-        # ends the episode early with a bonus, so a shorter fight = higher return.
+        # --- damage-phasing: holding shoot drains the CURRENT phase's synthetic
+        # HP - at 20% rate anywhere (homing amulets), full rate only when lined
+        # up in x under the boss (forward needles). Draining the phase, or its
+        # recorded timer expiring, screen-clears the bullets and jumps the
+        # recording to the next phase. Beating the last phase = KILL_BONUS.
         killed = torch.zeros(self.B, dtype=torch.bool, device=self.d)
-        if self.total_hp is not None:
-            shooting = (act >= 18) & (self.py < 400.0)
-            dmg = SHOT_DPS * shooting.float()
+        advance = torch.zeros(self.B, dtype=torch.bool, device=self.d)
+        if self.phasing:
+            rid = self.rec_id
+            cur = self.ph[rid, self.phase_idx]                   # [B, 4]
+            p_first, p_end = cur[:, 1].long(), cur[:, 2].long()
+            fnow = self.t0 + self.t
+            # armored: from the phase's clear (t0) until its first bullet flies -
+            # the boss is repositioning / declaring, deals & takes no damage
+            armored = fnow < p_first
+            shoot_bit = (act >= 18) & ~armored & ~self.no_phase
+            bx = self._boss_xy(f)[:, 0]                 # rotated boss x this frame
+            aligned = (self.px - bx).abs() < LANE_HALF
+            dps = (SHOT_DPS * self.dps_mult *
+                   (HOMING_FRAC + (1.0 - HOMING_FRAC) * aligned.float()))
+            dmg = dps * shoot_bit.float()
             dmg = torch.minimum(dmg, self.boss_hp.clamp(min=0))
             self.boss_hp = self.boss_hp - dmg
             rew = rew + DMG_REW * dmg
-            killed = self.boss_hp <= 0
+            self.armored = armored          # for the viz / diagnostics
+            trans = (self.boss_hp <= 0) | (fnow >= p_end) | ended
+            last = self.phase_idx >= (self.n_ph_gpu[rid] - 1)
+            killed = trans & last
+            advance = trans & ~last
             rew = rew + KILL_BONUS * killed.float()
 
-        done = hit | ended | killed
+        done = (hit | killed) if self.phasing else (hit | ended | killed)
         self.last_killed = killed          # which done-episodes were boss kills
         obs = self._obs(now)
+        if advance.any():
+            ai = advance.nonzero(as_tuple=True)[0]
+            self.phase_idx[ai] = self.phase_idx[ai] + 1
+            nxt = self.ph[self.rec_id[ai], self.phase_idx[ai]]   # [k, 4]
+            self.t0[ai] = nxt[:, 0].long().clamp(max=self.maxF - 2)  # clear_start
+            self.t[ai] = 0
+            self.boss_hp[ai] = nxt[:, 3]                            # synthetic hp
+            self._prev_active[ai] = False                        # screen clear
         if done.any():
             self.reset(done.nonzero(as_tuple=True)[0])
         return obs, rew, done

@@ -64,7 +64,7 @@ def main():
     ap.add_argument("--clip", type=float, default=0.2)
     ap.add_argument("--epochs", type=int, default=3)
     ap.add_argument("--minibatch", type=int, default=32768)
-    ap.add_argument("--ent", type=float, default=0.004)
+    ap.add_argument("--ent", type=float, default=0.002)
     ap.add_argument("--seed", type=int, default=0)
     args = ap.parse_args()
 
@@ -72,15 +72,22 @@ def main():
     torch.manual_seed(args.seed)
     run = Path("runs_sim") / args.name
     run.mkdir(parents=True, exist_ok=True)
+    import json
+    (run / "meta.json").write_text(json.dumps({
+        "algo": "ppo_fight", "steps": args.steps, "hidden": list(HID),
+        "B": args.B, "fight": args.fight}))
 
     sim = FightSim(B=args.B, name=args.fight, device=dev, seed=args.seed,
                    max_frames=args.max_frames)
     ev = FightSim(B=1024, name=args.fight, device=dev, seed=args.seed + 999,
-                  max_frames=args.max_frames)
-    for k in ("pos", "spawn", "bhalf", "aimed", "rec_ang", "birth", "boss", "en"):
+                  max_frames=args.max_frames, phase_start_mix=0.0,
+                  randomize=False)   # eval: clean phase-0 starts, DPS x1, no wave jitter
+    for k in ("pos", "bhalf", "boss", "en"):
         setattr(ev, k, getattr(sim, k))          # identical data - don't double it
     ac = AC().to(dev)
     opt = torch.optim.Adam(ac.parameters(), lr=args.lr, eps=1e-5)
+    n_upd_tot = max(1, int(args.steps / (args.B * args.rollout)))
+    sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, n_upd_tot, eta_min=args.lr * 0.15)
     B, T = args.B, args.rollout
 
     # in-training eval is a cheap sanity signal only (same recordings -> prone to
@@ -88,21 +95,30 @@ def main():
     # snapshots. FightSim.step == 1 frame; the full fight is ~10750 frames but a
     # ~5000-frame window (83s, into phase 3) is enough to see it learning.
     @torch.no_grad()
-    def evaluate(n=8000):
-        o = ev.reset()
+    def evaluate(n=11500):                       # n > full 179s fight -> a pure
+        o = ev.reset()                           # dodge-survivor is fully visible
         alive = torch.ones(ev.B, dtype=torch.bool, device=dev)
         life = torch.zeros(ev.B, device=dev)
         cleared = torch.zeros(ev.B, dtype=torch.bool, device=dev)
-        for _ in range(n):
+        deepest = torch.zeros(ev.B, dtype=torch.long, device=dev)
+        kill_f = torch.zeros(ev.B, device=dev)   # frame the boss was defeated
+        for step in range(n):
             a = ac.actor(o).argmax(-1)
             o, r, dn = ev.step(a)
             life += alive.float()
-            if getattr(ev, "last_killed", None) is not None:
-                cleared |= alive & ev.last_killed
+            deepest = torch.maximum(
+                deepest, torch.where(alive, ev.phase_idx,
+                                     torch.zeros_like(ev.phase_idx)))
+            nk = alive & getattr(ev, "last_killed", torch.zeros_like(alive))
+            kill_f = torch.where(nk, torch.full_like(kill_f, float(step + 1)), kill_f)
+            cleared |= nk
             alive = alive & ~dn
         s = (life / 60.0).cpu().numpy()          # step == frame
         clr = float(cleared.float().mean())
-        return float(np.median(s)), float(np.mean(s)), clr
+        ph = float(deepest.float().mean()) + 1.0
+        kt = kill_f[cleared]
+        ktime = float(kt.median().item() / 60.0) if kt.numel() else float("nan")
+        return float(np.median(s)), float(np.mean(s)), clr, ph, ktime
 
     obs = sim.reset()
     ob = torch.zeros(T, B, OBS_DIM, device=dev)
@@ -113,6 +129,7 @@ def main():
     db = torch.zeros(T, B, device=dev)
     total, upd, t0 = 0, 0, time.perf_counter()
     hist = []
+    best_score = -1e9
 
     while total < args.steps:
         for t in range(T):
@@ -159,16 +176,27 @@ def main():
                 loss.backward()
                 nn.utils.clip_grad_norm_(ac.parameters(), 0.5)
                 opt.step()
+        sched.step()
 
         if upd % 30 == 0:
-            med, mean, f30 = evaluate()   # f30 = clear rate when phasing is on
-            sps = total / (time.perf_counter() - t0)
+            med, mean, f30, ph, ktime = evaluate()   # f30 = kill rate, ktime = median kill-time (s)
+            wall = time.perf_counter() - t0
+            sps = total / wall
+            kts = f"{ktime:4.0f}s" if not np.isnan(ktime) else "  --"
             print(f"upd {upd:4d}  {total/1e6:6.1f}M  {sps/1e3:4.0f}k/s  "
-                  f"eval surv med {med:5.1f}s mean {mean:5.1f}s  cleared {f30*100:3.0f}%",
+                  f"surv med {med:5.1f}s  kill {f30*100:3.0f}%  "
+                  f"kill-time {kts}  phase {ph:.2f}/4  lr {sched.get_last_lr()[0]:.1e}",
                   flush=True)
-            hist.append((total, med, mean, f30))
+            hist.append((wall, total, med, mean, f30, ktime))  # 6-col fight schema
             np.save(run / "history.npy", np.array(hist))
             ac.export(run / "last_mlp.pt")
+            # keep the best checkpoint by kill-rate (tie-break survival) so a
+            # later training thrash can't lose the peak
+            score = f30 + med / 1000.0
+            if score > best_score:
+                best_score = score
+                ac.export(run / "best_mlp.pt")
+                print(f"    ^ new best (kill {f30*100:.0f}%, surv {med:.0f}s)", flush=True)
             if upd % 60 == 0:
                 ac.export(run / f"mlp_{int(total/1e6)}M.pt")
 
