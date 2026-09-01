@@ -143,10 +143,15 @@ spawns a child runner that inherits the parent's `PARAM_*` and fires its own
 bullets (a lighter version of Part 6); `enemy_kill_all` and every phase
 transition clear the sub-enemies (the screen-clear).
 
-Two engine details this pinned down: `wait(N)` **freezes** the per-sub frame for
-N frames rather than advancing it (otherwise every instruction after a `wait`
-gets skipped by the time gate), and `call` maps the caller's `ARG_*` onto the
-callee's `PARAM_*` and restores locals on `ret`.
+Three engine details this pinned down: `wait(N)` **freezes** the per-sub frame
+for N frames rather than advancing it (otherwise every instruction after a
+`wait` gets skipped by the time gate); `call` maps the caller's `ARG_*` onto the
+callee's `PARAM_*` and restores locals on `ret`; and **`bullet_effects`'s first
+argument is an enable bit** — every `arg0 == 0` call (including the
+`(0, 1, 0, −1, …)` "clear" sentinel) leaves the recorded bullets `fx_flag 0`,
+while every `arg0 == 1` call's flag / interval / p1 / p2 match the recording
+exactly. Reading it as a payload field flagged ~2160 NS2 bullets that are
+actually plain.
 
 - **Verify** (`python -m sim.ecl.vm_verify`): VM spawn-event count per phase vs
   the mean bullet-birth count over the ten `sim/fights/letty_*` recordings —
@@ -216,16 +221,32 @@ Until the sub-enemies move, the VM's spawn positions and angles are wrong for
 ~80 % of the danmaku, so no motion model (Part 10) and no trace alignment
 (Part 11) can close.
 
-What's owed:
+**Done so far:**
 
-- **The stubbed opcodes — no longer optional.** `move_speed` (49),
-  `move_acceleration` (50), `set_angle` (58), `set_orbit_distance` retargeting
-  (57), and the `__move_change_*` family are no-ops. The orbs use these to
-  spin up their orbit and sweep it — implement them and verify each orb's
-  track against the recorded sub-enemy positions (`enemies` array in the npz).
-- **A dedicated boss-track verify pass**, RNG-stream-matched where possible,
-  and a check on whether the engine decelerates near a `move_point` target
-  (PyTouhou has a `move_to_decel` variant — the current model is pure linear).
+- **Free-flight physics implemented.** `move_speed` (49), `move_acceleration`
+  (50), `move_angular_velocity` (48), `set_angle` (58) were no-ops; they now
+  drive the engine's per-frame integration
+  (`speed += accel; angle += ang_vel; pos += speed·[cos,sin]`), with
+  `move_dir_time` (54) reworked onto it. Boss track still exact for 127 frames;
+  Letty doesn't lean on 48/49/50/58 but Stages 2–6 will.
+- **`enemy_trace.py`** reconstructs each sub-enemy's track from the recorded
+  `enemies` array (slot + position-jump identity, keeps ~100% of rows). This is
+  the ground truth. It shows Letty's **shooter orbs (hb 0×0) are near-stationary
+  emitters ~48 px off the boss**, and the **NS2 lethal orbs (hb 8×8) genuinely
+  orbit at ~3 px/f**.
+
+**Still open — the one thing blocking Parts 10/11:**
+
+- **`__move_circle_abs` (56) argument semantics.** It sets up the orbit
+  (`ORIGIN_X/Y/Z`, `DIST_ORIGIN`, `CIRCLE_ANGLE`, `CIRCLE_SPEED` — the gvars
+  exist), but the candidate arg values in Letty's script (`320`, `0.0262`,
+  `−1.5708`, `0.5`) don't map cleanly to a radius + angular speed, so the VM
+  can't place the orbiting emitters. Needs the opcode-56 handler disassembled
+  from `th07.exe`, or patient calibration of the mapping against
+  `enemy_trace`. Until then ~80% of Letty's bullets have no usable spawn
+  geometry.
+- **A dedicated boss-track verify pass**, RNG-stream-matched, and a
+  `move_point` deceleration check (the current model is pure linear).
 
 ---
 
