@@ -25,7 +25,12 @@ change. The VM replaces *where the bullet positions come from*, nothing else.
     recording on the deterministic frames, but it hasn't had its own verify
     pass and a few move-tuning opcodes are stubbed).
 
-    No bullet **motion** yet — that's Stage B.
+    **Stage B started.** Per-bullet traces reconstructed from the pool
+    recordings with no hook (Part 9, verified bit-exact); a first per-type
+    motion model (Part 10) tracks **~75 % of bullets within 5 px / 90 f**, p50
+    0.00. Closing the rest needs Part 11's trace-to-spawn alignment first — the
+    remaining error is one observable "type" covering several different ECL
+    instructions, which only the VM's spawn-source can tell apart.
     - All six PCB stage ECLs decompiled (`tools/th07_ecl/`), Letty isolated, the
       opcode map `th07.eclm`
     - A dead VM skeleton (`sim/ecl_vm.py` + `ecl_parse/expand/bullet`) from the
@@ -145,9 +150,9 @@ callee's `PARAM_*` and restores locals on `ret`.
   **NS1 +1 %, NS2 +1 %, Table-Turning +6 %, total +7 %**. Lingering Cold runs
   **+18 %** — the `Sub42 → Sub43 → Sub36` orbiting-orb chain over-fires; the
   interpretation is clearly right (the other three phases land inside 6 %) but
-  the orb fire-rate needs the frame-level check that comes with Part 10's
-  motion models. Also: Sub40 computes its three sub-enemy spawn angles
-  `0, ±2π/3`.
+  the orb fire-rate needs the frame-level check that comes with Part 11's
+  trace-to-spawn alignment. Also: Sub40 computes its three sub-enemy spawn
+  angles `0, ±2π/3`.
 
 ### 6 · Sub-enemies — `enemy_create_rel` · ✅ done
 
@@ -272,26 +277,61 @@ trajectories `(frame, x, y, vx, vy)` + birth class / fx flag.
 
     Letty has **no delay bullets** — every bullet moves the frame it spawns.
 
-### 10 · Per-type motion models · ~2–3 days · autonomy 90% (next)
+### 10 · Per-type motion models · first pass done · **blocked on Part 11**
 
-For each of Letty's bullet types, fit a motion model from the Part 9 traces:
-`delay_frames`, `accel`, `speed_final`, `turn_rate`. (No splitting — her
-recordings show only `bullet_effects` flags 0 and 16, never the split flags.)
-Each type is labelled by cross-referencing the trace's birth frame + position
-against the VM's Part 5 spawn schedule, so a fit is "the ECL fired
-`bullet_effects(_, 16, _, 120, _, −0.0208, −999)` then a bullet — here is how
-that bullet actually moved." Express each as a vectorizable
-`pos(type, spawn, angle, speed, t)`.
+`sim/ecl/fit_motion.py` groups the Part 9 traces by an observable "type" —
+`(class, fx_flag, fx_p1, fx_interval, base_speed, turns?, ramps?)` — and fits
+each group its **median displacement profile**: `mag[t]` and `dheading[t]`
+tables in the bullet's own frame. Forward-sim is
+`pos0 + cumsum(mag · [cos,sin](heading0 + dheading))` — non-parametric, a plain
+GPU lookup, and exact for any behaviour a group actually shares.
 
-- **Concerns:** the multi-slot `bullet_effects` system — a bullet can chain
-  several effect stages. A type that doesn't fit a simple
-  `delay → accel → cruise` model needs a small piecewise state machine.
-  Splitting bullets multiply the object count — the GPU layer has to budget pool
-  slots.
-- **Verify:** simulate each type from its recorded spawn params; the path stays
-  within ~5 px of the recorded path over the first 90 frames, for every type.
+What the recordings settled:
 
-### 11 · Difficulty coefficients · ~2 days · autonomy 70%
+- **Position is `cumsum` of `diff(xy)`, not of the pool's `vel` field.** The
+  `speed`/`vel` fields (`+0xBB0 / +0xB98`) are read at a different point in the
+  engine's frame than position; integrated, they drift **13 px p90 / 22 px p99
+  over 90 frames** against the recorded positions. That is the recorder's own
+  noise floor — so model the displacement the bullet actually made.
+- **Motion shapes:** most bullets hold heading and cruise at constant speed
+  after a ~15-frame catch-up transient; ~9–13 % take one sharp scripted heading
+  change (a `bullet_effects` redirect), or a 180° flip when a decel ramp
+  (`fx_p1 = −0.025` for 120 f) drives speed through zero — the "Lingering Cold"
+  snow that drifts out and falls back. `accel` / `angvel` (`+0xBB4/8`) are zero
+  for every Letty bullet.
+
+**Result: ~75 % of bullets track within 5 px / 90 f** (p50 **0.00 px**, p75
+4.8 px). The two largest populations — ~21 k of ~45 k bullets — fit to **0.00 px
+p90**. The remaining ~25 % is a hard tail, and its cause is structural:
+
+!!! warning "The tail needs Part 11 done first — swap the order"
+    Groups that share all of `(class, fx_flag, fx_p1, fx_interval, base_speed)`
+    still contain bullets from **different ECL instructions** fired by
+    **different Letty attacks** across the fight — e.g. `(cls 3, fx 0, base 1.0)`
+    spans 28 distinct fire-windows from step 2 600 to 7 600. Their scripted
+    motion genuinely differs (one attack accelerates its stream at a fixed
+    spellcard time, another doesn't), so the group median fits neither. The
+    observable key can't separate them; **the VM's spawn-source can**
+    (`BulletSpawn.source_sub` + instruction pointer). So Part 11's
+    trace-to-spawn alignment has to land *before* Part 10 can close the gap —
+    then each fit is per ECL bullet instruction, and the `bullet_effects` timing
+    is read from the script rather than reverse-engineered.
+
+- **Verify** (`python -m sim.ecl.fit_motion`): per-group `p50 / p90` path error
+  over 90 frames vs the recorded path, plus the aggregate coverage number. Bar
+  is 5 px / 90 f per group; currently met for the groups that map to a single
+  attack, flagged `TAIL` for the mixed ones.
+- **Fallback if a per-instruction group still won't fit:** a small piecewise
+  state machine for that one type, not a project stall.
+
+### 11 · Trace-to-spawn alignment + difficulty coefficients · ~3 days · autonomy 70% · **next**
+
+**First** (this is what Part 10's tail is waiting on): align each Part 9 bullet
+trace to the VM spawn that produced it — match on birth frame + birth position
+against the Part 5/6 spawn schedule, tag every trace with its `source_sub` +
+instruction pointer. Then Part 10 re-fits per ECL instruction.
+
+**Then** the difficulty work:
 
 Lunatic scales counts, speeds, gaps. Some is in the ECL (`!L` params), some is an
 engine multiplier keyed off the difficulty global. Record Letty on **Normal**
@@ -345,9 +385,11 @@ Then `train_fight.py --sim ecl`.
 The crux risk was Part 9 — finding and hooking the bullet constructor. That's
 **gone**: per-frame polling + slot-identity tracking gets the same data
 (`sim/ecl/bullet_trace.py`), verified bit-exact against the recordings, no
-dynamic analysis. The remaining Stage-B risk is just whether a handful of
-bullet types fit clean motion models (Part 10) — and if one doesn't, the
-fallback is a small piecewise state machine for that type, not a project stall.
+dynamic analysis. The remaining Stage-B risk is motion-model fit (Part 10): ~75 % of bullets
+already track within 5 px, and the shortfall is a *grouping* problem — one
+observable type spanning several ECL instructions — that Part 11's
+trace-to-spawn alignment resolves. Worst case for a genuinely awkward type is a
+small piecewise state machine, not a project stall.
 
 ## Totals & risks
 
