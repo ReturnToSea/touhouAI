@@ -349,6 +349,8 @@ class FightSim:
             self.homing_frac = (self._pwr_hom[ti0] / self.shot_dps).clamp(0, 1)
             self.px = torch.full((self.B,), 192.0, device=self.d)
             self.py = torch.full((self.B,), 384.0, device=self.d)
+            self._prev_px_obs = self.px.clone()
+            self._prev_py_obs = self.py.clone()
             self._prev_bp = torch.zeros(self.B, POOL, 2, device=self.d)
             self._prev_active = torch.zeros(self.B, POOL, dtype=torch.bool,
                                             device=self.d)
@@ -367,6 +369,8 @@ class FightSim:
         self.px[idx] = rx
         self.py[idx] = ry
         self._prev_active[idx] = False
+        self._prev_px_obs[idx] = self.px[idx]
+        self._prev_py_obs[idx] = self.py[idx]
         self.focus[idx] = 0.0
         if self.randomize:
             self.field_rot[idx] = (torch.rand(k, device=self.d) * 2 - 1) * self._field_rot
@@ -424,9 +428,22 @@ class FightSim:
             bh = torch.cat([bh, ah], 1)
         bx = self._boss_xy(f)                                    # [B, 2] rotated
         pl = torch.stack([self.px, self.py], -1)
+        pvel = torch.stack([self.px - self._prev_px_obs,
+                            self.py - self._prev_py_obs], -1)
+        self._prev_px_obs, self._prev_py_obs = self.px.clone(), self.py.clone()
+        # head_aux: [lives/9, bombs/9, power/128, tanh(graze/100), stage/6,
+        #            alive, dead, boss_present, boss_frac].  Real captured Letty
+        #            obs had lives 2, bombs 3, graze ~215, stage 1, boss_frac 1.
+        hp0 = self.ph[self.rec_id, self.phase_idx][:, 3].clamp(min=1.0)
         head = torch.zeros(self.B, 9, device=self.d)
-        head[:, 4] = 1.0
+        head[:, 0] = 2.0 / 9.0
+        head[:, 1] = 3.0 / 9.0
+        head[:, 2] = (self.power / 128.0).clamp(0, 1)
+        head[:, 3] = 0.97
+        head[:, 4] = 1.0 / 6.0
         head[:, 5] = 1.0
+        head[:, 7] = 1.0
+        head[:, 8] = (self.boss_hp / hp0).clamp(0, 1)
         # nearest lethal enemy body -> the obs "enemies" slot the policy expects
         enemies = torch.zeros(self.B, 18, device=self.d)
         dx = en[..., 0] - self.px[:, None]
@@ -442,7 +459,7 @@ class FightSim:
         enemies[:, 2] = 1.0
         items = torch.zeros(self.B, 24, device=self.d)
         return build_obs_batch(
-            pl, torch.zeros(self.B, 2, device=self.d),
+            pl, pvel,
             self.focus,                       # real focus bit (escape scalars use it)
             bp, bv, active.float(), head, enemies, items)
 
