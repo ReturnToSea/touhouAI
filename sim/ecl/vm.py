@@ -925,10 +925,20 @@ def _set_angle(vm, e, ins):
     e.mangle, e.motion = e.get(ins.args[0]), None
 
 
-@_op(54)  # move_dir_time(duration, ease, angle, speed) — travel `speed*duration`
-def _move_dir_time(vm, e, ins):   # px along `angle` over `duration` frames, eased.
+@_op(54)  # move_dir_time(duration, ease, angle, speed)
+def _move_dir_time(vm, e, ins):
     dur, ease, angle, speed = (e.get(a) for a in ins.args)
-    dur = max(0, int(dur))
+    dur = int(dur)
+    if dur < 1:
+        # fn410520 case 0x35: duration < 1 -> NOT a timed move. Set the enemy's
+        # heading (+0x2b54) and speed (+0x2b64) and drop it into free-flight
+        # (flag &0xfc|1) with no stop frame. Used by every stage enemy's fly-off
+        # and by Letty's Sub35 NS1 emitter orbs (which then drift outward).
+        e.mangle, e.mspeed = angle, speed
+        e.maccel = e.mangvel = 0.0
+        e.motion, e.stop_at = None, None
+        return
+    # duration >= 1: travel `speed*duration` px along `angle`, eased (type 2).
     tx = e.x + math.cos(angle) * speed * dur
     ty = e.y + math.sin(angle) * speed * dur
     e.motion = _Motion("linear", vm.frame, dur, e.x, e.y, e.z, tx, ty, e.z,
