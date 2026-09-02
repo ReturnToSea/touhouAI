@@ -36,7 +36,10 @@ _FIGHTS = _ROOT / "sim" / "fights"
 
 POOL = 1025
 MAX_EN = 48
-MAXLIFE = 420                 # frames to propagate a bullet (LC snow lives ~435)
+# frames to propagate a bullet. Measured max real lifetime on the small playfield
+# (phase-clamped) is ~640 f (slow LC/TT bullets); 420 was truncating ~1% of
+# bullets mid-screen. Peak concurrent is 588 either way, well under POOL.
+MAXLIFE = 900
 BULLET_HB = 2.5               # fallback for an unseen type-word
 ENEMY_BODY_SCALE = 2.0 / 3.0
 VM_PLAYER = (192.0, 400.0)    # where the VM aims — undo it, re-aim per episode

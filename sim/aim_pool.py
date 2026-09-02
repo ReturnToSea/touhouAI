@@ -19,8 +19,11 @@ FX_PAUSE_REDIR, FX_PAUSE_AIM = 64, 128
 _FX_GRACE_MASK = 0x40 | 0x80 | 0x100 | 0x400 | 0x800
 PW, PH = 384.0, 448.0
 CULL_M = 12.0
-MAXLIFE = 420
-_SPAWN_PER_FRAME = 40             # cap; a Sub47 burst is < 16/frame
+# Lingering Cold's slow/paused aimed bullets (fired ~3px/f, decelerate to 0,
+# redirect to ~0.5-1.5) take up to ~640 f to leave the small playfield; 420 was
+# truncating them mid-screen near the player.
+MAXLIFE = 900
+_SPAWN_PER_FRAME = 64             # LC calls Sub44-47 in one frame -> ~60-80 spawns
 
 
 def _pad(recs, key, dtype=torch.float32):
@@ -34,7 +37,10 @@ def _pad(recs, key, dtype=torch.float32):
 
 
 class AimPool:
-    def __init__(self, recs, B, device, max_aim=256):
+    def __init__(self, recs, B, device, max_aim=512):
+        # Lingering Cold peaks at ~333 concurrent aimed bullets; 256 overflowed,
+        # dropping aimed bursts (the "boss isn't shooting at me" bug) and forcing
+        # perpetual spawn backlog. 512 has headroom past LC's peak.
         self.B, self.d, self.MA = B, device, max_aim
         self.active_any = any(r.get("aimed") is not None for r in recs)
         if not self.active_any:
