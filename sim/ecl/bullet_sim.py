@@ -69,6 +69,32 @@ def hang_state_for_type(type_word: int) -> int:
     return 0
 
 
+# hang durations are the materialise-anim length (data-driven); measured per
+# state from the recordings — state 2 ~8 f, state 3/4 ~14 f.
+_HANG_FRAMES = {0: 0, 2: 8, 3: 14, 4: 14}
+
+
+def from_spawn(s, player_xy: tuple[float, float] = (192.0, 400.0)) -> BulletParams:
+    """`BulletParams` from a VM `BulletSpawn` — the Part 12 path (no recording).
+    `s` needs `.btype`, `.x`, `.y`, `.angle`, `.speed`, `.effects`
+    (each `(p1, p2, interval, repeat, flag, gate)`)."""
+    bt = int(s.btype)
+    hs = hang_state_for_type(bt)
+    launch = bool(bt & 0x1) and any(e[4] == 1 for e in s.effects)
+    fx, p1, p2, iv, rep = 0, 0.0, 0.0, 0, 1
+    for e in s.effects:
+        fl = int(e[4])
+        if fl in _FLAG_TO_FX and (bt & fl or fl in (0x400, 0x800)):
+            fx = _FLAG_TO_FX[fl]
+            p1, p2, iv, rep = float(e[0]), float(e[1]), int(e[2]), max(1, int(e[3]))
+            break
+    return BulletParams(
+        x=float(s.x), y=float(s.y), angle=float(s.angle), speed=float(s.speed),
+        hang_state=hs, hang_frames=_HANG_FRAMES[hs], launch=launch,
+        fx_flag=fx, fx_p1=p1, fx_p2=p2, fx_interval=iv, fx_repeat=rep,
+        player_xy=player_xy)
+
+
 def simulate(p: BulletParams, n_frames: int) -> np.ndarray:
     """Return [n_frames, 2] positions (position 0 == the first rendered frame)."""
     ang = float(p.angle)

@@ -108,18 +108,20 @@ def _ease(mode: int, x: float) -> float:
 
 @dataclass
 class BulletSpawn:
-    """One spawn event — a bullet coming into existence. Motion (delay, accel,
-    curve from `effect`) is Stage B; here we record the launch parameters."""
+    """One spawn event — a bullet coming into existence. `bullet_sim.simulate`
+    propagates it from here."""
     frame: int
     kind: str                 # "fan" | "circle" | "random"
-    btype: int                # bullet graphic/type id (the last opcode arg)
+    btype: int                # the type-word (last opcode arg): hang bits 0x2/4/8,
+    #                           launch bit 0x1, fx-gate bits, graphic id in the low byte
     x: float
     y: float
     angle: float              # launch angle (rad); toward the player if aimed
     speed: float
     aimed: bool
-    effect: tuple | None      # the bullet_effects args in force at spawn
-    source_sub: int
+    effects: tuple = ()       # the bullet_effects staging entries in force at spawn,
+    #                           each (p1, p2, interval, repeat, flag, gate)
+    source_sub: int = -1
     source_ip: int = -1       # instruction index within source_sub that fired it
 
 
@@ -154,7 +156,10 @@ class Enemy:
         self.pending_interrupt: int | None = None
 
         self.shoot_offset = (0.0, 0.0, 0.0)
-        self.pending_effect: tuple | None = None    # last bullet_effects, attached to the next spawn
+        # bullet_effects staging list built up by op 79, copied onto every spawn.
+        # Each entry: (p1, p2, interval, repeat, flag, gate). flag 1 starts a
+        # fresh list (it's the launch-kick entry the ECL always writes first).
+        self.pending_effects: list[tuple] = []
         self.motion: _Motion | None = None          # move_point interpolator / orbit
         # free-flight physics (used when `motion` is None) — the engine integrates
         # these every frame: speed += accel, angle += ang_vel, pos += speed·[cos,sin]
@@ -251,6 +256,7 @@ class Enemy:
         self.stack = []
         self.running = True
         self.spell = None
+        self.pending_effects = []
         self.vm._emit("enter_sub", f"Sub{sub}  <{reason}>")
 
     def damage(self, amount: int):
@@ -370,7 +376,7 @@ class VM:
                 sp = spd1 + (spd2 - spd1) * (layer / max(1, layers - 1) if layers > 1 else 0)
             self.bullets.append(BulletSpawn(
                 frame=self.frame, kind=k, btype=btype, x=sx, y=sy,
-                angle=ang, speed=sp, aimed=aimed, effect=e.pending_effect,
+                angle=ang, speed=sp, aimed=aimed, effects=tuple(e.pending_effects),
                 source_sub=e.sub, source_ip=source_ip))
 
     def _spawn_child(self, parent: Enemy, sub: int, dx: float, dy: float, dz: float) -> None:
@@ -669,13 +675,15 @@ def _bullet(vm, e, ins):
     vm._emit_bullets(e, _BULLET_KIND[ins.opcode], ins.args, source_ip=ins.index)
 
 
-@_op(79)  # bullet_effects(enable, flag, _, interval, _, p1, p2) — attaches to
-def _bullet_effects(vm, e, ins):      # the next spawn (Stage B models it)
-    args = tuple(e.get(a) for a in ins.args)
-    # arg0 is an enable bit: every arg0==0 call in Letty's script (incl. the
-    # `(0,1,0,-1,…)` sentinel) leaves the recorded bullets with fx_flag 0;
-    # every arg0==1 call's flag/interval/p1/p2 match the recording exactly.
-    e.pending_effect = args if args and int(args[0]) == 1 else None
+@_op(79)  # bullet_effects(gate, flag, _, interval, repeat, p1, p2) — appends a
+def _bullet_effects(vm, e, ins):      # staging entry; flag 1 starts a fresh list.
+    a = [e.get(x) for x in ins.args]
+    entry = (float(a[5]), float(a[6]), int(a[3]), int(a[4]), int(a[1]), float(a[0]))
+    #        p1           p2           interval    repeat      flag        gate
+    if entry[4] == 1:                              # the launch-kick entry
+        e.pending_effects = [entry]
+    elif len(e.pending_effects) < 5:
+        e.pending_effects.append(entry)
 
 
 @_op(78)  # shoot_offset(x, y, z)

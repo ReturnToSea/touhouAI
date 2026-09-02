@@ -68,17 +68,27 @@ def run_vm(ecl_path: str = str(_ECL), seed: int = 0, frames: int = 13000
     return tuple(vm.bullets)
 
 
-def _eff_sig(effect) -> tuple:
-    """(fx_flag, fx_p1, fx_interval) from a VM `bullet_effects` tuple, matching
-    what the recorder logs at `+0xC3C / +0xC2C / +0xC34`. The VM already nulls a
-    disabled (arg0==0) effect, so a tuple here means it applied."""
-    if effect is None:
-        return (0, 0.0, 0)
-    return (int(effect[1]), round(float(effect[5]), 4), int(effect[3]))
+def _eff_sig(spawn) -> tuple:
+    """(fx_flag, fx_p1, fx_interval) of a spawn's first non-launch effect entry
+    that its type-word actually gates on — matches the recorder's fx columns."""
+    btype = int(spawn.btype)
+    for p1, p2, iv, rep, flag, gate in spawn.effects:
+        if flag != 1 and (btype & flag):
+            return (flag, round(p1, 4), iv)
+    return (0, 0.0, 0)
 
 
 def _bul_sig(b: Bullet) -> tuple:
+    """(fx_flag, fx_p1, fx_interval) of the recorded bullet's *armed* effect —
+    the staging entry only applies if the type-word gates it (52-col
+    recordings); older ones fall back to the raw fx columns."""
     m = b.motion[0]
+    if b.re is not None:
+        tflag = int(b.re[0, 1])
+        for e in b.staging(0):
+            if e["flag"] != 1 and (tflag & e["flag"]):
+                return (e["flag"], round(e["p1"], 4), e["interval"])
+        return (0, 0.0, 0)
     return (int(b.fxflag), round(float(m[4]), 4), int(m[6]))
 
 
@@ -205,7 +215,7 @@ def align(npz_path: str | Path) -> tuple[list[Match], list[int], list[BulletSpaw
 
         by_sig_sp: dict[tuple, list] = {}
         for j, s in ph_sp:
-            by_sig_sp.setdefault(_eff_sig(s.effect), []).append((j, s))
+            by_sig_sp.setdefault(_eff_sig(s), []).append((j, s))
         by_sig_tr: dict[tuple, list] = {}
         for t in ph_tr:
             by_sig_tr.setdefault(_bul_sig(t), []).append(t)
