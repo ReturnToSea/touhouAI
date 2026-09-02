@@ -399,32 +399,43 @@ p90**. The remaining ~25 % is a hard tail, and its cause is structural:
 
 </details>
 
-### 11 · Trace-to-spawn alignment + difficulty coefficients · matcher built, 37 % tagged, refining
+### 11 · Trace-to-spawn alignment + difficulty coefficients · 75 % tagged, motion re-fit 84 %
 
 `sim/ecl/align.py` matches each Part 9 bullet trace to the VM spawn that
-produced it: per phase it cross-correlates the two birth-rate histograms for the
-frame offset, then within each observable `(fx_flag, fx_p1, fx_interval)`
-signature greedily matches recorded births to VM spawns on
-`(|Δframe − offset|, Δposition, Δheading)`, tagging each trace with
-`(source_sub, source_ip)`.
+produced it and tags it with `(source_sub, source_ip)`. Two matchers:
 
-**Where it stands** (`python -m sim.ecl.align`): **34 % of bullets tagged**
-(was 20 % before the orbit op landed), dpos ~9 px, tags instruction-pure in the
-median. Where the frame-lock is well-defined it's tight (±0 median, std ~4 f on
-the boss-fired attacks); on **Table-Turning** it's loose (std ~60 f) because the
-pattern repeats every ~12 f, so bullet-level frame matching is ambiguous — but
-those bullets come from just two instructions told apart by speed, so the
-grouping Part 10 needs is still right.
+- **1:1** — per phase, cross-correlate the two birth-rate histograms for the
+  frame offset, then within each observable `(fx_flag, fx_p1, fx_interval)`
+  signature greedily match recorded births to VM spawns on
+  `(|Δframe − offset|, Δposition, Δheading)`, fitting a rigid spawn-point shift.
+- **ring** — burst patterns (`bullet_circle` firing 5–30 bullets in one frame)
+  defeat per-bullet matching, but the *sequence of rings* lines up ~1:1
+  (Table-Turning: 257 VM bursts vs 260 recorded, same frames). DP-align the two
+  ring lists on `(|Δframe|, ring-size)`, then match traces to spawns inside a
+  pair by nearest launch heading.
+
+**Where it stands** (`python -m sim.ecl.align`): **75 % of bullets tagged**
+(was 34 %), **100 % instruction-pure** on every big group. The 1:1 matches sit
+on their emitter (dpos p50 ~9 px). The ring matches (`Sub57` Table-Turning,
+`Sub41` NS2) are frame- and heading-locked (dframe std 4–6 f on `Sub57`, was 25)
+but the VM puts their emitter **~100–190 px off** — a Part 8 orbit-geometry gap,
+surfaced clearly by the ring matcher, *not* a matching failure. The Part 10
+re-fit grouped by `(source, source_ip, spawn_speed)` now lands **83.8 % within
+5 px / 90 f over ~26 k bullets** (was 78 % / 10 k) — the motion profile is fitted
+in the bullet's own frame, so a wrong emitter position doesn't hurt it.
 
 **Remaining refinement:**
 
-- **Table-Turning** — match at the *ring* level (each `bullet_circle` fires a
-  5–6-bullet ring whose centre is the orb) instead of bullet-by-bullet.
-- **Lingering Cold `Sub36`** — fires several bullet types on an RNG branch
-  (fx 0, fx 16 with −0.0208 or −0.025), and the orb chain still **over-fires
-  +18 %**. A Part 5 fix, now checkable frame-by-frame.
-- **NS2 `Sub41`** — was flagged for a phantom `bullet_effects`; the
-  `bullet_effects` enable-bit fix (Part 5) resolved that.
+- **Part 8 — `Sub57` / `Sub41` orbit absolute geometry.** The spiral *rate* and
+  *timing* match the recordings; the emitter ends up ~100 px away. The
+  `__move_circle_abs` centre or the post-orbit `move_dir_time` drift is off for
+  Table-Turning specifically. Needs a full orb-track diff vs the recorded
+  `enemies` array.
+- **Lingering Cold `Sub36`** — 56 % pure (fires several bullet types on an RNG
+  branch — expected), orb chain over-fires **~+16 %** (VM 3389 vs ~2921
+  recorded LC births). `Sub36` itself is ~right (2538); the excess is `Sub47`'s
+  aimed bursts (851, `fx 64`) plus a skewed `Sub36` fx-16 fraction (VM ~50 %,
+  recorded ~32 %). Needs the RNG branch accounting checked against a recording.
 
 **Then** the difficulty work:
 
