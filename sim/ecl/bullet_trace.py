@@ -22,9 +22,15 @@ from pathlib import Path
 
 import numpy as np
 
-# recorded `bullets` columns — 0-9 always present, 10-16 added for the motion models
+# recorded `bullets` columns:
+#   0-9   always present
+#   10-16 motion state (speed/accel/angvel/angle + bullet_effects staging entry 1)
+#   17-21 + 22.. : the RE columns (state, type/active flags, young ctr, effect
+#         index, then 5 x 6-float bullet_effects staging entries) — new recorder
 STEP, SLOT, X, Y, VX, VY, CLS, FXF, HBX, HBY = range(10)
 SPEED, ACCEL, ANGVEL, ANGLE, FXP1, FXP2, FXINT = range(10, 17)
+STATE, TFLAG, AFLAG, YOUNG, EIDX = range(17, 22)
+STG0 = 22                       # 5 staging entries, 6 floats each: p1,p2,int,rep,flag,gate
 
 
 @dataclass
@@ -38,6 +44,22 @@ class Bullet:
     xy: np.ndarray          # float32 [n, 2]
     vel: np.ndarray         # float32 [n, 2]
     motion: np.ndarray | None = None   # float32 [n, 7]: speed,accel,angvel,angle,fxp1,fxp2,fxint (if recorded)
+    re: np.ndarray | None = None        # float32 [n, 35]: state,tflag,aflag,young,eidx, 5x6 staging (new recorder)
+
+    @property
+    def state(self) -> np.ndarray | None:
+        return self.re[:, 0] if self.re is not None else None
+
+    @property
+    def tflag(self) -> int | None:
+        return int(self.re[0, 1]) if self.re is not None else None
+
+    def staging(self, frame_idx: int = 0) -> np.ndarray | None:
+        """The 5 bullet_effects staging entries at a frame — [5, 6]:
+        (p1, p2, interval, repeat, flag, gate). `flag` holds an int bit-pattern."""
+        if self.re is None:
+            return None
+        return self.re[frame_idx, 5:35].reshape(5, 6)
 
     @property
     def life(self) -> int:
@@ -80,6 +102,7 @@ def load_traces(npz_path: str | Path) -> list[Bullet]:
         row_by_frame.setdefault(int(frame[i]), {})[int(slot[i])] = i
 
     has_motion = b.shape[1] >= 17
+    has_re = b.shape[1] >= STG0 + 30
 
     def _finish(sl: int) -> None:
         rows = active.pop(sl)
@@ -93,6 +116,7 @@ def load_traces(npz_path: str | Path) -> list[Bullet]:
             xy=seg[:, X:Y + 1].astype(np.float32),
             vel=seg[:, VX:VY + 1].astype(np.float32),
             motion=seg[:, SPEED:FXINT + 1].astype(np.float32) if has_motion else None,
+            re=seg[:, STATE:STG0 + 30].astype(np.float32) if has_re else None,
         ))
         next_id += 1
 

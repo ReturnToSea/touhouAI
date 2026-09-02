@@ -179,15 +179,38 @@ def _measure_hang(dm: np.ndarray, base: float) -> tuple[int, int]:
     return st, h
 
 
+_FLAG_TO_FX = {0x10: FX_ACCEL_DIR, 0x20: FX_TURN_ACCEL, 0x40: FX_PAUSE_REDIR,
+               0x80: FX_PAUSE_AIM, 0x400: FX_BOUNCE, 0x800: FX_BOUNCE}
+
+
 def fit_params(b, *, base: float) -> "BulletParams":
-    """Read a bullet's engine params from its recorded trace + motion fields."""
+    """A bullet's engine params. When the recording carries the RE columns
+    (`b.re`) everything is *read* — hang from the `state` track, effects from
+    the `bullet_effects` staging entries. Otherwise it falls back to guessing
+    from `(cls, fx_flag)` + the displacement shape (old recordings)."""
+    from .fit_motion import _disp
     m = b.motion[0]
     ang = float(m[3])
-    from .fit_motion import _disp
     dm = np.hypot(*_disp(b, 60).T)
-    hs, h = _measure_hang(dm, base) if base > 0.2 else (0, 0)
-    fx = 0x10 if int(b.fxflag) == 16 else 0
-    # measure this bullet's go-live launch from the recording
+
+    if b.re is not None:
+        state = b.re[:, 0]
+        hs = hang_state_for_type(int(b.re[0, 1]))          # type-word bits 0x2/4/8
+        h = int(np.argmax(state == 1)) if hs and (state == 1).any() else 0
+        stg = b.staging(0)
+        fx, p1, p2, iv = 0, 0.0, 0.0, 0
+        for p1_, p2_, iv_, rep_, fl_, _g in stg:
+            fl = int(fl_.view(np.int32)) if hasattr(fl_, "view") else int(fl_)
+            if fl and fl in _FLAG_TO_FX:
+                fx, p1, p2, iv = _FLAG_TO_FX[fl], float(p1_), float(p2_), int(iv_)
+                break
+    else:
+        hs, h = _measure_hang(dm, base) if base > 0.2 else (0, 0)
+        fx = FX_ACCEL_DIR if int(b.fxflag) == 16 else 0
+        p1, p2, iv = float(m[4]), float(m[5]), int(m[6])
+
+    # the go-live launch ramp — measured from the recording either way, until
+    # the mechanism is read (docs/th07-re-notes.md).
     lm = lr = 0.0
     if hs and h + 25 <= len(dm):
         post = dm[h:h + 30]
@@ -201,7 +224,7 @@ def fit_params(b, *, base: float) -> "BulletParams":
         x=float(b.xy[0, 0]) + (4.0 * math.cos(ang) * base if hs else 0.0),
         y=float(b.xy[0, 1]) + (4.0 * math.sin(ang) * base if hs else 0.0),
         angle=ang, speed=base, hang_state=hs, hang_frames=h,
-        fx_flag=fx, fx_p1=float(m[4]), fx_p2=float(m[5]), fx_interval=int(m[6]),
+        fx_flag=fx, fx_p1=p1, fx_p2=p2, fx_interval=iv,
         launch_mult=lm, launch_ramp=int(lr))
 
 

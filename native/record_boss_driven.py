@@ -32,23 +32,36 @@ BM_STRIDE, BM_MAX = 0x00000D68, 0x401
 B_HITBOX, B_POS, B_VEL, B_CLASS, B_STATE, B_FXFLAG = 0xB7C, 0xB8C, 0xB98, 0xB8A, 0xBFC, 0xC3C
 #   full motion state (all in th07_addrs.h, offsets verified via probe_bullet_motion):
 B_SPEED, B_ACCEL, B_ANGVEL, B_ANGLE = 0xBB0, 0xBB4, 0xBB8, 0xBBC
-B_FX_P1, B_FX_P2, B_FX_INT = 0xC2C, 0xC30, 0xC34   # bullet_effects: redirect angle/accel, redirect speed (-999=keep), interval
+B_FX_P1, B_FX_P2, B_FX_INT = 0xC2C, 0xC30, 0xC34   # == bullet_effects staging entry 1
+
+# --- from the th07.exe RE (docs/th07-re-notes.md) -------------------------
+#   B_TFLAG  = type-word flags: bits 0x2/0x4/0x8 = hang (spawn state 2/3/4)
+#   B_AFLAG  = live active fx-flag word (0x10 dir-accel, 0x20 turn+accel,
+#              0x40 pause-redirect, 0x80 pause-reaim, 0xc00 wall-bounce)
+#   B_EIDX   = how many staging entries FUN_00424290 has processed
+#   B_STG    = the 5 bullet_effects staging entries, 6 floats each
+#              [p1, p2, interval, repeat, flag(int-as-float), gate]
+B_TFLAG, B_AFLAG, B_YOUNG, B_EIDX, B_STG = 0xBF6, 0xBF4, 0xBF0, 0xC10, 0xC14
+NSTG = 5 * 6                       # 30 floats
 LIVE = (1, 2, 3, 4, 5)
-NBCOL = 17                        # width of a per-bullet row (see the assembly below)
+NBCOL = 22 + NSTG                 # per-bullet row width (see the assembly below)
 
 # one strided view over the whole bullet pool - lets us pull every live bullet
 # per frame with numpy instead of 1025 x N struct.unpack_from calls (~10x faster,
 # which is most of the recording-time cost).
 BULLET_DT = np.dtype({
     "names":    ["cls", "hb", "pos", "vel", "state", "fxf",
-                 "speed", "accel", "angvel", "angle", "fxp1", "fxp2", "fxint"],
+                 "speed", "accel", "angvel", "angle", "fxp1", "fxp2", "fxint",
+                 "tflag", "aflag", "young", "eidx", "stg"],
     "formats":  ["<i2", "<2f4", "<2f4", "<2f4", "<u2", "<i4",
-                 "<f4", "<f4", "<f4", "<f4", "<f4", "<f4", "<i4"],
+                 "<f4", "<f4", "<f4", "<f4", "<f4", "<f4", "<i4",
+                 "<u2", "<u2", "<i4", "<i4", f"<{NSTG}f4"],
     "offsets":  [B_CLASS, B_HITBOX, B_POS, B_VEL, B_STATE, B_FXFLAG,
-                 B_SPEED, B_ACCEL, B_ANGVEL, B_ANGLE, B_FX_P1, B_FX_P2, B_FX_INT],
+                 B_SPEED, B_ACCEL, B_ANGVEL, B_ANGLE, B_FX_P1, B_FX_P2, B_FX_INT,
+                 B_TFLAG, B_AFLAG, B_YOUNG, B_EIDX, B_STG],
     "itemsize": BM_STRIDE,
 })
-assert B_FX_INT + 4 <= BM_STRIDE
+assert B_STG + NSTG * 4 <= BM_STRIDE
 
 EM = 0x009A9B00
 EM_ENEMIES, EM_STRIDE, EM_MAX = 0x00004F50, 0x00004F48, 0x1E1
@@ -190,6 +203,12 @@ def _record_one(env, pm, pol, boss, args, out, run):
                 fr[:, 14] = arr["fxp1"][sel]          # bullet_effects redirect angle / accel
                 fr[:, 15] = arr["fxp2"][sel]          # bullet_effects redirect speed (-999 = keep)
                 fr[:, 16] = arr["fxint"][sel]         # bullet_effects interval / duration
+                fr[:, 17] = arr["state"][sel]         # 1 live, 2/3/4 hang, 5 dying
+                fr[:, 18] = arr["tflag"][sel]         # type-word flags (hang bits 0x2/4/8)
+                fr[:, 19] = arr["aflag"][sel]         # live active fx-flag word
+                fr[:, 20] = arr["young"][sel]         # +0xBF0 young countdown
+                fr[:, 21] = arr["eidx"][sel]          # staging entries processed
+                fr[:, 22:22 + NSTG] = arr["stg"][sel]  # 5 x [p1,p2,int,rep,flag,gate]
                 frames.append(fr)
 
             # satellite sub-enemies (Letty's orbs etc.) - they contact-kill the
