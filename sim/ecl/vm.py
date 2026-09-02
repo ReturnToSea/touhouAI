@@ -435,16 +435,21 @@ class VM:
         for i in range(n):
             layer = i // max(1, count)
             idx = i % max(1, count)
+            # per-layer speed — FUN_00423730: `spd1 - (spd1-spd2)*layer/layers`
+            # (layers < 2 -> spd1). Note the divisor is `layers`, NOT `layers-1`:
+            # the last layer lands at spd1-(spd1-spd2)*(L-1)/L, it never reaches
+            # spd2. Using /(L-1) made every layered attack ~15-25% too slow.
+            lsp = spd1 if layers < 2 else spd1 - (spd1 - spd2) * layer / layers
             if k == "random":
                 ang = self.rng.rand_range(lo, hi)      # fresh direction per bullet
                 sp = self.rng.rand_range(spd2, spd1)   # uniform [spd2, spd1] — matches
-                #   FUN_00423730 mode 7/8 and the recorded NS2-icicle speed spread
+                #   FUN_00423730 mode 7/8 (layer doesn't touch random speed)
             elif k == "circle":
                 ang = base + (2 * math.pi) * idx / max(1, count)
-                sp = spd1 + (spd2 - spd1) * (layer / max(1, layers - 1) if layers > 1 else 0)
+                sp = lsp
             else:  # fan
                 ang = base + span * (idx - (count - 1) / 2)
-                sp = spd1 + (spd2 - spd1) * (layer / max(1, layers - 1) if layers > 1 else 0)
+                sp = lsp
             self.bullets.append(BulletSpawn(
                 frame=self.frame, kind=k, btype=btype, x=sx, y=sy,
                 angle=ang, speed=sp, aimed=aimed, effects=tuple(e.pending_effects),
