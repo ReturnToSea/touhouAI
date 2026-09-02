@@ -54,12 +54,26 @@ class Bullet:
     def tflag(self) -> int | None:
         return int(self.re[0, 1]) if self.re is not None else None
 
-    def staging(self, frame_idx: int = 0) -> np.ndarray | None:
-        """The 5 bullet_effects staging entries at a frame — [5, 6]:
-        (p1, p2, interval, repeat, flag, gate). `flag` holds an int bit-pattern."""
+    def staging(self, frame_idx: int = 0) -> list[dict] | None:
+        """The active `bullet_effects` staging entries at a frame. Each entry is
+        6 words: `p1:f32, p2:f32, interval:i32, repeat:i32, flag:i32, gate:f32`
+        (the recorder stores all as f32, so the ints are reinterpreted here).
+        Returns only the entries with a non-zero flag."""
         if self.re is None:
             return None
-        return self.re[frame_idx, 5:35].reshape(5, 6)
+        raw = self.re[frame_idx, 5:35].reshape(5, 6).astype(np.float32)
+        out = []
+        for e in raw:
+            flag = int(e[4].view(np.int32)) & 0xFFFFFFFF
+            if flag == 0:
+                continue
+            out.append({
+                "p1": float(e[0]), "p2": float(e[1]),
+                "interval": int(e[2].view(np.int32)),
+                "repeat": int(e[3].view(np.int32)),
+                "flag": flag, "gate": float(e[5]),
+            })
+        return out
 
     @property
     def life(self) -> int:

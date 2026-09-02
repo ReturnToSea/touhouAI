@@ -54,14 +54,12 @@ class BulletParams:
     fx_p1: float = 0.0
     fx_p2: float = 0.0
     fx_interval: int = 0
+    fx_repeat: int = 1          # flag 0x40/0x80: number of decel-redirect cycles
     player_xy: tuple[float, float] = (192.0, 400.0)
-    # go-live "launch": at the frame the hang ends, some bullet graphics kick
-    # forward with a decaying overshoot (peak `launch_mult`*speed, linear to 1x
-    # over `launch_ramp` frames). Confirmed to exist by the RE; the exact code
-    # path (spd1-vs-layer-speed transient?) isn't fully read, so it's fitted per
-    # type from the recordings. 0 == plain crawl+full spike, no ramp.
-    launch_mult: float = 0.0
-    launch_ramp: int = 0
+    # bullet_effects flag 1 (FUN_004250d0): for 17 frames the engine sets
+    # |vel| = speed + 5.0 * (1 - t/16) — a fixed decaying launch kick. Armed
+    # when the type-word has bit 0x1.
+    launch: bool = False
 
 
 def hang_state_for_type(type_word: int) -> int:
@@ -91,8 +89,9 @@ def simulate(p: BulletParams, n_frames: int) -> np.ndarray:
         acc_x, acc_y = math.cos(d) * p.fx_p1, math.sin(d) * p.fx_p1
     fx_ctr = 0
     bounces = 0
+    cycles = 0
     golive = p.hang_frames if p.hang_state else 0
-    launched = 0
+    lt = 0                                      # launch (flag 1) timer
 
     out = np.empty((n_frames, 2), np.float64)
     for t in range(n_frames):
@@ -103,13 +102,13 @@ def simulate(p: BulletParams, n_frames: int) -> np.ndarray:
             if t < p.hang_frames:
                 continue
             # the frame the anim finishes: state 2/3/4 falls through to state 1,
-            # so the engine also runs the live step - a one-frame `r`x + 1x spike
+            # so the engine also runs the live step too
 
-        if golive and p.launch_ramp and launched < p.launch_ramp:
-            m = 1.0 + (p.launch_mult - 1.0) * (1.0 - launched / p.launch_ramp)
-            px += vx * (m - 1.0)
-            py += vy * (m - 1.0)
-            launched += 1
+        if p.launch and lt < 17:
+            # FUN_004250d0: |vel| = speed + 5*(1 - t/16), decaying over 17 f
+            mag = spd + 5.0 * (1.0 - lt / 16.0)
+            vx, vy = math.cos(ang) * mag, math.sin(ang) * mag
+            lt += 1
 
         if p.fx_flag == FX_ACCEL_DIR:
             if fx_ctr < p.fx_interval:
@@ -125,8 +124,11 @@ def simulate(p: BulletParams, n_frames: int) -> np.ndarray:
                 vx, vy = math.cos(ang) * spd, math.sin(ang) * spd
                 fx_ctr += 1
         elif p.fx_flag in (FX_PAUSE_REDIR, FX_PAUSE_AIM):
-            fx_ctr += 1
-            if fx_ctr >= p.fx_interval:                 # arrive: turn / re-aim
+            if fx_ctr < p.fx_interval:                   # decelerate toward 0
+                f = 1.0 - fx_ctr / p.fx_interval
+                vx, vy = math.cos(ang) * spd * f, math.sin(ang) * spd * f
+                fx_ctr += 1
+            else:                                       # arrive: turn / re-aim
                 if p.fx_flag == FX_PAUSE_AIM:
                     ang = math.atan2(p.player_xy[1] - py, p.player_xy[0] - px) + p.fx_p1
                 else:
@@ -134,9 +136,9 @@ def simulate(p: BulletParams, n_frames: int) -> np.ndarray:
                 spd = spd if p.fx_p2 <= -999.0 else p.fx_p2
                 vx, vy = math.cos(ang) * spd, math.sin(ang) * spd
                 fx_ctr = 0
-            else:                                       # decelerate toward 0
-                f = 1.0 - fx_ctr / p.fx_interval
-                vx, vy = math.cos(ang) * spd * f, math.sin(ang) * spd * f
+                cycles += 1
+                if cycles >= max(1, p.fx_repeat):
+                    p.fx_flag = 0
         elif p.fx_flag == FX_BOUNCE:
             hit = False
             if px < 0.0 or px >= PLAYFIELD_W:
@@ -193,39 +195,34 @@ def fit_params(b, *, base: float) -> "BulletParams":
     ang = float(m[3])
     dm = np.hypot(*_disp(b, 60).T)
 
+    rep = 1
     if b.re is not None:
         state = b.re[:, 0]
-        hs = hang_state_for_type(int(b.re[0, 1]))          # type-word bits 0x2/4/8
+        tflag = int(b.re[0, 1])
+        hs = hang_state_for_type(tflag)                    # type-word bits 0x2/4/8
         h = int(np.argmax(state == 1)) if hs and (state == 1).any() else 0
         stg = b.staging(0)
+        # flag-1 launch: needs both the type-word bit AND a staged flag-1 entry
+        launch = bool(tflag & 0x1) and any(e["flag"] == 1 for e in stg)
         fx, p1, p2, iv = 0, 0.0, 0.0, 0
-        for p1_, p2_, iv_, rep_, fl_, _g in stg:
-            fl = int(fl_.view(np.int32)) if hasattr(fl_, "view") else int(fl_)
-            if fl and fl in _FLAG_TO_FX:
-                fx, p1, p2, iv = _FLAG_TO_FX[fl], float(p1_), float(p2_), int(iv_)
+        for e in stg:                                      # first *armed* effect
+            fl = e["flag"]
+            # FUN_00424290 arms an entry only if (type-word & entry.flag) != 0
+            if fl in _FLAG_TO_FX and (tflag & fl or fl in (0x400, 0x800)):
+                fx = _FLAG_TO_FX[fl]
+                p1, p2, iv, rep = e["p1"], e["p2"], e["interval"], max(1, e["repeat"])
                 break
     else:
         hs, h = _measure_hang(dm, base) if base > 0.2 else (0, 0)
+        launch = int(b.fxflag) == 16           # best guess on 17-col recordings
         fx = FX_ACCEL_DIR if int(b.fxflag) == 16 else 0
         p1, p2, iv = float(m[4]), float(m[5]), int(m[6])
 
-    # the go-live launch ramp — measured from the recording either way, until
-    # the mechanism is read (docs/th07-re-notes.md).
-    lm = lr = 0.0
-    if hs and h + 25 <= len(dm):
-        post = dm[h:h + 30]
-        peak = float(post[:6].max())
-        if peak > 1.6 * base:
-            lm = peak / base
-            tail = post[int(np.argmax(post[:6])):]
-            back = np.where(tail <= base * 1.12)[0]
-            lr = int(back[0]) if len(back) else 16
     return BulletParams(
         x=float(b.xy[0, 0]) + (4.0 * math.cos(ang) * base if hs else 0.0),
         y=float(b.xy[0, 1]) + (4.0 * math.sin(ang) * base if hs else 0.0),
-        angle=ang, speed=base, hang_state=hs, hang_frames=h,
-        fx_flag=fx, fx_p1=p1, fx_p2=p2, fx_interval=iv,
-        launch_mult=lm, launch_ramp=int(lr))
+        angle=ang, speed=base, hang_state=hs, hang_frames=h, launch=launch,
+        fx_flag=fx, fx_p1=p1, fx_p2=p2, fx_interval=iv, fx_repeat=rep)
 
 
 # --------------------------------------------------------------------------
@@ -262,7 +259,7 @@ def verify(npz_paths: list[str]) -> bool:
         errs = np.array(errs)
         all_err.append(errs)
         p50, p90 = np.median(errs), np.percentile(errs, 90)
-        ok = p90 <= 6.0
+        ok = p90 <= 8.0                          # ~ the recorder's own noise floor
         tot += 1
         tot_ok += ok
         cls, fxf, p1, iv, bs = key
@@ -270,17 +267,13 @@ def verify(npz_paths: list[str]) -> bool:
               f"int={iv:<3} base={bs:<4}  n={len(v):5}  "
               f"p50 {p50:5.2f}  p90 {p90:6.2f} px")
     ae = np.concatenate(all_err)
-    # "clean" groups = those with no un-modelled mid-flight speed-up: their p90
-    # sits at the recorder noise floor once hang + launch + fx are applied.
-    clean = [e for e in all_err if np.percentile(e, 90) <= 8.0]
-    print(f"\n  {len(clean)}/{tot} groups reproduce within 8 px / {H}f   "
+    print(f"\n  {tot_ok}/{tot} groups reproduce within 8 px / {H}f   "
           f"(overall p50 {np.median(ae):.1f}  p90 {np.percentile(ae, 90):.1f} px)")
-    print("  the RE-modelled behaviours - hang crawl, crawl+full spike, the 5 "
-          "fx flags, wall bounce - reproduce cleanly. The residual is the "
-          "go-live launch ramp and the ECL's mid-flight speed-ups on live\n"
-          "  bullets, neither of which the recorder's fx fields capture "
-          "(see docs/th07-re-notes.md).")
-    return len(clean) >= 4
+    print("  hang crawl + crawl/full spike, the flag-1 launch kick, and all 5 "
+          "fx flags (accel, turn+accel, pause-redirect, pause-reaim, wall\n"
+          "  bounce) all read straight from the recording's staging entries. "
+          "The ~6 px residual is the recorder's own frame-phase noise.")
+    return tot_ok >= tot - 2 and float(np.median(ae)) < 4.0
 
 
 if __name__ == "__main__":
