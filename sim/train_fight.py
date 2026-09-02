@@ -85,9 +85,6 @@ def main():
     run = Path("runs_sim") / args.name
     run.mkdir(parents=True, exist_ok=True)
     import json
-    (run / "meta.json").write_text(json.dumps({
-        "algo": "ppo_fight", "steps": args.steps, "hidden": list(HID),
-        "B": args.B, "fight": args.fight}))
 
     ecl_recs = ecl_eval_recs = None
     if args.sim == "ecl":
@@ -96,6 +93,10 @@ def main():
         ecl_recs = build_schedules(args.ecl_schedules, seed0=0)
         ecl_eval_recs = build_schedules(8, seed0=10_000)   # held-out seeds
         args.fight = "letty"
+
+    (run / "meta.json").write_text(json.dumps({
+        "algo": "ppo_fight", "steps": args.steps, "hidden": list(HID),
+        "B": args.B, "fight": args.fight, "sim": args.sim}))
 
     # ECL sim: no x-mirror, no field rotation (each schedule is already a fresh
     # RNG roll). phase_start_mix STARTS high and anneals to 0 -- Lingering Cold /
@@ -218,7 +219,9 @@ def main():
                 opt.step()
         sched.step()
 
-        if upd % 30 == 0:
+        # dense early so the HUD/transfer daemon have something within a minute
+        # of compile, then settle to every 25 updates
+        if upd in (1, 3, 6, 12, 20) or upd % 25 == 0:
             med, mean, f30, ph, ktime = evaluate()   # f30 = kill rate, ktime = median kill-time (s)
             wall = time.perf_counter() - t0
             sps = total / wall
@@ -237,7 +240,7 @@ def main():
                 best_score = score
                 ac.export(run / "best_mlp.pt")
                 print(f"    ^ new best (kill {f30*100:.0f}%, surv {med:.0f}s)", flush=True)
-            if upd % 60 == 0:
+            if upd in (6, 20) or upd % 50 == 0:   # snapshots the transfer daemon keeps
                 ac.export(run / f"mlp_{int(total/1e6)}M.pt")
 
     ac.export(run / "final_mlp.pt")

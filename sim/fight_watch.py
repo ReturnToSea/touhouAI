@@ -96,12 +96,6 @@ def main():
             except Exception:
                 pass
 
-    reload_policy()
-    while pol is None:
-        print("waiting for a checkpoint in", run, "...")
-        time.sleep(3)
-        reload_policy()
-
     pygame.init()
     W = int(PW * SCALE) + 2 * MARGIN + PANEL
     H = int(PH * SCALE) + 2 * MARGIN
@@ -111,6 +105,20 @@ def main():
     small = pygame.font.SysFont("consolas", 13)
     huge = pygame.font.SysFont("consolas", 30, bold=True)
     clock = pygame.time.Clock()
+
+    reload_policy()
+    while pol is None:                      # window is up, just show a placeholder
+        for e in pygame.event.get():
+            if e.type == pygame.QUIT or (e.type == pygame.KEYDOWN
+                                         and e.key == pygame.K_ESCAPE):
+                pygame.quit(); return
+        screen.fill((10, 10, 15))
+        screen.blit(huge.render("waiting for first checkpoint...", True,
+                                (120, 130, 150)),
+                    (MARGIN + 12, H // 2 - 20))
+        pygame.display.flip()
+        clock.tick(10)
+        reload_policy()
 
     def ts(x, y):
         return int(MARGIN + x * SCALE), int(MARGIN + y * SCALE)

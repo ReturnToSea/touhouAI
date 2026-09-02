@@ -30,22 +30,72 @@ REAL_DOT = "#5a2a3a"
 KILL = "#5fd98a"
 
 
+def _meta(d):
+    try:
+        return json.loads((d / "meta.json").read_text())
+    except Exception:
+        return {}
+
+
+def load_log(name):
+    """Live scrape of the training stdout log (runs_sim/<name>.log) so the HUD
+    has something to show before history.npy exists / between evals."""
+    for p in (RUNS / f"{name}.log", RUNS / name / "train.log"):
+        if p.exists():
+            break
+    else:
+        return None
+    try:
+        tail = p.read_text(errors="replace").splitlines()[-40:]
+    except Exception:
+        return None
+    out = {"status": None, "upd": None}
+    for ln in tail:
+        s = ln.strip()
+        if s.startswith("[ecl] building"):
+            out["status"] = "building danmaku schedules..."
+        elif s.startswith("[FightSim]"):
+            out["status"] = "compiling / first rollout..."
+        elif s.startswith("upd "):
+            f = s.split()
+            try:
+                out["upd"] = int(f[1])
+                out["steps_m"] = float(f[2].rstrip("M"))
+                out["sps_k"] = float(f[3].rstrip("k/s"))
+                out["med"] = float(f[f.index("med") + 1].rstrip("s"))
+                out["kill"] = float(f[f.index("kill") + 1].rstrip("%")) / 100.0
+                out["phase"] = float(f[f.index("phase") + 1].split("/")[0])
+                out["status"] = "training"
+            except (ValueError, IndexError):
+                pass
+    return out
+
+
 def load(name):
     d = RUNS / name
     try:
         h = np.load(d / "history.npy")
     except Exception:
-        return None
+        r = {"name": name, "log": load_log(name), "meta": _meta(d)}
+        _load_rt(d, r)
+        return r
     if h.ndim != 2 or len(h) == 0 or h.shape[1] < 6:
-        return None
+        r = {"name": name, "log": load_log(name), "meta": _meta(d)}
+        _load_rt(d, r)
+        return r
     meta = {}
     try:
         meta = json.loads((d / "meta.json").read_text())
     except Exception:
         pass
-    r = dict(name=name, meta=meta,
+    r = dict(name=name, meta=meta, log=load_log(name),
              wall=h[:, 0], steps=h[:, 1], med=h[:, 2], mean=h[:, 3],
              kill=h[:, 4], ktime=h[:, 5])
+    _load_rt(d, r)
+    return r
+
+
+def _load_rt(d, r):
     parts = []
     for rp in sorted(d.glob("realtransfer*.npy")):   # 1 file, or 1 per daemon
         try:
@@ -71,7 +121,6 @@ def load(name):
         r["rt_x"] = np.array(xs)
         r["rt_sv_roll"] = np.array(sv)
         r["rt_kl_roll"] = np.array(kl)
-    return r
 
 
 class Hud:
@@ -102,30 +151,45 @@ class Hud:
 
     def _text(self, r):
         if r is None:
-            self.txt.config(text=f"({self.name}: waiting for history.npy)")
+            self.txt.config(text=f"({self.name}: run dir not found)")
             return
-        wall = r["wall"][-1]
-        steps = r["steps"][-1]
-        tgt = r["meta"].get("steps")
-        sps = steps / wall / 1e3 if wall > 0 else float("nan")
-        L = [f"● {r['name']}   hidden={r['meta'].get('hidden','?')}   "
-             f"B={r['meta'].get('B','?')}"]
-        L.append(f"   time {wall/60:5.1f} min   steps {steps/1e6:6.1f}M"
-                 + (f" / {tgt/1e6:.0f}M" if tgt else "")
-                 + (f"   {sps:.0f}k/s" if sps == sps else ""))
-        kt = r["ktime"][-1]
-        ktxt = (f"   kill-time {kt:.0f}s (best {np.nanmin(r['ktime']):.0f})"
-                if kt == kt else "   kill-time --")
-        L.append(f"   SIM   survival med {r['med'][-1]:5.1f}s  mean {r['mean'][-1]:5.1f}s"
-                 f"    kill {r['kill'][-1]*100:3.0f}% (best {np.nanmax(r['kill'])*100:.0f}%)"
-                 f"{ktxt}")
+        meta = r.get("meta", {})
+        lg = r.get("log") or {}
+        L = [f"● {r.get('name', self.name)}   hidden={meta.get('hidden','?')}   "
+             f"B={meta.get('B','?')}"]
+        tgt = meta.get("steps")
+
+        if "wall" in r:                              # history.npy present
+            wall, steps = r["wall"][-1], r["steps"][-1]
+            sps = steps / wall / 1e3 if wall > 0 else float("nan")
+            L.append(f"   time {wall/60:5.1f} min   steps {steps/1e6:6.1f}M"
+                     + (f" / {tgt/1e6:.0f}M" if tgt else "")
+                     + (f"   {sps:.0f}k/s" if sps == sps else ""))
+            kt = r["ktime"][-1]
+            ktxt = (f"   kill-time {kt:.0f}s (best {np.nanmin(r['ktime']):.0f})"
+                    if kt == kt else "   kill-time --")
+            L.append(f"   SIM   survival med {r['med'][-1]:5.1f}s  mean {r['mean'][-1]:5.1f}s"
+                     f"    kill {r['kill'][-1]*100:3.0f}% (best {np.nanmax(r['kill'])*100:.0f}%)"
+                     f"{ktxt}   best-surv {np.nanmax(r['med']):.0f}s")
+        elif lg.get("status") == "training":         # log only, first eval seen
+            L.append(f"   steps {lg['steps_m']:6.1f}M"
+                     + (f" / {tgt/1e6:.0f}M" if tgt else "")
+                     + f"   {lg['sps_k']:.0f}k/s   upd {lg['upd']}")
+            L.append(f"   SIM   survival med {lg['med']:5.1f}s"
+                     f"    kill {lg['kill']*100:3.0f}%    phase {lg['phase']:.2f}/4"
+                     f"   (history.npy building - charts fill in shortly)")
+        else:
+            L.append(f"   {lg.get('status', 'starting up')}"
+                     + (f" / {tgt/1e6:.0f}M target" if tgt else ""))
+            L.append("   SIM   (no eval yet - first one lands ~1 min after compile)")
+
         if "rt_surv" in r and len(r["rt_surv"]):
             rs, rk = r["rt_surv"][-15:], r["rt_kill"][-15:]
             L.append(f"   REAL  survival med {np.median(rs):5.1f}s  "
                      f"best {r['rt_surv'].max():.0f}s"
                      f"    kill {rk.mean()*100:3.0f}%  (n={len(r['rt_surv'])})")
         else:
-            L.append("   REAL  (transfer daemon not running / no episodes yet)")
+            L.append("   REAL  (transfer daemon warming up / no episodes yet)")
         self.txt.config(text="\n".join(L))
 
     def _chart(self, cv, r, title, kind):
@@ -134,7 +198,10 @@ class Hud:
         x0, x1, y0, y1 = 52, W - 12, H - 22, 22
         cv.create_text((x0 + x1) / 2, 10, fill="#9aa4b4", font=("Consolas", 9),
                        text=title)
-        if r is None:
+        if r is None or "steps" not in r:
+            cv.create_text((x0 + x1) / 2, (y0 + y1) / 2, fill="#5a6472",
+                           font=("Consolas", 9),
+                           text="waiting for the first eval...")
             return
         sm = r["steps"] / 1e6
         xmax = float(max(sm[-1], (r["rt_steps"][-1] if "rt_steps" in r and
