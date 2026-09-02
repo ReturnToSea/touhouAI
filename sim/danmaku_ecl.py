@@ -287,17 +287,37 @@ def load_schedule(path) -> dict:
                phase_dmg_mult=list(map(float, g["phase_dmg_mult"])), aimed=aimed)
 
 
+def _parent_alive(ppid: int) -> bool:
+    """True while pid `ppid` is still running (Windows-safe). If the trainer
+    crashes, its daemon workers were surviving and pegging cores -- this lets
+    them notice and exit."""
+    try:
+        import ctypes
+        h = ctypes.windll.kernel32.OpenProcess(0x1000, False, ppid)  # QUERY_LIMITED_INFO
+        if not h:
+            return False
+        code = ctypes.c_ulong()
+        ok = ctypes.windll.kernel32.GetExitCodeProcess(h, ctypes.byref(code))
+        ctypes.windll.kernel32.CloseHandle(h)
+        return bool(ok) and code.value == 259          # STILL_ACTIVE
+    except Exception:
+        return True                                     # fail open (non-Windows)
+
+
 def stream_worker(pooldir, seed0: int = 100_000, difficulty: int = 3,
                   max_pending: int = 14) -> None:
     """Loop forever: build a schedule, drop it in `pooldir` as NNNNNNNNN.npz.
-    Throttles when the consumer is behind (dir already has max_pending files).
+    Throttles when the consumer is behind, and exits if the trainer dies.
     `seed0` is offset by the worker's pid so parallel workers don't collide."""
     import time
     from pathlib import Path
     pooldir = Path(pooldir)
     pooldir.mkdir(parents=True, exist_ok=True)
+    ppid = os.getppid()
     ctr = seed0 + (os.getpid() % 997) * 100_000
     while True:
+        if not _parent_alive(ppid):
+            return
         pend = list(pooldir.glob("[0-9]" * 9 + ".npz"))
         if len(pend) >= max_pending:
             time.sleep(2.0)
