@@ -70,7 +70,14 @@ def main():
     run = HERE.parent / "runs_sim" / name
     assert run.exists(), f"no run dir {run}"
 
-    sim = FightSim(B=1, name=fight, device="cpu", phase_start_mix=0.0, seed=0)
+    if "--ecl" in sys.argv:          # watch vs the ECL-VM danmaku (what --sim ecl trains on)
+        from danmaku_ecl import build_schedules
+        print("[ecl] building 6 danmaku schedules...", flush=True)
+        recs = build_schedules(6, seed0=7000)
+        sim = FightSim(B=1, name="letty", device="cpu", seed=0, recs=recs,
+                       mirror=False, field_rot_deg=0.0, phase_start_mix=0.0)
+    else:
+        sim = FightSim(B=1, name=fight, device="cpu", phase_start_mix=0.0, seed=0)
     n_ph = int(sim.n_ph[0])
 
     pol = None

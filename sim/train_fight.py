@@ -74,6 +74,10 @@ def main():
                     help="raw power (0-128) sampled per episode; default 10-50 "
                          "(a real Lunatic run hits Letty at ~35..105)")
     ap.add_argument("--power-hi", type=float, default=None)
+    ap.add_argument("--phase-mix", type=float, default=None,
+                    help="initial phase_start_mix (ecl default 0.55), annealed to 0")
+    ap.add_argument("--phase-mix-frac", type=float, default=0.6,
+                    help="anneal phase_start_mix to 0 over this fraction of steps")
     args = ap.parse_args()
 
     dev = "cuda" if torch.cuda.is_available() else "cpu"
@@ -94,9 +98,14 @@ def main():
         args.fight = "letty"
 
     # ECL sim: no x-mirror, no field rotation (each schedule is already a fresh
-    # RNG roll), no mid-fight phase starts for now -- every episode is a real run
-    # from NS1. (phase_start_mix can come back with annealing if phases 2+ starve.)
-    ecl_kw = (dict(mirror=False, field_rot_deg=0.0, phase_start_mix=0.0)
+    # RNG roll). phase_start_mix STARTS high and anneals to 0 -- Lingering Cold /
+    # Table-Turning are real ~50s survival walls, so without mid-fight starts the
+    # policy never sees phases 2-4 until it can already clear NS1. It anneals to 0
+    # over the first `--phase-mix-frac` of training so the final policy is tuned
+    # on honest NS1-start runs.
+    ph_mix0 = args.phase_mix if args.phase_mix is not None else (
+        0.55 if args.sim == "ecl" else 0.0)
+    ecl_kw = (dict(mirror=False, field_rot_deg=0.0, phase_start_mix=ph_mix0)
               if args.sim == "ecl" else {})
     if args.power_lo is not None:
         ecl_kw["power_lo"] = args.power_lo
@@ -169,6 +178,10 @@ def main():
             rb[t], db[t] = r, dn.float()
         total += T * B
         upd += 1
+
+        if args.sim == "ecl" and ph_mix0 > 0:      # anneal mid-fight starts -> 0
+            frac = min(1.0, total / max(1.0, args.phase_mix_frac * args.steps))
+            sim.phase_start_mix = ph_mix0 * (1.0 - frac)
 
         with torch.no_grad():
             lastv = ac.critic(obs).squeeze(-1)
