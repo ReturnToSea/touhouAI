@@ -161,7 +161,18 @@ class Hud:
 
         if "wall" in r:                              # history.npy present
             wall, steps = r["wall"][-1], r["steps"][-1]
-            sps = steps / wall / 1e3 if wall > 0 else float("nan")
+            # instantaneous rate, not the since-startup average (which is dragged
+            # down for ages by the ~5 min schedule-build + compile warmup). Prefer
+            # the trainer's own printed k/s; else diff the last few history rows.
+            sps = float("nan")
+            if lg.get("sps_k"):
+                sps = lg["sps_k"]
+            elif len(r["wall"]) >= 2:
+                w = np.asarray(r["wall"]); st = np.asarray(r["steps"])
+                j = max(0, len(w) - 6)
+                dw = w[-1] - w[j]
+                if dw > 0:
+                    sps = (st[-1] - st[j]) / dw / 1e3
             L.append(f"   time {wall/60:5.1f} min   steps {steps/1e6:6.1f}M"
                      + (f" / {tgt/1e6:.0f}M" if tgt else "")
                      + (f"   {sps:.0f}k/s" if sps == sps else ""))
