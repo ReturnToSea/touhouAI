@@ -172,6 +172,27 @@ The ECL random opcodes (`__math_rand`, `set_float_rand_bound*`, random bullet
 modes) all funnel through `FUN_00431900`. `sim/ecl/rng.py` should be replaced
 with this, then Part 4's KS test re-run.
 
+## Recorder columns added from this (commit ad8401d)
+
+`record_boss_driven.py` used to log only `bullet_effects` staging entry **1**
+(`0xC2C/C30/C34`), missing the hang state, the hang bits, and any effect past
+entry 1. Now it logs, per bullet per frame:
+
+| col(s) | offset | meaning |
+|---|---|---|
+| 17 | `+0xBFC` | state — 1 live, 2/3/4 hang, 5 dying |
+| 18 | `+0xBF6` | type-word flags (hang bits `0x2/0x4/0x8`) |
+| 19 | `+0xBF4` | live active fx-flag word |
+| 20 | `+0xBF0` | young countdown |
+| 21 | `+0xC10` | staging-entry index processed |
+| 22–51 | `+0xC14` | the 5 staging entries — `[p1, p2, interval, repeat, flag, gate]` each |
+
+`bullet_trace.Bullet` exposes `.state` / `.tflag` / `.staging(frame)`;
+`bullet_sim.fit_params` reads the hang and effects straight from them. Old
+17-column recordings still load (fall back to inference).
+
+Re-record: `python native/record_boss_driven.py letty --which 2 --godmode --dodge-after-boss --n 3`.
+
 ## Regenerating
 
 ```
