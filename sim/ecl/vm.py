@@ -291,9 +291,17 @@ class Enemy:
         `engaged` (enemy_flag_invulnerable — the shot-damage gate),
         enemy_flag_armored (a timed grace at phase start) and
         enemy_flag_can_take_damage. HP <= 0 triggers the death / spell-capture
-        callback via `_service_callbacks`."""
+        callback via `_service_callbacks`.
+
+        Letty's spell cards (Lingering Cold Sub42, Table-Turning Sub55) register a
+        `timer_callback` but NO `life_callback`, and the real engine keeps the
+        boss HP field frozen through them (verified: 0x2BB8 sits at the threshold
+        for the whole phase across every probe run). So a survival spell -
+        `self.spell` set with `life_thresh` unset - takes no damage; it ends only
+        on its timer / loop."""
         if (not self.alive or not self.engaged or not self.can_take_damage
-                or self.vm.frame < self.armored_until):
+                or self.vm.frame < self.armored_until
+                or (self.spell is not None and self.life_thresh is None)):
             return
         self.life = max(0, self.life - amount)
 

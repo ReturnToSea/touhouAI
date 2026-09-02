@@ -322,6 +322,7 @@ class FightSim:
             self.boss_hp = torch.zeros(self.B, device=self.d)
             self.phase_idx = torch.zeros(self.B, dtype=torch.long, device=self.d)
             self.armored = torch.zeros(self.B, dtype=torch.bool, device=self.d)
+            self.survival = torch.zeros(self.B, dtype=torch.bool, device=self.d)
             self.focus = torch.zeros(self.B, device=self.d)   # last action's focus bit
             self.field_rot = torch.zeros(self.B, device=self.d)
             self._rot_cs = torch.ones(self.B, 1, device=self.d)
@@ -495,7 +496,12 @@ class FightSim:
             # armored: from the phase's clear (t0) until its first bullet flies -
             # the boss is repositioning / declaring, deals & takes no damage
             armored = fnow < p_first
-            shoot_bit = (act >= 18) & ~armored & ~self.no_phase
+            # survival phase (Lingering Cold / Table-Turning): the boss set
+            # enemy_flag_invulnerable(0) and has no life_callback - takes ZERO
+            # shot damage, ends only on its timer (p_end). Sentinel HP >= 5e8.
+            survival = cur[:, 3] >= 5.0e8
+            self.survival = survival
+            shoot_bit = (act >= 18) & ~armored & ~self.no_phase & ~survival
             bx = self._boss_xy(f)[:, 0]                 # rotated boss x this frame
             aligned = (self.px - bx).abs() < LANE_HALF
             hf = self.homing_frac

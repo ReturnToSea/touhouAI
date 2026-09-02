@@ -202,7 +202,8 @@ def main():
         # phase / hp
         pj = int(sim.phase_idx[0])
         p_hp0 = float(sim.ph[rid0, pj, 3])
-        hp_frac = max(0.0, min(1.0, float(sim.boss_hp[0]) / max(1.0, p_hp0)))
+        survival = p_hp0 >= 5.0e8       # Lingering Cold / Table-Turning: no damage
+        hp_frac = 1.0 if survival else max(0.0, min(1.0, float(sim.boss_hp[0]) / max(1.0, p_hp0)))
 
         px0 = int(PW * SCALE) + 2 * MARGIN
         lines = [
@@ -216,11 +217,13 @@ def main():
              (150, 150, 200) if armored else (210, 210, 220), small),
             (f"  best this session {best_reach:.0f}s", (170, 170, 180), small),
             ("  boss invulnerable" if armored else
+             "  SURVIVAL - boss takes no damage" if survival else
              f"  SHOOT - lined up ({float(sim.shot_dps[0]):.0f} HP/f, pow {float(sim.power[0]):.0f})"
              if shooting else
              f"  shoot - homing only ({float(sim.homing_frac[0])*100:.0f}%)" if shoot_bit else
              "  (not shooting)",
              (120, 120, 150) if armored else
+             (130, 180, 255) if survival else
              (255, 230, 90) if shooting else
              (180, 160, 90) if shoot_bit else (110, 110, 120), small),
             ("", None, small),

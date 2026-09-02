@@ -69,9 +69,17 @@ _TYPE_HB = _type_hitboxes()
 def _bullet_hb(btype: int) -> float:
     return _TYPE_HB.get(int(btype) & 0xFFFF, BULLET_HB)
 
-# Letty's real per-phase HP budget (Part 7): NS1 15000 -> life_callback 1700,
-# LC inherits ~1700, NS2 15000 -> 2000, TT inherits ~2000.
-LETTY_PHASE_HP = (13300.0, 1700.0, 13000.0, 2000.0)
+# Letty's real per-phase HP budget (Part 7, corrected 2026-09-02):
+#   NS1 (Sub38): enemy_flag_invulnerable(1) [= damageable], life_set 15000,
+#                life_callback_ex -> Lingering Cold at HP 1700  (13300 to drain)
+#   Lingering Cold (Sub42): enemy_flag_invulnerable(0) [= NOT damageable] and
+#                NO life_callback - it is a pure survival phase, ends only on its
+#                3000-frame loop timer. Same for Table-Turning (Sub55).
+#   NS2 (Sub39): damageable, life_set 15000, life_callback at HP 2000 (13000).
+# So the spell phases take ZERO shot damage and end on their timer (the phase
+# window's end frame). _NO_DAMAGE is a sentinel the sim reads as "un-drainable".
+_NO_DAMAGE = 1.0e9
+LETTY_PHASE_HP = (13300.0, _NO_DAMAGE, 13000.0, _NO_DAMAGE)
 
 
 def _run_vm(seed: int, difficulty: int = 3, frames: int = 13000):

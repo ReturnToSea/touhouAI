@@ -452,7 +452,10 @@ def _test_hp(ecl) -> bool:
                      f_lc is not None and abs(f_lc - want) <= 20,
                      f"transitioned at {f_lc}, want ~{want}")
 
-    # full damage run -> both spells captured (not timed out), ends at Sub51
+    # full damage run -> the NON-spell phases fall to their life callbacks fast,
+    # but Lingering Cold / Table-Turning are SURVIVAL spells (no life_callback;
+    # the real engine freezes boss HP through them - verified against every probe
+    # recording). Heavy damage must NOT capture them: they still end on the timer.
     vm = VM(ecl, difficulty=3, seed=0)
     vm.start_boss(sub=31, interrupt=0)
     for _ in range(13000):
@@ -461,11 +464,10 @@ def _test_hp(ecl) -> bool:
         if b and b.alive:
             b.damage(40)
     evs = [e for _, e, _ in vm.trace]
-    ok &= _check("HP: heavy damage captures both spells",
-                 evs.count("spell_captured") == 2 and "spell_timeout" not in evs
-                 and _phase_seq(vm)[-1] == 51,
-                 f"caps={evs.count('spell_captured')} "
-                 f"timeouts={evs.count('spell_timeout')} last={_phase_seq(vm)[-1]}")
+    ok &= _check("HP: spells are survival - damage can't capture them",
+                 evs.count("spell_captured") == 0
+                 and _phase_seq(vm) == [38, 42, 39, 55, 51],
+                 f"caps={evs.count('spell_captured')} seq={_phase_seq(vm)}")
 
     # engaged gate: a boss that never sets enemy_flag_invulnerable(1) takes no damage
     vm = VM(ecl, difficulty=3, seed=0)

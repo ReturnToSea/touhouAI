@@ -206,12 +206,14 @@ def main():
 
         pj = int(sim.phase_idx[0])
         p_hp0 = float(sim.ph[rid0, pj, 3])
-        hp_frac = max(0.0, min(1.0, float(sim.boss_hp[0]) / max(1.0, p_hp0)))
+        survival = p_hp0 >= 5.0e8
+        hp_frac = 1.0 if survival else max(0.0, min(1.0, float(sim.boss_hp[0]) / max(1.0, p_hp0)))
         n_ph = int(sim.n_ph[rid0])
         shoot_now = shoot and not armored
         mult = float(sim.dps_mult[0])
         dps_line = (
             "  boss invulnerable" if armored else
+            "  SURVIVAL - boss takes no damage" if survival else
             f"  SHOOT lined  {float(sim.shot_dps[0]) * mult:.1f} HP/f"
             if (shoot_now and aligned) else
             f"  shoot homing {float(sim.shot_dps[0]) * mult * float(sim.homing_frac[0]):.1f} HP/f"
@@ -230,6 +232,7 @@ def main():
              (170, 190, 210), small),
             (dps_line,
              (120, 120, 150) if armored else
+             (130, 180, 255) if survival else
              (255, 230, 90) if (shoot_now and aligned) else
              (180, 160, 90) if shoot_now else (110, 110, 120), small),
             ("", None, small),
@@ -250,7 +253,8 @@ def main():
         pygame.draw.rect(screen, (240, 120, 240),
                          (x0 + 1, yy + 1, int((PANEL - 22) * hp_frac), 10))
         yy += 20
-        screen.blit(small.render(f"  boss HP {float(sim.boss_hp[0]):.0f}", True,
+        hp_txt = "survival phase" if survival else f"{float(sim.boss_hp[0]):.0f}"
+        screen.blit(small.render(f"  boss HP {hp_txt}", True,
                                  (200, 160, 200)), (x0, yy))
         yy += 24
         for r in results[-10:]:
