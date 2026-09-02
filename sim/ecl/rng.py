@@ -50,5 +50,6 @@ class EclRng:
         return lo + (hi - lo) * self.rand()
 
     def rand_int(self, n: int) -> int:
-        """Uniform int in [0, n)."""
-        return int(self.rand() * n) if n else 0
+        """Uniform int in [0, n) — the engine's `rand_u32() % n` (`set_int_rand*`
+        opcodes), *not* `int(rand_float()*n)`."""
+        return self.rand_u32() % n if n else 0

@@ -216,28 +216,37 @@ def test_arithmetic() -> bool:
     ok &= _check("math_norm_angle", abs(e.fvars[0] - (4.0 - 2 * math.pi)) < 1e-6,
                  f"{e.fvars[0]}")
 
-    # rand: deterministic per seed, in range, roughly uniform
-    ecl = _synthetic_ecl({0: [_instr(0, 52, F0, -math.pi, math.pi)]})   # __math_rand_rad
-    vm1, vm2 = VM(ecl, seed=1234), VM(ecl, seed=1234)
-    for vm in (vm1, vm2):
-        vm.enemies.append(Enemy(vm, 0, is_boss=True))
-        vm._run_enemy(vm.enemies[0])
-    ok &= _check("rand deterministic per seed",
-                 vm1.enemies[0].fvars[0] == vm2.enemies[0].fvars[0])
+    # the PRNG generator itself: deterministic per seed, uniform on [0, 1)
+    from .rng import EclRng
+    r1, r2 = EclRng(1234), EclRng(1234)
+    ok &= _check("PRNG deterministic per seed",
+                 [r1.rand() for _ in range(50)] == [r2.rand() for _ in range(50)])
+    _r = EclRng(7)
+    vs = [_r.rand() for _ in range(20000)]
+    dec = [0] * 10
+    for v in vs:
+        dec[min(9, int(v * 10))] += 1
+    ok &= _check("PRNG ~uniform on [0,1)",
+                 abs(sum(vs) / len(vs) - 0.5) < 0.02 and max(dec) - min(dec) < 250,
+                 f"mean {sum(vs)/len(vs):.3f}  deciles {dec}")
 
+    # __math_rand_rad: a screen-aware heading (see the handler). From the left
+    # half it points right (a +/-45 cone), reflected off nearby walls.
+    ecl = _synthetic_ecl({0: [_instr(0, 52, F0, -math.pi, math.pi)]})
     vm = VM(ecl, seed=1)
-    vals = []
     e = Enemy(vm, 0, is_boss=True)
+    e.x, e.y = 100.0, 240.0          # left half, clear of every wall
     vm.enemies.append(e)
+    vals = []
     for _ in range(4000):
         e.frame = e.ip = 0
         e.running = True
         vm._run_enemy(e)
         vals.append(e.fvars[0])
-    in_range = all(-math.pi <= v < math.pi for v in vals)
-    mean = sum(vals) / len(vals)
-    ok &= _check("rand in [-pi, pi) and ~uniform", in_range and abs(mean) < 0.15,
-                 f"mean={mean:.3f} range_ok={in_range}")
+    cone = all(-math.pi / 4 <= v <= math.pi / 4 for v in vals)
+    ok &= _check("__math_rand_rad: +/-45 cone toward centre from the left half",
+                 cone and abs(sum(vals) / len(vals)) < 0.05,
+                 f"mean {sum(vals)/len(vals):.3f}  cone_ok {cone}")
     return ok
 
 

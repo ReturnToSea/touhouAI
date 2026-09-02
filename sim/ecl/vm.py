@@ -168,6 +168,7 @@ class Enemy:
         self.maccel = 0.0
         self.mangvel = 0.0
         self.stop_at: int | None = None             # frame to zero `mspeed` (move_dir_time duration)
+        self.move_bounds = (0.0, 0.0, 384.0, 448.0)  # move_bounds_set: (xmin, ymin, xmax, ymax)
 
         # execution state
         self.sub = sub
@@ -643,9 +644,31 @@ def _rand_f_sign(vm, e, ins):
     e.set(ins.args[0], v if vm.rng.rand() < 0.5 else -v)
 
 
-@_op(52)  # __math_rand_rad(dst, lo, hi) -> uniform [lo, hi)
-def _rand_rad(vm, e, ins):
-    e.set(ins.args[0], vm.rng.rand_range(e.get(ins.args[1]), e.get(ins.args[2])))
+@_op(52)  # __math_rand_rad(dst, _, _) — a *screen-aware* random heading, from
+def _rand_rad(vm, e, ins):        # FUN_00410520 case 0x33. The lo/hi args are ignored.
+    # a ±45° cone toward screen centre, then reflected off any wall it's near
+    a = (vm.rng.rand() * (math.pi / 2) - (math.pi / 4)) if e.x <= 192.0 else \
+        _norm(vm.rng.rand() * (math.pi / 2) + 3 * math.pi / 4)
+    xmin, ymin, xmax, ymax = e.move_bounds
+    if e.x < xmin + 96.0:
+        if a > math.pi / 2:
+            a = math.pi - a
+        elif a < -math.pi / 2:
+            a = -math.pi - a
+    if e.x > xmax - 96.0:
+        if -math.pi / 2 <= a < math.pi / 2:
+            a = math.pi - a
+        elif -math.pi / 2 < a < 0.0:
+            a = -math.pi - a
+    if e.y < ymin + 48.0 and a < 0.0:
+        a = -a
+    if e.y > ymax - 48.0 and a > 0.0:
+        a = -a
+    e.set(ins.args[0], a)
+
+
+def _norm(a: float) -> float:
+    return (a + math.pi) % (2 * math.pi) - math.pi
 
 
 @_op(51)  # __math_rand(dst, bound) -> [0, bound)  (float)
@@ -787,9 +810,19 @@ def _orbit_distance(vm, e, ins):  # (Letty freezes it with (DIST_ORIGIN, 0) at t
         e.motion.radius_growth = e.get(ins.args[1]) if len(ins.args) > 1 else 0.0
 
 
-@_op(43, 44, 47, 53, 59, 60, 61, 62, 63)  # set-from-boss, move_at_player, __move_change_*,
-def _move_misc_noop(vm, e, ins):          # bounds — Letty doesn't lean on these; no-op
-    pass
+@_op(62)  # move_bounds_set(xmin, ymin, xmax, ymax)
+def _move_bounds(vm, e, ins):
+    e.move_bounds = tuple(float(e.get(a)) for a in ins.args[:4])
+
+
+@_op(63)  # move_bounds_disable
+def _move_bounds_off(vm, e, ins):
+    e.move_bounds = (0.0, 0.0, 384.0, 448.0)
+
+
+@_op(43, 44, 47, 53, 59, 60, 61)  # set-from-boss, __move_unknown, move_at_player,
+def _move_misc_noop(vm, e, ins):  # __move_change_* — Letty doesn't use these. See
+    pass                          # docs/th07-re-notes.md for what they actually do.
 
 
 @_op(107)  # death_callback_sub
