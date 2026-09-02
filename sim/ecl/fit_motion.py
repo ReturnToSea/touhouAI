@@ -1,4 +1,15 @@
-"""Part 10 — per-type bullet-motion models fitted from recorded trajectories.
+"""Part 10 (first pass) — per-type median-displacement-profile motion models.
+
+SUPERSEDED by `bullet_sim.py`. Once the th07.exe RE gave us the engine-faithful
+per-bullet forward sim (hang states, the flag-1 launch, all fx flags), the
+non-parametric median profile stopped being needed: `bullet_sim.simulate` from a
+bullet's own params reproduces recorded trajectories to **p50 ~2 px / p90 ~7 px /
+98 % within 8 px** (the recorder's pos-vs-vel sampling noise floor) — see
+`bullet_sim.verify` and `align.refit_coverage`. The "~75 % / ~16 % tail" this
+module reports is an artefact of averaging genuinely-random `bullet_random`
+bullets into one profile, not a physics gap. Kept for the grouping analysis and
+as the fallback if a future boss needs a profile for a type `bullet_sim` can't
+express.
 
 The recorder polls the bullet pool every frame; `bullet_trace` re-keys that into
 per-bullet trajectories. This module groups those trajectories by an observable

@@ -178,6 +178,8 @@ class Enemy:
         self.vel_y = 0.0                            # engine's `CIRCLE_ANGLE` (+0x2b54)
         self.stop_at: int | None = None             # frame to zero `mspeed` (move_dir_time duration)
         self.move_bounds = (0.0, 0.0, 384.0, 448.0)  # move_bounds_set: (xmin, ymin, xmax, ymax)
+        self.oob_immune = False        # enemy_flag_oob_immune — survive off-screen
+        self.was_onscreen = False      # engine only culls once the enemy has shown
 
         # execution state
         self.sub = sub
@@ -317,6 +319,8 @@ class VM:
             if not e.alive:
                 continue
             self._update_motion(e)          # apply any move_* command from a prior frame
+            if not e.is_boss and self._cull_offscreen(e):
+                continue                    # engine despawns it before it runs
             self._service_callbacks(e)      # may switch sub (frame -> 0); does not execute
             if e.alive:
                 self._run_enemy(e)          # execute this frame, then e.frame += 1
@@ -329,6 +333,25 @@ class VM:
 
     def boss(self) -> Enemy | None:
         return next((e for e in self.enemies if e.is_boss), None)
+
+    # engine: once a sub-enemy has been on screen, it is despawned the frame it
+    # leaves the play area (+ a sprite-sized margin) unless enemy_flag_oob_immune
+    # is set (`FUN_00420...` enemy update, the `-1 < *(char*)(+0x2e2a)` guard).
+    # Letty's orbs rely on this: they spiral off-screen from an off-centre boss
+    # and stop firing — without it the VM over-fires Table-Turning + Lingering
+    # Cold by carrying dead orbs through their whole shoot loop.
+    _OOB_MARGIN = 56.0
+
+    def _cull_offscreen(self, e: Enemy) -> bool:
+        m = self._OOB_MARGIN
+        on = (-m <= e.x <= 384.0 + m) and (-m <= e.y <= 448.0 + m)
+        if on:
+            e.was_onscreen = True
+        elif e.was_onscreen and not e.oob_immune:
+            e.alive, e.removed = False, True
+            self._emit("cull_oob", f"Sub{e.sub}")
+            return True
+        return False
 
     def _update_motion(self, e: Enemy) -> None:
         px, py = e.x, e.y
@@ -863,6 +886,11 @@ def _move_bounds_off(vm, e, ins):
 @_op(43, 44, 47, 53, 59, 60, 61)  # set-from-boss, __move_unknown, move_at_player,
 def _move_misc_noop(vm, e, ins):  # __move_change_* — Letty doesn't use these. See
     pass                          # docs/th07-re-notes.md for what they actually do.
+
+
+@_op(137)  # enemy_flag_oob_immune(on) — survive leaving the play area
+def _oob_immune(vm, e, ins):
+    e.oob_immune = bool(e.get(ins.args[0]))
 
 
 @_op(107)  # death_callback_sub

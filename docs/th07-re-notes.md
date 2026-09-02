@@ -323,3 +323,29 @@ had wired `10045/46` straight to the live `_Motion`, which collapsed the orbit;
 fixed. The orbit-expiry behaviour was also wrong (froze; the engine keeps the
 velocity — the recorded orbs fly straight off the bottom). `danmaku_check`
 1.17 → **1.08**, corr 0.96 → **0.98**.
+
+### `enemy_create_rel` trailing args + off-screen enemy cull (applied 2026-09-01)
+
+- **`enemy_create_rel(sub, x, y, z, hp, item, score)`** — `FUN_0041f430`
+  params 3/4/5 → `+0x2bb8` (life, so `hp`), `+0x2e10` (item-drop type, checked
+  `< 0`/`== -1` then `FUN_004326f0`), `+0x2bc0` (`/10` into the score counter).
+  All cosmetic for the sim — they do **not** affect spawn count or timing.
+- **`enemy_flag_oob_immune` (op 137, case 0x88)** sets bit 7 of `+0x2e2a`. The
+  enemy update loop: once a sub-enemy has been on screen (`FUN_0042d6d8` box
+  test, same as bullets) it is **despawned the frame it leaves** unless that bit
+  is set (`&& (-1 < *(char*)(+0x2e2a))` guard before `FUN_004202d0`). Letty's
+  orbs rely on this — they spiral off an off-centre boss and stop firing. VM now
+  models it (margin ~56 px, estimated); orb lifetimes 2400 f → ~420 f. Doesn't
+  move the bullet counts (Letty's orbs finish their shoot loop before drifting
+  off) but it's correct and matters for Stages 2-6.
+
+### The "Part 10 motion tail" was a method artefact (2026-09-01)
+
+`fit_motion.py`'s median-displacement-profile fit reported ~75 % within 5 px /
+90 f with a ~16 % tail. That tail is **averaging genuinely-random `bullet_random`
+bullets into one profile** — not a physics gap. Running the engine-faithful
+`bullet_sim.simulate` per bullet (the real Part 12 path) on all 28 k
+instruction-pure matched traces: **p50 2.16 px, p90 7.09 px, p99 9.9 px, 98 %
+within 8 px** — i.e. the recorder's own pos-vs-vel sampling noise floor.
+`fit_motion.py` is superseded by `bullet_sim.py`; `align.refit_coverage` now
+measures the per-bullet sim.

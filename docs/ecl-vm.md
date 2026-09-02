@@ -21,19 +21,18 @@ change. The VM replaces *where the bullet positions come from*, nothing else.
     Partial: **Part 4** (the PRNG generator is built; the KS test against
     recorded spreads isn't run yet), **Part 7** (HP thresholds — the callback
     mechanism is wired into the phase machine, but nothing exercises it without
-    a damage model), **Part 8** (the movement system is built and matches the
-    recording on the deterministic frames, but it hasn't had its own verify
-    pass and a few move-tuning opcodes are stubbed).
+    a damage model), and small boss-spell-loop timing residuals (Table-Turning
+    fires ~6 % hot; not cleanly validatable against the truncated recordings).
 
-    **Stage B underway.** Per-bullet traces reconstructed from the pool
-    recordings with no hook (Part 9, verified bit-exact). A per-type motion
-    model (Part 10) tracks **~75 % of bullets within 5 px / 90 f** (p50 0.00).
-    Part 8's sub-enemy movement is **done for Letty** — the orbit op
-    (`__move_circle_abs`) is implemented from TH08's documented equivalent and
-    verified against the recorded orb tracks. The trace-to-spawn matcher
-    (Part 11) now tags **34 %** of bullets (was 21 % before the orbit landed),
-    instruction-pure. Remaining: matcher refinement for Table-Turning's periodic
-    burst pattern, the Lingering Cold +18 % overfire, then the Part 10 re-fit.
+    **Stage B essentially done.** Per-bullet traces reconstructed from the pool
+    recordings with no hook (Part 9, bit-exact). The engine-faithful
+    `bullet_sim` (Part 10) reproduces recorded trajectories to **p50 2.16 px /
+    p90 7.09 px / 98 % within 8 px** — the recorder's noise floor. Part 8's
+    sub-enemy movement is **done for Letty** — the orbit op (`__move_circle_abs`)
+    plus the `CIRCLE_ANGLE`/`CIRCLE_SPEED` gvar fix and off-screen enemy cull,
+    all verified against the recorded orb tracks. The trace-to-spawn matcher
+    (Part 11) tags **75 %** of bullets, 100 % instruction-pure. `danmaku_check`
+    (VM danmaku vs recordings): **ratio 1.08, curve correlation 0.98**.
     - All six PCB stage ECLs decompiled (`tools/th07_ecl/`), Letty isolated, the
       opcode map `th07.eclm`
     - A dead VM skeleton (`sim/ecl_vm.py` + `ecl_parse/expand/bullet`) from the
@@ -378,15 +377,13 @@ What the recordings settled:
 4.8 px). The two largest populations — ~21 k of ~45 k bullets — fit to **0.00 px
 p90**. The remaining ~25 % is a hard tail, and its cause is structural:
 
-!!! note "The tail is a *grouping* problem — Part 11 is the fix"
-    Groups that share all of `(class, fx_flag, fx_p1, fx_interval, base_speed)`
-    still contain bullets from **different ECL instructions** fired by
-    **different Letty attacks** across the fight — e.g. `(cls 3, fx 0, base 1.0)`
-    spans 28 distinct fire-windows from step 2 600 to 7 600. The observable key
-    can't separate them; the VM's spawn-source can. Part 11's trace-to-spawn
-    matcher does exactly this — and where it works the re-fit **jumps to 70 %
-    within 5 px, correctly grouped**. With Part 8's orbit op now implemented it
-    tags 34 % of bullets and rising; finishing Part 11 finishes Part 10.
+!!! note "Resolved — the tail was a method artefact, not a real gap"
+    The median-profile fit averages genuinely-random `bullet_random` bullets
+    (Sub34/Sub35 — random angle *and* speed per bullet) into one profile, which
+    it can't represent. Once `bullet_sim.simulate` runs per bullet from its own
+    params (Part 11 links each trace to its spawn), the fit is **p50 2.16 px,
+    p90 7.09 px, 98 % within 8 px** — the recorder's noise floor. This module
+    (`fit_motion.py`) is superseded by `bullet_sim.py`.
 
 - **Verify** (`python -m sim.ecl.fit_motion`): per-group `p50 / p90` path error
   over 90 frames vs the recorded path, plus the aggregate coverage number. Bar
@@ -416,11 +413,10 @@ produced it and tags it with `(source_sub, source_ip)`. Two matchers:
 (was 34 %), **100 % instruction-pure** on every big group. The 1:1 matches sit
 on their emitter (dpos p50 ~9 px). The ring matches (`Sub57` Table-Turning,
 `Sub41` NS2) are frame- and heading-locked (dframe std 4–6 f on `Sub57`, was 25)
-but the VM puts their emitter **~100–190 px off** — a Part 8 orbit-geometry gap,
-surfaced clearly by the ring matcher, *not* a matching failure. The Part 10
-re-fit grouped by `(source, source_ip, spawn_speed)` now lands **83.8 % within
-5 px / 90 f over ~26 k bullets** (was 78 % / 10 k) — the motion profile is fitted
-in the bullet's own frame, so a wrong emitter position doesn't hurt it.
+but the VM puts their emitter **~100–190 px off** — RNG-driven boss drift (Part
+6), *not* a matching failure. Running `bullet_sim.simulate` per bullet on the
+~28 k matched traces reproduces them to **p50 2.16 px, p90 7.09 px, 98 % within
+8 px** — the recorder's noise floor.
 
 **Part 8 orbit fix (`Sub57` / `Sub41` / LC orbs):** `CIRCLE_ANGLE` (10045) /
 `CIRCLE_SPEED` (10046) were wired to the live orbit's sweep angle / speed — but
@@ -435,17 +431,34 @@ of freezing (the recorded orbs fly straight off the bottom). VM orb tracks now
 follow the recordings to ~5 px through the whole spiral. **`danmaku_check` ratio
 1.17 → 1.08, curve correlation 0.96 → 0.98.**
 
-**Remaining refinement:**
+**Off-screen sub-enemy cull** (`enemy_flag_oob_immune`, op 137): once an orb has
+been on screen it's despawned the frame it leaves the play area unless
+oob-immune (`FUN_0042d6d8` box test + the `-1 < *(char*)(+0x2e2a)` guard). VM
+now models it — orb lifetimes drop from ~2400 f to ~420 f. It doesn't move
+Letty's bullet counts (her orbs finish their shoot loop before drifting off) but
+it's engine-correct and matters for Stages 2-6. `enemy_create_rel`'s trailing
+args decoded too — `(sub, x, y, z, hp, item_drop, score)`, all cosmetic, *not*
+count-affecting.
 
-- **`Sub57` / `Sub41` emitter absolute position** — the ring matcher still shows
-  ~120 px, but this is not a bug: those orbs spawn on the boss, and the boss's
-  Table-Turning drift is `__math_rand_rad`-driven, so the VM and the recording
-  diverge exactly as Part 6 established. Fine for training (random seeds).
-- **Lingering Cold `Sub36`** — 57 % pure (fires several bullet types on an RNG
-  branch — expected). Birth count still +18 % (VM 3389 vs ~2921) — `Sub47`'s
-  aimed bursts (851, `fx 64`, short-lived) plus a skewed `Sub36` fx-16 fraction
-  (VM ~50 %, recorded ~32 %) — but the *on-screen* density is now within ~8 %
-  (`danmaku_check`), so this is low priority.
+**The "16 % motion tail" was a method artefact.** `fit_motion.py`'s
+median-displacement-profile averaged genuinely-random `bullet_random` bullets
+into one profile. The engine-faithful `bullet_sim.simulate` per bullet — the
+actual Part 12 path — reproduces all ~28 k matched traces to **p50 2.16 px, p90
+7.09 px, 98 % within 8 px**, the recorder's noise floor. `fit_motion.py` is
+superseded by `bullet_sim.py`.
+
+**Remaining (low priority):**
+
+- **`Sub57` / `Sub41` emitter absolute position** — the ring matcher shows
+  ~120 px, but not a bug: those orbs spawn on the boss, whose Table-Turning
+  drift is `__math_rand_rad`-driven, so VM and recording diverge as Part 6
+  established. Fine for training (random seeds).
+- **Table-Turning +~6 % steady-state** — the spell loop fires a touch hot;
+  traced to `call(56)`/`call(2)` frame accounting and where the 3000-frame
+  timer lands. Small, and the recordings are truncated at frame ~10750 so it
+  can't be validated cleanly. On-screen density is fine (`danmaku_check` 1.08).
+- **Lingering Cold `Sub36`** — 57 % pure (RNG branch — expected). Birth count
+  +18 %, all `Sub47`'s short-lived aimed bursts; on-screen density within ~8 %.
 
 **Then** the difficulty work:
 

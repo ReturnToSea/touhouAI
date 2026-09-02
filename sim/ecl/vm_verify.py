@@ -282,6 +282,39 @@ def test_movement(ecl_path: Path) -> bool:
     if recs:
         ok &= _check_orbit_vs_recording(ecl, recs[0])
 
+    # enemy_flag_oob_immune: a sub-enemy that has been on screen and then leaves
+    # gets culled — unless it's oob-immune. (Letty's orbs spiral off-screen and
+    # must stop firing; without this the VM over-fires Table-Turning.)
+    def _run_off(immune: bool) -> bool:
+        vm2 = VM(ecl, difficulty=3, seed=1)
+        en = Enemy(vm2, 100, is_boss=False)
+        en.x, en.y, en.oob_immune = 192.0, 224.0, immune
+        vm2.enemies.append(en)
+        vm2._cull_offscreen(en)          # on screen — registers was_onscreen
+        en.x = 900.0                     # now leave
+        vm2._cull_offscreen(en)
+        return en.alive
+    ok &= _check("oob-cullable sub-enemy despawns off screen",
+                 _run_off(False) is False)
+    ok &= _check("oob-immune sub-enemy survives off screen",
+                 _run_off(True) is True)
+    vm = VM(ecl, difficulty=3, seed=1)
+    vm.start_boss(sub=31, interrupt=0)
+    born, died = {}, {}
+    for _ in range(11000):
+        alive_before = {id(e) for e in vm.enemies}
+        vm.step()
+        for e in vm.enemies:
+            born.setdefault(id(e), vm.frame)
+        for i in alive_before - {id(e) for e in vm.enemies}:
+            died[i] = vm.frame
+    lifes = [died[i] - born[i] for i in died if i in born]
+    import numpy as np
+    long = [x for x in lifes if x > 800]
+    ok &= _check("sub-enemies don't live absurdly long",
+                 len(long) / max(1, len(lifes)) < 0.05,
+                 f"{len(long)}/{len(lifes)} lived >800 f")
+
     # boss track vs a recording, aligned on the first bullet frame
     recs = sorted(FIGHTS.glob("letty_*.npz"))
     if not recs:

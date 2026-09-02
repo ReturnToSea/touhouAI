@@ -407,74 +407,39 @@ def verify(npz_paths: list[str]) -> bool:
 
 
 def refit_coverage(npz_paths: list[str]) -> None:
-    """The payoff, on the sources the VM currently places correctly: group
-    Part 10 by (source_sub, source_ip) and re-measure the motion-model fit."""
-    from .fit_motion import _disp
-    H = 90
-    errs_src: list[float] = []
+    """The payoff: reproduce every instruction-pure matched trace with the
+    engine-faithful `bullet_sim.simulate` from its own params (hang, launch, the
+    fx flags) — this *is* the Part 12 GPU path — and measure the position error
+    over 90 frames vs the recording."""
+    from collections import Counter as _C
+    from .bullet_sim import simulate, fit_params
+    from .fit_motion import _base_speed
+    H = 91
+    errs: list[float] = []
     for p in npz_paths:
         traces = {t.id: t for t in load_traces(p)}
-        matches, un_b, _ = align(p)
-        # a group is usable if its tags are pure — a 1:1 match on its emitter, or
-        # a ring match (instruction + heading solid, only the VM emitter position
-        # is off, and the profile fit is in the bullet's own frame anyway)
+        matches, _un_b, _ = align(p)
         by_src: dict[tuple, list] = {}
         for m in matches:
             by_src.setdefault((m.source_sub, m.source_ip), []).append(m)
-        groups: dict[tuple, list[Bullet]] = {}
         for src, ms in by_src.items():
             bs = [traces[m.bullet_id] for m in ms]
-            from collections import Counter as _C
-            pur = _C((b.cls, b.fxflag) for b in bs).most_common(1)[0][1] / len(bs)
-            if pur < 0.9:
-                continue
-            for m in ms:
-                if m.ring or m.d_pos < 12:
-                    groups.setdefault(
-                        (m.source_sub, m.source_ip, round(m.spawn_speed, 1)), []
-                    ).append(traces[m.bullet_id])
-        for src, bs in groups.items():
-            bs = [b for b in bs if b.life >= 30]
-            if len(bs) < 20:
-                continue
-            T = 200
-            DM = np.full((len(bs), T), np.nan)
-            DA = np.full((len(bs), T), np.nan)
-            for i, b in enumerate(bs):
-                d = _disp(b, T)
-                nn = len(d)
-                DM[i, :nn] = np.hypot(d[:, 0], d[:, 1])
-                a = np.unwrap(np.arctan2(d[:, 1], d[:, 0]))
-                DA[i, :nn] = a - a[0]
-            with warnings.catch_warnings():          # empty tail columns -> all-NaN
-                warnings.simplefilter("ignore", RuntimeWarning)
-                mp, dp = np.nanmedian(DM, 0), np.nanmedian(DA, 0)
-            for prof in (mp, dp):
-                last = np.where(~np.isnan(prof))[0]
-                if len(last):
-                    prof[last[-1] + 1:] = prof[last[-1]]
-                prof[np.isnan(prof)] = 0.0
+            if _C((b.cls, b.fxflag) for b in bs).most_common(1)[0][1] / len(bs) < 0.9:
+                continue                              # impure group — skip
             for b in bs:
-                nn = min(b.life - 1, H)
-                if nn < 10:
+                if b.life < 30:
                     continue
-                d0 = _disp(b, 1)[0]
-                a0 = np.arctan2(d0[1], d0[0])
-                idx = np.minimum(np.arange(nn), T - 1)
-                h = a0 + dp[idx]
-                step = np.stack([np.cos(h) * mp[idx], np.sin(h) * mp[idx]], -1)
-                pred = b.xy[0].astype(np.float64) + np.cumsum(
-                    np.vstack([[0.0, 0.0], step]), 0)[:nn + 1]
-                e = np.hypot(*(pred - b.xy[:nn + 1].astype(np.float64)).T).max()
-                errs_src.append(e)
-    errs_src = np.array(errs_src) if errs_src else np.zeros(1)
-    print(f"\n  Part 10 re-fit on instruction-pure matches, grouped by "
-          f"(source_sub, source_ip, spawn_speed):")
-    print(f"    {len(errs_src)} bullets   within 5px/90f: "
-          f"{_fmt_pct(np.mean(errs_src <= 5.0))}   "
-          f"p50 {np.median(errs_src):.2f}  p90 {np.percentile(errs_src, 90):.2f} px")
-    print(f"    (per-instruction grouping is right where the VM's geometry is; "
-          f"p90 tail = the mid-flight redirects, still to model)")
+                n = min(b.life, H)
+                sim = simulate(fit_params(b, base=_base_speed(b)), n)
+                errs.append(float(np.hypot(sim[:n, 0] - b.xy[:n, 0],
+                                           sim[:n, 1] - b.xy[:n, 1]).max()))
+    errs = np.array(errs) if errs else np.zeros(1)
+    print(f"\n  bullet_sim.simulate vs recording, per matched trace (the Part 12 path):")
+    print(f"    {len(errs)} bullets   p50 {np.median(errs):.2f}  p90 "
+          f"{np.percentile(errs, 90):.2f}  p99 {np.percentile(errs, 99):.1f} px   "
+          f"within 8px: {_fmt_pct(np.mean(errs <= 8.0))}")
+    print(f"    (p50 ~2px is the recorder's own pos-vs-vel sampling noise floor — "
+          f"see bullet_trace.verify)")
 
 
 def main(argv):
