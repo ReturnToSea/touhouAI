@@ -426,43 +426,55 @@ class VM:
         e.vel_x, e.vel_y = e.x - px, e.y - py
 
     # -- Part 5: bullet spawning & sub-enemies ---------------------------
-    def _emit_bullets(self, e: Enemy, kind: str, args: list, source_ip: int = -1) -> None:
-        # bullet_{fan,circle,random}[_aimed](t1, t2, count, layers, spd1, spd2,
-        #                                    base_angle, span, flags)
+    def _emit_bullets(self, e: Enemy, mode: int, args: list, source_ip: int = -1) -> None:
+        # bullet_{fan,circle,offset_circle,random}[_aimed](t1, t2, count, layers,
+        #     spd1, spd2, base_angle, span, flags).  `mode` = opcode - 64, the
+        # switch value at emitter +0xc0 in FUN_00423730:
+        #   0/1 fan (aimed/not)         2/3 circle (aimed/not)
+        #   4/5 offset circle           6 random-angle   7 random-speed   8 random
         _, _, count, layers, spd1, spd2, base, span, flags = (e.get(a) for a in args)
         count = max(0, int(count))
         layers = max(1, int(layers))
         btype = int(flags)
-        aimed = kind.endswith("_aimed")
-        k = "fan" if kind.startswith("fan") else ("circle" if kind.startswith("circle") else "random")
+        aimed = mode in (0, 2, 4)
+        k = "fan" if mode in (0, 1) else ("circle" if mode in (2, 3, 4, 5, 7) else "random")
         ox, oy, _oz = e.shoot_offset
         sx, sy = e.x + ox, e.y + oy
-        if aimed:
-            base = base + math.atan2(self.player_y - sy, self.player_x - sx)
-        n = count * layers
-        lo, hi = min(base, span), max(base, span)     # bullet_random: base/span are hi/lo
-        for i in range(n):
-            layer = i // max(1, count)
-            idx = i % max(1, count)
-            # per-layer speed — FUN_00423730: `spd1 - (spd1-spd2)*layer/layers`
-            # (layers < 2 -> spd1). Note the divisor is `layers`, NOT `layers-1`:
-            # the last layer lands at spd1-(spd1-spd2)*(L-1)/L, it never reaches
-            # spd2. Using /(L-1) made every layered attack ~15-25% too slow.
+        aim = math.atan2(self.player_y - sy, self.player_x - sx) if aimed else 0.0
+        cnt = max(1, count)
+        tau = 2.0 * math.pi
+        for layer in range(layers):
+            # per-layer structured speed — FUN_00423730: `spd1-(spd1-spd2)*layer/
+            # layers` (layers<2 -> spd1). Divisor is `layers`, NOT `layers-1`:
+            # the last layer never reaches spd2. /(L-1) made attacks ~20% slow.
             lsp = spd1 if layers < 2 else spd1 - (spd1 - spd2) * layer / layers
-            if k == "random":
-                ang = self.rng.rand_range(lo, hi)      # fresh direction per bullet
-                sp = self.rng.rand_range(spd2, spd1)   # uniform [spd2, spd1] — matches
-                #   FUN_00423730 mode 7/8 (layer doesn't touch random speed)
-            elif k == "circle":
-                ang = base + (2 * math.pi) * idx / max(1, count)
-                sp = lsp
-            else:  # fan
-                ang = base + span * (idx - (count - 1) / 2)
-                sp = lsp
-            self.bullets.append(BulletSpawn(
-                frame=self.frame, kind=k, btype=btype, x=sx, y=sy,
-                angle=ang, speed=sp, aimed=aimed, effects=tuple(e.pending_effects),
-                source_sub=e.sub, source_ip=source_ip))
+            for idx in range(count):
+                if mode in (0, 1):                    # fan: ±0.5,±1.5,... * span
+                    a0 = (((idx + 1) // 2) * span if btype & 1
+                          else span * 0.5 + (idx // 2) * span)
+                    if idx & 1:
+                        a0 = -a0
+                    ang = a0 + (aim if mode == 0 else 0.0) + base
+                    sp = lsp
+                elif mode in (2, 3):                  # circle, +layer*span rotation
+                    ang = aim + layer * span + base + tau * idx / cnt
+                    sp = lsp
+                elif mode in (4, 5):                  # offset circle: +pi/count, no layer rot
+                    ang = aim + tau * idx / cnt + math.pi / cnt + base
+                    sp = lsp
+                elif mode == 6:                       # random angle, structured speed
+                    ang = self.rng.rand() * (base - span) + span
+                    sp = lsp
+                elif mode == 7:                       # structured ring (+layer rot), random speed
+                    ang = layer * span + base + tau * idx / cnt
+                    sp = self.rng.rand() * (spd1 - spd2) + spd2
+                else:                                 # mode 8: angle & speed both random
+                    ang = self.rng.rand() * (base - span) + span
+                    sp = self.rng.rand() * (spd1 - spd2) + spd2
+                self.bullets.append(BulletSpawn(
+                    frame=self.frame, kind=k, btype=btype, x=sx, y=sy,
+                    angle=ang, speed=sp, aimed=aimed, effects=tuple(e.pending_effects),
+                    source_sub=e.sub, source_ip=source_ip))
 
     def _spawn_child(self, parent: Enemy, sub: int, dx: float, dy: float, dz: float) -> None:
         if len(self.enemies) + len(self._pending_children) >= self.max_children:
@@ -782,17 +794,14 @@ def _float_time(vm, e, ins):
 
 # --- bullets (Part 5) --------------------------------------------------
 
-_BULLET_KIND = {
-    64: "fan_aimed", 65: "fan",
-    66: "circle_aimed", 67: "circle",
-    68: "circle_aimed", 69: "circle",      # bullet_offset_circle[_aimed]
-    70: "random", 71: "random", 72: "random",
-}
+# opcode -> FUN_00423730 switch value (emitter +0xc0). 64..72 map 1:1 to modes
+# 0..8; see _emit_bullets for the per-mode geometry.
+_BULLET_MODE = {op: op - 64 for op in range(64, 73)}
 
 
-@_op(*_BULLET_KIND)
+@_op(*_BULLET_MODE)
 def _bullet(vm, e, ins):
-    vm._emit_bullets(e, _BULLET_KIND[ins.opcode], ins.args, source_ip=ins.index)
+    vm._emit_bullets(e, _BULLET_MODE[ins.opcode], ins.args, source_ip=ins.index)
 
 
 @_op(79)  # bullet_effects(slot, flag, gate, interval, repeat, p1, p2)
