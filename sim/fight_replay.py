@@ -178,9 +178,12 @@ def _mirror_rec(r):
 class FightSim:
     def __init__(self, B=8192, name="cirno", device="cuda", max_frames=11000,
                  min_start=0, seed=0, phase_start_mix=0.5, mirror=True,
-                 randomize=True, recs=None):
+                 randomize=True, recs=None, field_rot_deg=FIELD_ROT_DEG):
         self.B, self.d = B, device
         self.randomize = randomize        # eval instance passes False (clean metric)
+        self._field_rot = np.radians(field_rot_deg)   # 0 for the ECL sim: fresh
+        #   RNG per schedule already unmemorisable, and rotation distorts the
+        #   real danmaku geometry + the aim-pool emitter frame
         self._g = torch.Generator(device="cpu").manual_seed(seed)
         if recs is None:                  # load recordings; else use pre-built
             paths = sorted(glob.glob(str(FIGHTS / f"{name}*.npz")))   # dicts (Part 12
@@ -238,7 +241,7 @@ class FightSim:
 
         n_en = int((~torch.isnan(self.en[..., 0])).any(-1).float().mean() * 100)
         print(f"[FightSim] {self.n_rec} recs, {self.maxF} frames, B={B}, "
-              f"enemy bodies ~{n_en}% of frames, field-rot +-{FIELD_ROT_DEG:.0f}deg, "
+              f"enemy bodies ~{n_en}% of frames, field-rot +-{np.degrees(self._field_rot):.0f}deg, "
               f"phasing {'on' if self.phasing else 'off'} "
               f"({int(self.n_ph.float().mean())} phases)", flush=True)
         self._dirs = _DIRS.to(device)
@@ -315,7 +318,7 @@ class FightSim:
         self._prev_active[idx] = False
         self.focus[idx] = 0.0
         if self.randomize:
-            self.field_rot[idx] = (torch.rand(k, device=self.d) * 2 - 1) * FIELD_ROT
+            self.field_rot[idx] = (torch.rand(k, device=self.d) * 2 - 1) * self._field_rot
             self.dps_mult[idx] = DPS_LO + (DPS_HI - DPS_LO) * torch.rand(k, device=self.d)
             self.no_phase[idx] = torch.rand(k, device=self.d) < NOPHASE_FRAC
         self._rot_cs = torch.cos(self.field_rot)[:, None]

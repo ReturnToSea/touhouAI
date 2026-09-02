@@ -373,7 +373,10 @@ def fit_params(b, *, base: float) -> "BulletParams":
         state = b.re[:, 0]
         tflag = int(b.re[0, 1])
         hs = hang_state_for_type(tflag)                    # type-word bits 0x2/4/8
-        h = int(np.argmax(state == 1)) if hs and (state == 1).any() else 0
+        # `state` flips 3->1 on the frame the crawl ends, and *that* step is the
+        # combined crawl+full one (`t == hang_frames` in simulate) — so pure
+        # crawl steps = first-live-frame - 1.
+        h = max(int(np.argmax(state == 1)) - 1, 0) if hs and (state == 1).any() else 0
         stg = b.staging(0)
         # flag-1 launch: needs both the type-word bit AND a staged flag-1 entry
         launch = bool(tflag & 0x1) and any(e["flag"] == 1 for e in stg)

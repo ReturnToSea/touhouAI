@@ -89,11 +89,14 @@ def main():
         ecl_eval_recs = build_schedules(8, seed0=10_000)   # held-out seeds
         args.fight = "letty"
 
+    # ECL sim: no x-mirror, no field rotation -- each schedule is already a
+    # fresh RNG roll, and both augments distort the real geometry / aim frame
+    ecl_kw = dict(mirror=False, field_rot_deg=0.0) if args.sim == "ecl" else {}
     sim = FightSim(B=args.B, name=args.fight, device=dev, seed=args.seed,
-                   max_frames=args.max_frames, recs=ecl_recs)
+                   max_frames=args.max_frames, recs=ecl_recs, **ecl_kw)
     ev = FightSim(B=1024, name=args.fight, device=dev, seed=args.seed + 999,
                   max_frames=args.max_frames, phase_start_mix=0.0,
-                  randomize=False, recs=ecl_eval_recs)   # eval: clean phase-0 starts
+                  randomize=False, recs=ecl_eval_recs, **ecl_kw)   # clean phase-0
     if args.sim != "ecl":                        # replay: eval shares the training
         for k in ("pos", "bhalf", "boss", "en"):  # data (identical) to save memory;
             setattr(ev, k, getattr(sim, k))       # ecl eval uses held-out seeds
