@@ -158,6 +158,12 @@ def _record_one(env, pm, pol, boss, args, out, run):
             a = a % 18 + 18
         obs, r, term, trunc, info = env.step(a)
         step += 1
+        if args.maxpower:
+            try:
+                g = struct.unpack("<I", pm.read_bytes(0x00626270 + 8, 4))[0]
+                pm.write_bytes(g + 0x7C, struct.pack("<f", 128.0), 4)
+            except Exception:
+                pass
         b = boss()
         if b is None:
             null_run += 1
@@ -175,15 +181,6 @@ def _record_one(env, pm, pol, boss, args, out, run):
                           flush=True)
             boss_present = True
             null_run = 0
-            if args.maxpower:                          # lock power for the fight
-                try:
-                    g = struct.unpack("<I", pm.read_bytes(0x00626270 + 8, 4))[0]
-                    if 0x400000 < g < 0x7FFFFFFF:
-                        cur = struct.unpack("<f", pm.read_bytes(g + 0x7C, 4))[0]
-                        if 0.0 <= cur < 128.0:
-                            pm.write_bytes(g + 0x7C, struct.pack("<f", 128.0), 4)
-                except Exception:
-                    pass
         if recording:
             if b is None:
                 gone += 1
