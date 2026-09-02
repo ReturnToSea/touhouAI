@@ -194,6 +194,18 @@ def main():
             x, y = bp0[i]
             if -20 < x < PW + 20 and -20 < y < PH + 20:
                 pygame.draw.circle(screen, (232, 232, 232), ts(x, y), 3)
+        # runtime aim pool (LC / NS1 aimed fans) - re-aimed at the live policy
+        # each frame; FightSim feeds these into the obs but _now() doesn't return
+        # them, so the watcher was never drawing them.
+        n_aim = 0
+        if sim._aim_now is not None:
+            ap0 = sim._aim_now[0][0].numpy()
+            aa0 = sim._aim_now[1][0].numpy()
+            for i in np.nonzero(aa0)[0]:
+                x, y = ap0[i]
+                if -20 < x < PW + 20 and -20 < y < PH + 20:
+                    n_aim += 1
+                    pygame.draw.circle(screen, (255, 200, 90), ts(x, y), 3)
         en0, ena0 = en[0].numpy(), en_a[0].numpy()
         for i in np.nonzero(ena0)[0]:
             ex, ey, er = en0[i]
@@ -236,6 +248,7 @@ def main():
             (f"  phase {pj + 1}/{n_ph}" + ("   [INVULN - repositioning]" if armored
                                            else ""),
              (150, 150, 200) if armored else (210, 210, 220), small),
+            (f"  bullets {int(act0.sum())} + aimed {n_aim}", (255, 200, 90), small),
             (f"  best this session {best_reach:.0f}s", (170, 170, 180), small),
             ("  boss invulnerable" if armored else
              "  SPELL - shot damage x1/7" if spell else
