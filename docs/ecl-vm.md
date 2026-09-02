@@ -25,15 +25,15 @@ change. The VM replaces *where the bullet positions come from*, nothing else.
     recording on the deterministic frames, but it hasn't had its own verify
     pass and a few move-tuning opcodes are stubbed).
 
-    **Stage B started.** Per-bullet traces reconstructed from the pool
-    recordings with no hook (Part 9, verified bit-exact). A first per-type
-    motion model (Part 10) tracks **~75 % of bullets within 5 px / 90 f** (p50
-    0.00). The trace-to-spawn matcher (Part 11) is built and clean where it
-    applies (frame-lock std ~20 f, instruction-pure tags, 70 % re-fit) — but
-    both Part 10's tail and Part 11's coverage dead-end on the same thing:
-    **every Letty bullet is fired by an orbiting sub-enemy, and Part 8's
-    movement system freezes those in place.** Part 8 is the critical path:
-    8 → Part 5 NS2/Lingering-Cold fixes → 11 → 10.
+    **Stage B underway.** Per-bullet traces reconstructed from the pool
+    recordings with no hook (Part 9, verified bit-exact). A per-type motion
+    model (Part 10) tracks **~75 % of bullets within 5 px / 90 f** (p50 0.00).
+    Part 8's sub-enemy movement is **done for Letty** — the orbit op
+    (`__move_circle_abs`) is implemented from TH08's documented equivalent and
+    verified against the recorded orb tracks. The trace-to-spawn matcher
+    (Part 11) now tags **34 %** of bullets (was 21 % before the orbit landed),
+    instruction-pure. Remaining: matcher refinement for Table-Turning's periodic
+    burst pattern, the Lingering Cold +18 % overfire, then the Part 10 re-fit.
     - All six PCB stage ECLs decompiled (`tools/th07_ecl/`), Letty isolated, the
       opcode map `th07.eclm`
     - A dead VM skeleton (`sim/ecl_vm.py` + `ecl_parse/expand/bullet`) from the
@@ -208,45 +208,41 @@ too, so Part 8's opcodes came along with it:
 - **Verify:** VM phase-transition frames match the recorded screen-clears; HP
   values and timed-out-phase durations match the recordings.
 
-### 8 · Movement · core built with Part 6 · **now the critical path**
+### 8 · Movement · ✅ done for Letty
 
-Letty's own repositioning runs through the same `move_dir_time` / `move_point`
-/ `move_position` opcodes as the orbs, so the movement system was one build —
-and Part 6's verify shows *the boss track* pixel-exact against a recording for
-127 frames (until the first RNG-driven move).
+Letty's repositioning shares `move_dir_time` / `move_point` / `move_position`
+with the orbs, and Part 6's verify shows the boss track pixel-exact for 127
+frames. The rest of Part 8 was the sub-enemy movement — **every Letty bullet is
+fired by a satellite orb**, so the orbs have to be placed right or Parts 10/11
+can't close.
 
-But Parts 10 and 11 both dead-end here: **100 % of Letty's bullets are fired by
-orbiting sub-enemies**, and their orbit motion is exactly what's still stubbed.
-Until the sub-enemies move, the VM's spawn positions and angles are wrong for
-~80 % of the danmaku, so no motion model (Part 10) and no trace alignment
-(Part 11) can close.
-
-**Done so far:**
-
-- **Free-flight physics implemented.** `move_speed` (49), `move_acceleration`
-  (50), `move_angular_velocity` (48), `set_angle` (58) were no-ops; they now
-  drive the engine's per-frame integration
-  (`speed += accel; angle += ang_vel; pos += speed·[cos,sin]`), with
-  `move_dir_time` (54) reworked onto it. Boss track still exact for 127 frames;
-  Letty doesn't lean on 48/49/50/58 but Stages 2–6 will.
+- **Free-flight physics.** `move_speed` (49), `move_acceleration` (50),
+  `move_angular_velocity` (48), `set_angle` (58) were no-ops; they now drive the
+  engine's per-frame integration (`speed += accel; angle += ang_vel;
+  pos += speed·[cos,sin]`), with `move_dir_time` (54) reworked onto it. Letty
+  barely uses 48/49/50/58 — Stages 2–6 will.
 - **`enemy_trace.py`** reconstructs each sub-enemy's track from the recorded
-  `enemies` array (slot + position-jump identity, keeps ~100% of rows). This is
-  the ground truth. It shows Letty's **shooter orbs (hb 0×0) are near-stationary
-  emitters ~48 px off the boss**, and the **NS2 lethal orbs (hb 8×8) genuinely
-  orbit at ~3 px/f**.
+  `enemies` array (slot + position-jump identity, ~100% of rows). Ground truth:
+  Letty's **shooter orbs (hb 0×0) sit near-stationary ~48 px off the boss**; the
+  **lethal orbs (hb 8×8) spiral outward**.
+- **`__move_circle_abs` (56) + `set_orbit_distance` (57) implemented.** The
+  semantics came from TH08's documented circle-movement op (same engine
+  generation) — no disassembly needed:
+  `__move_circle_abs(frames, cx, cy, cz, angle0, ang_speed, radius0,
+  radius_growth)` places the enemy at `centre + radius·[cos,sin](angle)` each
+  frame, then advances `angle += ang_speed` and `radius += radius_growth`;
+  `frames` frames then freeze (`0` = until the sub ends). `set_orbit_distance`
+  retargets the live orbit — Letty freezes hers with `(DIST_ORIGIN, 0)` at
+  t = 120. The orbit state is exposed back through the `CIRCLE_*` / `DIST_ORIGIN`
+  / `ORIGIN_*` gvars (read *and written* mid-orbit).
+- **Verify** (`vm_verify`): a synthetic orbit spirals at 0.5 px/f and sweeps its
+  angle; **the VM's Sub57 orbs' spiral rate matches the recorded Table-Turning
+  orbs**; boss track still exact. `align` match rate **21 % → 34 %** (the
+  Table-Turning and NS2 orbs now place correctly, dpos ~9 px).
 
-**Still open — the one thing blocking Parts 10/11:**
-
-- **`__move_circle_abs` (56) argument semantics.** It sets up the orbit
-  (`ORIGIN_X/Y/Z`, `DIST_ORIGIN`, `CIRCLE_ANGLE`, `CIRCLE_SPEED` — the gvars
-  exist), but the candidate arg values in Letty's script (`320`, `0.0262`,
-  `−1.5708`, `0.5`) don't map cleanly to a radius + angular speed, so the VM
-  can't place the orbiting emitters. Needs the opcode-56 handler disassembled
-  from `th07.exe`, or patient calibration of the mapping against
-  `enemy_trace`. Until then ~80% of Letty's bullets have no usable spawn
-  geometry.
-- **A dedicated boss-track verify pass**, RNG-stream-matched, and a
-  `move_point` deceleration check (the current model is pure linear).
+**Still owed:** a dedicated boss-track verify pass (RNG-stream-matched) and a
+`move_point` deceleration check (current model is pure linear); the `__move_unknown`
+(47) / `__move_change_*` (59–61) opcodes (Letty doesn't use them).
 
 ---
 
@@ -333,17 +329,15 @@ What the recordings settled:
 4.8 px). The two largest populations — ~21 k of ~45 k bullets — fit to **0.00 px
 p90**. The remaining ~25 % is a hard tail, and its cause is structural:
 
-!!! warning "The tail is a *grouping* problem, and it traces back to Part 8"
+!!! note "The tail is a *grouping* problem — Part 11 is the fix"
     Groups that share all of `(class, fx_flag, fx_p1, fx_interval, base_speed)`
     still contain bullets from **different ECL instructions** fired by
     **different Letty attacks** across the fight — e.g. `(cls 3, fx 0, base 1.0)`
     spans 28 distinct fire-windows from step 2 600 to 7 600. The observable key
-    can't separate them; the VM's spawn-source can. Part 11 built the
-    trace-to-spawn matcher, and where it works the re-fit **jumps to 70 % within
-    5 px, correctly grouped** — but Part 11 only tags ~20 % of bullets, because
-    **every Letty bullet is fired by an orbiting sub-enemy the VM currently
-    freezes in place** (Part 8's stubbed `move_speed` / `set_angle` / orbit
-    chain). So the real order is **Part 8 → Part 5 fixes → Part 11 → Part 10**.
+    can't separate them; the VM's spawn-source can. Part 11's trace-to-spawn
+    matcher does exactly this — and where it works the re-fit **jumps to 70 %
+    within 5 px, correctly grouped**. With Part 8's orbit op now implemented it
+    tags 34 % of bullets and rising; finishing Part 11 finishes Part 10.
 
 - **Verify** (`python -m sim.ecl.fit_motion`): per-group `p50 / p90` path error
   over 90 frames vs the recorded path, plus the aggregate coverage number. Bar
@@ -352,7 +346,7 @@ p90**. The remaining ~25 % is a hard tail, and its cause is structural:
 - **Fallback if a per-instruction group still won't fit:** a small piecewise
   state machine for that one type, not a project stall.
 
-### 11 · Trace-to-spawn alignment + difficulty coefficients · matcher built, blocked on Part 8
+### 11 · Trace-to-spawn alignment + difficulty coefficients · matcher built, 34 % tagged, refining
 
 `sim/ecl/align.py` matches each Part 9 bullet trace to the VM spawn that
 produced it: per phase it cross-correlates the two birth-rate histograms for the
@@ -361,22 +355,23 @@ signature greedily matches recorded births to VM spawns on
 `(|Δframe − offset|, Δposition, Δheading)`, tagging each trace with
 `(source_sub, source_ip)`.
 
-**What it proves** (`python -m sim.ecl.align`): where the VM places the emitter
-right, the match is clean — frame-lock **±0 median, std ~20 f** over a
-10 000-frame fight, tags **100 % instruction-pure**, and a Part 10 re-fit
-grouped by `(source, spawn_speed)` lands **70 % within 5 px** (and now
-*correctly* grouped, so the redirect tail is addressable).
+**Where it stands** (`python -m sim.ecl.align`): **34 % of bullets tagged**
+(was 20 % before the orbit op landed), dpos ~9 px, tags instruction-pure in the
+median. Where the frame-lock is well-defined it's tight (±0 median, std ~4 f on
+the boss-fired attacks); on **Table-Turning** it's loose (std ~60 f) because the
+pattern repeats every ~12 f, so bullet-level frame matching is ambiguous — but
+those bullets come from just two instructions told apart by speed, so the
+grouping Part 10 needs is still right.
 
-**What blocks it:** only ~20 % of bullets get tagged. Every Letty bullet is
-fired by an **orbiting sub-enemy**, and Part 8's movement system freezes those
-at their spawn point (`move_speed` / `move_acceleration` / `set_angle` /
-`set_orbit_distance` retarget are stubbed). The matcher can absorb a *constant*
-emitter-placement error but not an orbit. **Part 8 is the critical path now.**
+**Remaining refinement:**
 
-Also surfaced: the VM attaches a `bullet_effects(_,16,_,120,_,+0.0133)` to NS2's
-Sub41 icicles that the recording doesn't show (2 160 phantom-flagged spawns),
-and the Lingering Cold orb chain still over-fires (+18 %). Both are Part 5 bugs
-to fix once Part 8 gives a frame-level check.
+- **Table-Turning** — match at the *ring* level (each `bullet_circle` fires a
+  5–6-bullet ring whose centre is the orb) instead of bullet-by-bullet.
+- **Lingering Cold `Sub36`** — fires several bullet types on an RNG branch
+  (fx 0, fx 16 with −0.0208 or −0.025), and the orb chain still **over-fires
+  +18 %**. A Part 5 fix, now checkable frame-by-frame.
+- **NS2 `Sub41`** — was flagged for a phantom `bullet_effects`; the
+  `bullet_effects` enable-bit fix (Part 5) resolved that.
 
 **Then** the difficulty work:
 
@@ -432,13 +427,13 @@ Then `train_fight.py --sim ecl`.
 The crux risk was Part 9 — finding and hooking the bullet constructor. That's
 **gone**: per-frame polling + slot-identity tracking gets the same data
 (`sim/ecl/bullet_trace.py`), verified bit-exact against the recordings, no
-dynamic analysis. The live Stage-B risk is **Part 8's stubbed movement**: every
-Letty bullet comes from an orbiting sub-enemy, so the sub-enemy tracks have to
-be right before Parts 10/11 can finish. The recorded `enemies` array gives a
-frame-level target to verify each orb against — it's implementation work with a
-ground truth, not an open research question. Motion-model fit itself is in hand
-(~75 % within 5 px already; 70 % on the *correctly* grouped subset), with a
-small piecewise state machine as the fallback for any awkward type.
+dynamic analysis. The next risk was Part 8's sub-enemy movement — also **closed
+for Letty**: the orbit op came from TH08's documented equivalent and verifies
+against the recorded orb tracks, no disassembly. What's left is Part 11 matcher
+refinement (a bounded engineering task with the recordings as ground truth) and
+the Part 10 re-fit, which is already at ~75 % / 70 % on the correctly-grouped
+subset, with a small piecewise state machine as the fallback for any awkward
+type.
 
 ## Totals & risks
 
