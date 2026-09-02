@@ -311,12 +311,22 @@ class Enemy:
 
 
 class VM:
+    # DAT_0062f8a4 — the per-difficulty "rank coefficient" the bullet emitter
+    # blends with (fn410520 case 0x3f-0x47, non-spell only). It's a byte pulled
+    # from stage-descriptor +0x25 so the exact value isn't in code, but the
+    # emitter defaults (spd_aa=-0.5, spd_ab=+0.5) make the blend a symmetric
+    # ±0.5 px/f speed offset over coeff 0..32; Lunatic sits at the top.
+    RANK_COEFF = {0: 0, 1: 11, 2: 22, 3: 32, 4: 32}
+
     def __init__(self, ecl: ECLFile, difficulty: int = 3, rank: int | None = None,
-                 seed: int = 0, player: tuple[float, float, float] = (192.0, 400.0, 0.0)):
+                 seed: int = 0, player: tuple[float, float, float] = (192.0, 400.0, 0.0),
+                 rank_coeff: int | None = None):
         self.ecl = ecl
         self.difficulty = difficulty
         self.rank = difficulty if rank is None else rank
         self.rank_bit = 1 << difficulty
+        self.rank_coeff = (self.RANK_COEFF.get(difficulty, 16)
+                           if rank_coeff is None else rank_coeff)
         self.player_x, self.player_y, self.player_z = player
         self.seed = seed
         self.rng = EclRng(seed)
@@ -361,6 +371,12 @@ class VM:
 
     def boss(self) -> Enemy | None:
         return next((e for e in self.enemies if e.is_boss), None)
+
+    @property
+    def spell_active(self) -> bool:
+        """Engine global DAT_012fe0c8: a spellcard (any enemy's) is up. Gates the
+        shot-damage /7 divisor and disables non-spell bullet rank scaling."""
+        return any(e.spell is not None for e in self.enemies)
 
     # engine: once a sub-enemy has been on screen, it is despawned the frame it
     # leaves the play area (+ a sprite-sized margin) unless enemy_flag_oob_immune
@@ -441,6 +457,15 @@ class VM:
         btype = int(flags)
         aimed = mode in (0, 2, 4)
         k = "fan" if mode in (0, 1) else ("circle" if mode in (2, 3, 4, 5, 7) else "random")
+        # non-spell rank scaling (fn410520 `if DAT_012fe0c8 == 0`). Stage 1 never
+        # calls bullet_rank_influence (op 131) so nb/sh deltas are 0 (count and
+        # layers untouched) and speed gets a flat `coeff/32 - 0.5` offset, each
+        # floored at 0.3. Spellcards (LC, TT) are exempt.
+        if not self.spell_active and self.rank_coeff:
+            off = self.rank_coeff / 32.0 - 0.5
+            if spd1 != 0.0:
+                spd1 = max(0.3, spd1 + off)
+            spd2 = max(0.3, spd2 + off * 0.5)
         ox, oy, _oz = e.shoot_offset
         sx, sy = e.x + ox, e.y + oy
         aim = math.atan2(self.player_y - sy, self.player_x - sx) if aimed else 0.0
