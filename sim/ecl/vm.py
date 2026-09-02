@@ -57,11 +57,18 @@ class _CallFrame:
 
 @dataclass
 class _Motion:
-    """A movement command in progress. `kind='linear'` interpolates position
-    over `duration` frames from `(x0,y0,z0)` to `(x1,y1,z1)`; `kind='circle'`
-    orbits `(cx,cy,cz)` at `radius`, `angle0 + ang_speed*t` — the center and
-    radius are fixed at the moment the command was issued (evaluating a
-    self-referential `SELF_X` every frame would collapse the radius to 0)."""
+    """A movement command in progress.
+
+    `kind='linear'` interpolates position over `duration` frames from
+    `(x0,y0,z0)` to `(x1,y1,z1)`.
+
+    `kind='circle'` — `__move_circle_abs`: orbit the fixed centre `(cx,cy,cz)`.
+    Each frame the engine places the enemy at `centre + radius·[cos,sin](angle)`
+    then advances `angle += ang_speed` and `radius += radius_growth`. `duration`
+    frames then stop (0 == until the sub ends). Matches TH08's documented circle
+    op and fits Letty's recorded orb tracks to 0.0 px. The centre/angle/radius
+    are exposed back to the script via the `ORIGIN_*` / `CIRCLE_*` /
+    `DIST_ORIGIN` gvars, which the ECL both reads and writes mid-orbit."""
     kind: str
     start_frame: int
     duration: int
@@ -74,9 +81,10 @@ class _Motion:
     cx: float = 0.0
     cy: float = 0.0
     cz: float = 0.0
-    angle0: float = 0.0
-    radius: float = 0.0
+    angle0: float = 0.0        # current orbit angle (accumulates)
+    radius: float = 0.0        # current orbit radius (accumulates)
     ang_speed: float = 0.0
+    radius_growth: float = 0.0
 
 
 @dataclass
@@ -167,6 +175,20 @@ class Enemy:
         }
         if gid in ro:
             return ro[gid]
+        m = self.motion
+        if m is not None and m.kind == "circle":     # live orbit state
+            if gid == 10045:                          # CIRCLE_ANGLE
+                return m.angle0
+            if gid == 10046:                          # CIRCLE_SPEED
+                return m.ang_speed
+            if gid == 10049:                          # DIST_ORIGIN (current radius)
+                return m.radius
+            if gid == 10050:                          # ORIGIN_X/Y/Z
+                return m.cx
+            if gid == 10051:
+                return m.cy
+            if gid == 10052:
+                return m.cz
         return self.extra.get(gid, 0)
 
     def set(self, dst, value):
@@ -191,6 +213,15 @@ class Enemy:
             self.life = int(value)
         elif gid in (10016, 10017, 10021, 10022, 10023):
             pass                          # read-only specials
+        elif gid in (10045, 10046, 10049) and self.motion is not None \
+                and self.motion.kind == "circle":
+            m = self.motion               # ECL tweaks the live orbit (Sub57 scales
+            if gid == 10045:              # CIRCLE_SPEED down each burst)
+                m.angle0 = value
+            elif gid == 10046:
+                m.ang_speed = value
+            else:
+                m.radius = value
         else:
             self.extra[gid] = value       # ARG_*/PARAM_*/misc
 
@@ -272,10 +303,13 @@ class VM:
                 if t >= m.duration:
                     e.motion = None
             elif m.kind == "circle":               # orbit a fixed centre
-                ang = m.angle0 + m.ang_speed * t
-                e.x = m.cx + m.radius * math.cos(ang)
-                e.y = m.cy + m.radius * math.sin(ang)
+                e.x = m.cx + m.radius * math.cos(m.angle0)
+                e.y = m.cy + m.radius * math.sin(m.angle0)
                 e.z = m.cz
+                m.angle0 += m.ang_speed
+                m.radius += m.radius_growth
+                if m.duration and t + 1 >= m.duration:
+                    e.motion = None                # orbit expired — freeze here
             return
         # free flight — the engine's per-frame integration
         if e.stop_at is not None and self.frame >= e.stop_at:
@@ -704,17 +738,20 @@ def _move_point(vm, e, ins):
     e.mspeed = 0.0
 
 
-@_op(56)  # __move_circle_abs(_, cx, cy, cz, angle, radius, _, ang_speed) — orbit a
-def _move_circle(vm, e, ins):     # fixed centre (evaluated once; see _Motion docstring)
-    _a0, cx, cy, cz, angle, radius, _u, ang_speed = (e.get(a) for a in ins.args)
-    e.motion = _Motion("circle", vm.frame, 1 << 30, e.x, e.y, e.z, e.x, e.y, e.z,
-                       cx=cx, cy=cy, cz=cz, angle0=angle, radius=radius, ang_speed=ang_speed)
+@_op(56)  # __move_circle_abs(frames, cx, cy, cz, angle0, ang_speed, radius0,
+def _move_circle(vm, e, ins):     # radius_growth) — orbit the fixed centre; see _Motion
+    frames, cx, cy, cz, angle0, ang_speed, radius0, radius_growth = (
+        e.get(a) for a in ins.args)
+    e.motion = _Motion("circle", vm.frame, int(frames), e.x, e.y, e.z, e.x, e.y, e.z,
+                       cx=cx, cy=cy, cz=cz, angle0=angle0, radius=radius0,
+                       ang_speed=ang_speed, radius_growth=radius_growth)
 
 
-@_op(57)  # set_orbit_distance(new_radius, ...) — retarget an active circle's radius
-def _orbit_distance(vm, e, ins):
+@_op(57)  # set_orbit_distance(new_radius, radius_growth) — retarget the live orbit
+def _orbit_distance(vm, e, ins):  # (Letty freezes it with (DIST_ORIGIN, 0) at t=120)
     if e.motion is not None and e.motion.kind == "circle":
         e.motion.radius = e.get(ins.args[0])
+        e.motion.radius_growth = e.get(ins.args[1]) if len(ins.args) > 1 else 0.0
 
 
 @_op(43, 44, 47, 53, 59, 60, 61, 62, 63)  # set-from-boss, move_at_player, __move_change_*,

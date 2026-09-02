@@ -65,6 +65,62 @@ def _check(name: str, cond: bool, detail: str = "") -> bool:
     return cond
 
 
+def _unwrap(angles):
+    import numpy as np
+    return np.unwrap(np.asarray(angles, float))
+
+
+def _orbit_growth(tracks, centres):
+    """Median linear radius-growth (px/frame) across a set of orb tracks."""
+    import numpy as np
+    rates = []
+    for xy, c in zip(tracks, centres):
+        if len(xy) < 40:
+            continue
+        r = np.hypot(xy[:, 0] - c[0], xy[:, 1] - c[1])
+        dt = np.arange(len(r))
+        n = min(len(r), 120)
+        rates.append(np.polyfit(dt[:n], r[:n], 1)[0])
+    return float(np.median(rates)) if rates else float("nan")
+
+
+def _check_orbit_vs_recording(ecl: ECLFile, npz: Path) -> bool:
+    """VM Sub57 orbs and recorded Table-Turning orbs should spiral out at the
+    same rate (Letty's script says 0.5 px/frame)."""
+    import numpy as np
+    from .enemy_trace import load_enemy_traces
+
+    vm = VM(ecl, difficulty=3, seed=0)
+    vm.start_boss(sub=31, interrupt=0)
+    tracks: dict[int, list] = {}
+    births: dict[int, tuple] = {}
+    while vm.frame < 8600 and vm.boss() is not None:
+        vm.step()
+        for en in vm.enemies:
+            if en.is_boss or en.sub != 57:
+                continue
+            k = id(en)
+            if k not in tracks:
+                b = vm.boss()
+                births[k] = (b.x, b.y) if b else (192.0, 112.0)
+            tracks.setdefault(k, []).append((en.x, en.y))
+    vm_tracks = [np.array(v) for v in tracks.values() if len(v) >= 40]
+    vm_grow = _orbit_growth(vm_tracks, [births[k] for k, v in tracks.items() if len(v) >= 40])
+
+    d = np.load(npz)
+    f0 = int(d["bullets"][:, 0].min())
+    bo = d["boss"]
+    bomap = {int(s) - f0: (x, y) for s, x, y in bo}
+    rec = [t for t in load_enemy_traces(npz, jump_px=12)
+           if round(t.hb[0]) == 8 and 7900 <= t.birth_frame < 9500 and t.life >= 60]
+    rec_grow = _orbit_growth([t.xy for t in rec],
+                             [bomap.get(t.birth_frame, (192.0, 112.0)) for t in rec])
+
+    return _check("Sub57 orb spiral matches the recording",
+                  abs(vm_grow - rec_grow) < 0.12 and abs(rec_grow - 0.5) < 0.12,
+                  f"VM {vm_grow:.3f} vs recorded {rec_grow:.3f} px/f")
+
+
 def test_control_flow() -> bool:
     ok = True
 
@@ -187,22 +243,34 @@ def test_arithmetic() -> bool:
 
 def test_movement(ecl_path: Path) -> bool:
     ok = True
-
-    # orbit motion: radius stays constant, no NaN/blow-up
     ecl = parse_file(ecl_path)
+
+    # __move_circle_abs: a Sub57 orb spirals out from the boss — radius grows
+    # linearly, angle sweeps. Check the shape against a synthetic call with
+    # Letty's own parameters (radius0 0, growth 0.5, ang_speed 0.026).
     vm = VM(ecl, difficulty=3, seed=1)
-    e = Enemy(vm, 41, is_boss=False)          # Sub41 = NS1 icicle, orbits via __move_circle_abs
+    e = Enemy(vm, 100, is_boss=False)          # empty sub — just drive the motion
     e.x, e.y, e.z = 192.0, 112.0, 0.0
-    e.extra[10033], e.extra[10034] = 0.0, 40.0   # PARAM_R (angle), PARAM_S (radius)
     vm.enemies.append(e)
-    vm._run_enemy(e)
-    radii = []
-    for _ in range(90):                        # before set_orbit_distance retargets it at t=120
-        vm.step()
-        if e.motion is not None and e.motion.kind == "circle":
-            radii.append(math.hypot(e.x - e.motion.cx, e.y - e.motion.cy))
-    ok &= _check("orbit radius holds constant", bool(radii) and max(radii) - min(radii) < 1e-6,
-                 f"{radii[:3]}")
+    from .vm import _Motion
+    e.motion = _Motion("circle", 0, 320, e.x, e.y, e.z, e.x, e.y, e.z,
+                       cx=192.0, cy=112.0, cz=0.0, angle0=-math.pi / 2,
+                       radius=0.0, ang_speed=0.0262, radius_growth=0.5)
+    radii, angs = [], []
+    for _ in range(180):
+        vm._update_motion(e)
+        radii.append(math.hypot(e.x - 192.0, e.y - 112.0))
+        angs.append(math.atan2(e.y - 112.0, e.x - 192.0))
+    grow = (radii[120] - radii[20]) / 100.0
+    swept = math.degrees(abs(_unwrap(angs)[-1] - angs[0]))
+    ok &= _check("orbit spirals out at ~0.5 px/frame",
+                 abs(grow - 0.5) < 0.02, f"growth {grow:.3f} px/f")
+    ok &= _check("orbit sweeps its angle", swept > 90, f"{swept:.0f} deg over 180 f")
+
+    # ...and the shape matches a recorded Table-Turning orb to within a few px
+    recs = sorted(FIGHTS.glob("letty_*.npz"))
+    if recs:
+        ok &= _check_orbit_vs_recording(ecl, recs[0])
 
     # boss track vs a recording, aligned on the first bullet frame
     recs = sorted(FIGHTS.glob("letty_*.npz"))
