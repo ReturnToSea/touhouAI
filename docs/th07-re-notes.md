@@ -388,17 +388,31 @@ written") is solved: `PLAYER (0x4BDAD8) + 0xb7e70` is a **fixed global**
   option-deploy startup window, not modelled. `FUN_00420620` then hard-clamps to
   70/frame.
 
-**Unfocused, `power < 999` tier (max power):** 4 forward needles (dmg ~29, every
-5f, muzzle 0, x-offset ±8) = **23.2 HP/f lined up** + 8 homing amulets (dmg 5,
-every 15f, muzzle 1/2, type 1) = **2.7 HP/f from anywhere** → **~25.9 HP/f peak**.
-Lower tiers are weaker and it is a real breakpoint: `power < 128` (i.e. power
-96–127) is only 9 shots / **19.5 HP/f**; the 4th needle + the 7th/8th amulet
-appear only at full power. Focused `power < 999`: 3 centre needles (~31 ea/5f) +
-4 type-2 persuasion needles → 23.9 HP/f, all forward.
+**Full unfocused table** (needles type 0 land lined-up in x; amulets type 1 home):
 
-`sim/fight_replay.py`: `SHOT_DPS = 25.9`, `HOMING_FRAC = 0.10` (2.7/25.9),
-`LANE_HALF = 24`. A 1CC is full-power by the Stage-1 boss, so max power is the
-right model; `DPS_LO/HI = 0.55/1.0` randomisation covers real hit-rate < ceiling.
+| raw power | shots | lined HP/f | homing HP/f | needles |
+|---|---|---|---|---|
+| 0–7    | 3  | 10.5 | 0.9 | 1 ×48 |
+| 8–15   | 4  | 12.9 | 0.9 | 2 ×30 |
+| 16–31  | 4  | 13.9 | 1.9 | 2 ×30 |
+| 32–47  | 5  | 19.1 | 1.9 | 3 ×~29 |
+| 48–63  | 7  | 18.7 | 1.5 | 3 ×~29 |
+| 64–79  | 7  | 19.0 | 2.0 | 3 ×~29 |
+| 80–95  | 9  | 19.7 | 2.5 | 3 ×~29 |
+| 96–127 | 9  | 19.5 | 2.3 | 3 ×~29 |
+| 128    | 12 | 25.9 | 2.7 | 4 ×~29 |
+
+The big step is the 3rd needle at power 32; power 32→127 is otherwise a flat
+~19 HP/f plateau; the 4th needle only appears at full 128. Focused `power < 999`:
+3 centre needles (~31 ea/5f) + 4 type-2 persuasion needles → 23.9 HP/f, all
+forward.
+
+**Correction to the earlier "max power is the model" note:** a real Lunatic run
+reaches Letty at ~power 35 (our runs) up to ~105 (top replays) — 128 is never
+seen. `sim/fight_replay.py` samples raw power **uniformly in [10, 50]** per
+episode (`POWER_LO/HI`) and looks up that tier's `(lined, homing)` from
+`_PWR_LINED / _PWR_HOMING`; `SHOT_DPS = 19.1` / `HOMING_FRAC = 0.10` are now just
+references. `DPS_LO/HI = 0.7/1.0` = per-episode shot-connection rate on top.
 
 ### move_bounds + enemy_set_hitbox (Part 12 prep, 2026-09-01)
 

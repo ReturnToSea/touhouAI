@@ -70,6 +70,10 @@ def main():
                     help="replay = recorded fights; ecl = fresh ECL-VM danmaku "
                          "schedules (sim/danmaku_ecl.py), Letty only")
     ap.add_argument("--ecl-schedules", type=int, default=48)
+    ap.add_argument("--power-lo", type=float, default=None,
+                    help="raw power (0-128) sampled per episode; default 10-50 "
+                         "(a real Lunatic run hits Letty at ~35..105)")
+    ap.add_argument("--power-hi", type=float, default=None)
     args = ap.parse_args()
 
     dev = "cuda" if torch.cuda.is_available() else "cpu"
@@ -94,6 +98,10 @@ def main():
     # from NS1. (phase_start_mix can come back with annealing if phases 2+ starve.)
     ecl_kw = (dict(mirror=False, field_rot_deg=0.0, phase_start_mix=0.0)
               if args.sim == "ecl" else {})
+    if args.power_lo is not None:
+        ecl_kw["power_lo"] = args.power_lo
+    if args.power_hi is not None:
+        ecl_kw["power_hi"] = args.power_hi
     sim = FightSim(B=args.B, name=args.fight, device=dev, seed=args.seed,
                    max_frames=args.max_frames, recs=ecl_recs, **ecl_kw)
     ev_kw = {**ecl_kw, "phase_start_mix": 0.0}

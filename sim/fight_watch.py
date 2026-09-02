@@ -216,8 +216,9 @@ def main():
              (150, 150, 200) if armored else (210, 210, 220), small),
             (f"  best this session {best_reach:.0f}s", (170, 170, 180), small),
             ("  boss invulnerable" if armored else
-             "  SHOOT - lined up (full dmg)" if shooting else
-             f"  shoot - homing only ({HOMING_FRAC*100:.0f}%)" if shoot_bit else
+             f"  SHOOT - lined up ({float(sim.shot_dps[0]):.0f} HP/f, pow {float(sim.power[0]):.0f})"
+             if shooting else
+             f"  shoot - homing only ({float(sim.homing_frac[0])*100:.0f}%)" if shoot_bit else
              "  (not shooting)",
              (120, 120, 150) if armored else
              (255, 230, 90) if shooting else

@@ -52,28 +52,44 @@ ENEMY_BODY_SCALE = 2.0 / 3.0     # player-body vs enemy-body box (pytouhou)
 SPAWN_X_LO, SPAWN_X_HI = 40.0, 344.0
 SPAWN_Y_LO, SPAWN_Y_HI = 160.0, 420.0
 
-# synthetic damage-phasing (ReimuA at MAX POWER - a 1CC run is full-power by the
-# Stage-1 boss). Values are read straight from th07.exe's shot descriptor table
-# (`native/probe_shot_damage.py --dumponly`, unfocused `power < 999` tier):
-#   * 4 forward needles  dmg ~29 every 5f  -> 23.2 HP/f  (land only lined up in x)
-#   * 8 homing amulets   dmg   5 every 15f ->  2.7 HP/f  (home, land from anywhere)
-# so peak (camped) ~25.9 HP/f, homing-only ~2.7 HP/f.  FUN_0043d9e0 applies the
-# descriptor dmg raw, summed per frame; FUN_00420620 hard-clamps boss loss to
-# 70/frame.  (A situational /3 exists when player+0x16a20 != 0 - looks like the
-# option-deploy startup window - not modelled.)  Lower power is weaker: the
-# `power < 128` tier (power 96-127) is only ~19.5 HP/f.
-SHOT_DPS = 25.9                  # peak HP/frame, fully lined up, shoot held, max power
-#   re-measure: `.venv/Scripts/python native/probe_shot_damage.py --which 2 --dumponly`
+# synthetic damage-phasing (ReimuA).  Values are read straight from th07.exe's
+# shot descriptor table (`native/probe_shot_damage.py --which 2 --dumponly`),
+# which the engine walks by raw power (0-128) to pick a tier.  Per tier:
+# forward needles (type 0, every 5f) land only lined up in x; homing amulets
+# (type 1, every 15-30f) land from anywhere.  FUN_0043d9e0 sums descriptor+0x1c
+# per overlapping shot (no piercing); FUN_00420620 hard-clamps boss loss to
+# 70/frame.  (A situational /3 when player+0x16a20 != 0 - option-deploy startup
+# window - not modelled.)
+#
+#   raw power   lined HP/f  homing HP/f   needles     (tier boundary = shot upgrade)
+#     0-7          10.5        0.9        1 x48
+#     8-15         12.9        0.9        2 x30
+#     16-31        13.9        1.9        2 x30
+#     32-47        19.1        1.9        3 x~29    <- our runs sit ~here (power ~35)
+#     48-63        18.7        1.5        3 x~29
+#     64-95        ~19.3       ~2.2       3 x~29
+#     96-127       19.5        2.3        3 x~29
+#     128 (max)    25.9        2.7        4 x~29    <- top replays reach ~105, never 128
+#
+# A real Lunatic run reaches Letty at ~power 35 (us) .. ~105 (top replays), so
+# training samples raw power uniformly in [POWER_LO, POWER_HI] per episode and
+# derives that episode's lined / homing rate from the table.  Cross-check: a
+# drive-policy --shoot recording (`sim/measure_dps`) at power ~16-32 drains
+# ~11-13 HP/f effective (lands ~55% of frames); it can't cleanly split lined vs
+# homing (a moving policy leaves the x-lane in the ~8f a needle takes to land),
+# so the table is the authority on the split.
+POWER_LO, POWER_HI = 10.0, 50.0   # raw power (0-128) sampled per episode
+_PWR_THRESH = (8.0, 16.0, 32.0, 48.0, 64.0, 80.0, 96.0, 128.0)          # shot-upgrade steps
+_PWR_LINED  = (10.53, 12.93, 13.87, 19.07, 18.73, 19.00, 19.67, 19.47, 25.87)  # HP/f lined
+_PWR_HOMING = (0.93, 0.93, 1.87, 1.87, 1.53, 2.00, 2.47, 2.27, 2.67)           # HP/f homing
+SHOT_DPS = 19.1                  # reference (power ~35) - the real value is per-episode
+_SYNTH_DPS = 14.0               # only for recs with no phase_hp (the old replay path);
+#   ECL schedules carry real Part-7 thresholds so this is unused there
 DMG_CLAMP = 70.0                 # th07.exe FUN_00420620: boss HP loss is hard-
 #   clamped to 70/frame regardless of shot power (decompiled)
-HOMING_FRAC = 0.10              # 2.7 / 25.9 - fraction of DPS that lands regardless of x
+HOMING_FRAC = 0.10              # reference - the real value is per-episode from _PWR_*
 LANE_HALF = 24.0               # |px - boss_x| under this -> the forward needles land
 #   (needle muzzles are +-8 from player centre; Letty body half ~16)
-#   Cross-check: a drive-policy --shoot recording (`sim/measure_dps`) at power ~16
-#   drains ~10 HP/frame effective (damage lands ~55% of frames). It can't cleanly
-#   split lined vs homing - a moving policy leaves the x-lane in the ~8f a needle
-#   takes to land, so its "homing" bucket is mostly mis-tagged needle hits. The
-#   descriptor table above is the authoritative source for the split.
 
 # reward: "kill the boss, don't get hit". Terms:
 #   * SURV_REW / frame alive - a SMALL floor so the 60-70% of episodes that die
@@ -96,9 +112,10 @@ KILL_BONUS = 120.0           # reward += this on final-phase defeat
 FIELD_ROT_DEG = 10.0
 FIELD_ROT = np.radians(FIELD_ROT_DEG)
 CX, CY = 192.0, 192.0         # rotation centre (approx Letty's home position)
-DPS_LO, DPS_HI = 0.55, 1.0     # random damage multiplier - SHOT_DPS is now the
-#                               measured theoretical ceiling, so real effective
-#                               (travel time, hit-rate, boss motion) sits below it
+DPS_LO, DPS_HI = 0.7, 1.0      # per-episode shot-connection rate on top of the
+#                               per-power table: needle travel time (~8f), boss
+#                               drift, imperfect lane-holding. A camping policy
+#                               lands most needles; 0.7 is the pessimistic floor.
 NOPHASE_FRAC = 0.2            # fraction of episodes where shooting deals 0 damage
 #                               (pure survival - forces training on the full
 #                               phase, not just the part a fast kill skips)
@@ -193,9 +210,11 @@ def _mirror_rec(r):
 class FightSim:
     def __init__(self, B=8192, name="cirno", device="cuda", max_frames=11000,
                  min_start=0, seed=0, phase_start_mix=0.5, mirror=True,
-                 randomize=True, recs=None, field_rot_deg=FIELD_ROT_DEG):
+                 randomize=True, recs=None, field_rot_deg=FIELD_ROT_DEG,
+                 power_lo=POWER_LO, power_hi=POWER_HI):
         self.B, self.d = B, device
         self.randomize = randomize        # eval instance passes False (clean metric)
+        self.power_lo, self.power_hi = float(power_lo), float(power_hi)
         self._field_rot = np.radians(field_rot_deg)   # 0 for the ECL sim: fresh
         #   RNG per schedule already unmemorisable, and rotation distorts the
         #   real danmaku geometry + the aim-pool emitter frame
@@ -247,7 +266,7 @@ class FightSim:
                     fa = max(cs, min(fa, self.maxF - 3))
                     e = min(self.maxF - 2, max(fa + 1, e))
                     hp = (hp_real[j] if hp_real and j < len(hp_real)
-                          else SHOT_DPS * (e - fa) * KILL_FRAC)
+                          else _SYNTH_DPS * (e - fa) * KILL_FRAC)
                     self.ph[i, j] = torch.tensor([cs, fa, e, hp],
                                                  dtype=torch.float32)
         self.ph_cpu = self.ph.clone()
@@ -308,6 +327,15 @@ class FightSim:
             self._rot_sn = torch.zeros(self.B, 1, device=self.d)
             self.dps_mult = torch.ones(self.B, device=self.d)
             self.no_phase = torch.zeros(self.B, dtype=torch.bool, device=self.d)
+            # per-episode raw power (0-128) -> that tier's lined / homing rate
+            self._pwr_thr = torch.tensor(_PWR_THRESH, device=self.d)
+            self._pwr_lin = torch.tensor(_PWR_LINED, device=self.d)
+            self._pwr_hom = torch.tensor(_PWR_HOMING, device=self.d)
+            pw0 = torch.full((self.B,), (self.power_lo + self.power_hi) * 0.5, device=self.d)
+            self.power = pw0
+            ti0 = torch.bucketize(pw0, self._pwr_thr, right=True)
+            self.shot_dps = self._pwr_lin[ti0]
+            self.homing_frac = (self._pwr_hom[ti0] / self.shot_dps).clamp(0, 1)
             self.px = torch.full((self.B,), 192.0, device=self.d)
             self.py = torch.full((self.B,), 384.0, device=self.d)
             self._prev_bp = torch.zeros(self.B, POOL, 2, device=self.d)
@@ -333,6 +361,11 @@ class FightSim:
             self.field_rot[idx] = (torch.rand(k, device=self.d) * 2 - 1) * self._field_rot
             self.dps_mult[idx] = DPS_LO + (DPS_HI - DPS_LO) * torch.rand(k, device=self.d)
             self.no_phase[idx] = torch.rand(k, device=self.d) < NOPHASE_FRAC
+            pw = self.power_lo + (self.power_hi - self.power_lo) * torch.rand(k, device=self.d)
+            self.power[idx] = pw
+            ti = torch.bucketize(pw, self._pwr_thr, right=True)
+            self.shot_dps[idx] = self._pwr_lin[ti]
+            self.homing_frac[idx] = (self._pwr_hom[ti] / self.shot_dps[idx]).clamp(0, 1)
         self._rot_cs = torch.cos(self.field_rot)[:, None]
         self._rot_sn = torch.sin(self.field_rot)[:, None]
         return self._obs()
@@ -461,8 +494,9 @@ class FightSim:
             shoot_bit = (act >= 18) & ~armored & ~self.no_phase
             bx = self._boss_xy(f)[:, 0]                 # rotated boss x this frame
             aligned = (self.px - bx).abs() < LANE_HALF
-            dps = (SHOT_DPS * self.dps_mult *
-                   (HOMING_FRAC + (1.0 - HOMING_FRAC) * aligned.float()))
+            hf = self.homing_frac
+            dps = (self.shot_dps * self.dps_mult *
+                   (hf + (1.0 - hf) * aligned.float()))
             dmg = (dps * shoot_bit.float()).clamp(max=DMG_CLAMP)   # engine cap
             dmg = torch.minimum(dmg, self.boss_hp.clamp(min=0))
             self.boss_hp = self.boss_hp - dmg
