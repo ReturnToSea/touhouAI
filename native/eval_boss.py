@@ -70,9 +70,12 @@ def run_episode(env, pm, drive, test, which, mask, drive_budget=16000,
 
     s0 = env.h.s
     lives0 = s0.lives
-    b = boss_state(pm)
-    hp0 = b[2] if b else -1
-    hp_min = hp0
+    # boss HP reads garbage (~1) during the entrance/declaration before
+    # enemy_life_set runs - wait for it to land in a sane range so `dmg` means
+    # something. hp_max tracks the peak (it snaps UP on every phase transition).
+    hp0 = -1
+    hp_min = 1 << 30
+    hp_max = 0
     live_frame = None          # first frame the boss is actually attacking
     fstart, nf = step, 0
     while step < fstart + fight_budget:
@@ -90,17 +93,21 @@ def run_episode(env, pm, drive, test, which, mask, drive_budget=16000,
                 break
             continue
         nf = 0
-        if b[2] > 0:
+        if 500 < b[2] < 60000:          # sane HP reading (skip declaration junk)
+            if hp0 < 0:
+                hp0 = b[2]
             hp_min = min(hp_min, b[2])
+            hp_max = max(hp_max, b[2])
         if term or trunc:
             break
     s = env.h.s
     lead_in = ((live_frame or fstart) - fstart) / 60.0
     total = max(0.0, (step - fstart - nf) / 60.0)
+    dmg = max(0, hp_max - hp_min) if hp_max > 0 else 0
     return {"reached": True, "lead_in_s": lead_in, "total_s": total,
             "active_s": max(0.0, total - lead_in),
-            "hp0": hp0, "hp_min": hp_min,
-            "dmg": max(0, hp0 - hp_min) if hp0 > 0 else 0,
+            "hp0": (hp0 if hp0 > 0 else 0), "hp_min": (hp_min if hp_min < (1 << 29) else 0),
+            "hp_max": hp_max, "dmg": dmg,
             "lives0": lives0, "lives_end": s.lives, "stage_end": s.stage,
             "killed": nf > 90}
 
