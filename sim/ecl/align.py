@@ -19,13 +19,15 @@ This module matches the two, two ways:
 Each trace is tagged with `(source_sub, source_ip)`.
 
 **Status: ~75 % of bullets tagged, 100 % instruction-pure on the big groups.**
-The 1:1 matches sit on their emitter (dpos p50 ~9 px); the ring matches
-(Table-Turning `Sub57`, NS2 `Sub41`) are frame- and heading-locked but their
-VM emitter *position* is off by ~100-190 px — a Part 8 orbit-geometry gap, not a
-matching failure. A Part 10 re-fit grouped by `(source, source_ip, spawn_speed)`
-now lands **~84 % within 5 px / 90 f** over ~26 k bullets (was 78 % over 10 k),
-because the motion profile is fitted in the bullet's own frame regardless of
-where the VM put the emitter.
+The 1:1 matches sit on their emitter (dpos p50 ~9 px). The ring matches
+(Table-Turning `Sub57`, NS2 `Sub41`) are frame- and heading-locked (dframe std
+4-6 f) but their VM emitter *position* is ~100-190 px off — not a matching
+failure and no longer a Part 8 bug (the orbit shape now tracks the recordings to
+~5 px): those orbs spawn on the boss, and the boss's Table-Turning drift is
+RNG-driven, so the VM and the recording diverge exactly as Part 6 established.
+A Part 10 re-fit grouped by `(source, source_ip, spawn_speed)` lands **~84 %
+within 5 px / 90 f** over ~26 k bullets (was 78 % over 10 k) — the motion profile
+is fitted in the bullet's own frame, independent of the emitter position.
 
 Still loose: Lingering Cold `Sub36` (56 % pure — it fires several bullet types
 on an RNG branch, expected) and its orb chain over-fires ~+16 %.
@@ -264,9 +266,9 @@ def _match_group_rings(trs: list[Bullet], cand: list[tuple[int, BulletSpawn]],
                 continue
             taken[k] = True
             j_sp, s = vr[k]
-            dp_px = float(np.hypot(s.x - t.xy[0, 0], s.y - t.xy[0, 1]))
+            dpx = float(np.hypot(s.x - t.xy[0, 0], s.y - t.xy[0, 1]))
             out.append((t.id, j_sp, s.source_sub, s.source_ip,
-                        float(t.birth_frame - (s.frame + off0)), dp_px, float(da[k])))
+                        float(t.birth_frame - (s.frame + off0)), dpx, float(da[k])))
     return out
 
 
@@ -390,8 +392,8 @@ def verify(npz_paths: list[str]) -> bool:
     print(f"\n  tagged {_fmt_pct(len(matches) / n)} of bullets   "
           f"frame-lock median {np.median(dfr_all):+.0f} std {dfr_all.std():.0f}")
     print(f"  1:1 matches: dpos p50 {np.median(dp11):.1f}px    "
-          f"ring matches: instruction+frame+heading locked, emitter position is "
-          f"a Part 8 gap")
+          f"ring matches: instruction+frame+heading locked, emitter position "
+          f"follows the RNG-driven boss drift")
 
     # PASS = we tag a real fraction, the per-instruction tags are pure (Sub36
     #        legitimately fires several bullet types on an RNG branch, a low

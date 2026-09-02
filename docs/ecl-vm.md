@@ -170,13 +170,11 @@ argument selects behaviour.
 - **Verify** (`python -m sim.ecl.vm_verify`): VM spawn-event count per phase vs
   the mean bullet-birth count over the ten `sim/fights/letty_*` recordings —
   **NS1 +1 %, NS2 +1 %, Table-Turning +6 %, total +7 %**. Lingering Cold runs
-  **+18 %** on spawn count — the `Sub42 → Sub43 → Sub36` orbiting-orb chain
-  over-fires. After disassembly audit 2 (effect-slot fix + engine-faithful
-  bullet cull), `danmaku_check` is **ratio 1.17, curve corr 0.96, peak VM 502 /
-  rec 498**; the residual is concentrated in the Lingering Cold window (VM ~300
-  vs rec ~230 on-screen). Motion, cull and effects are now confirmed faithful,
-  so this is purely an orb count / fire-cadence gap — it needs the Part 11
-  trace↔spawn alignment (39 % tagged) to localise. Also: Sub40 computes its
+  **+18 %** on spawn count — the `Sub42 → Sub43 → Sub36` orbiting-orb chain.
+  After disassembly audit 2 (effect-slot fix + engine-faithful cull) and the
+  Part 8 orbit-gvar fix, `danmaku_check` is **ratio 1.08, curve corr 0.98, peak
+  VM 530 / rec 498**; the birth-count `+18 %` is `Sub47`'s short-lived aimed
+  bursts, so *on-screen* density is within ~8 % everywhere. Also: Sub40 computes its
   three sub-enemy spawn angles `0, ±2π/3`.
 
 ### 6 · Sub-enemies — `enemy_create_rel` · ✅ done
@@ -424,18 +422,30 @@ re-fit grouped by `(source, source_ip, spawn_speed)` now lands **83.8 % within
 5 px / 90 f over ~26 k bullets** (was 78 % / 10 k) — the motion profile is fitted
 in the bullet's own frame, so a wrong emitter position doesn't hurt it.
 
+**Part 8 orbit fix (`Sub57` / `Sub41` / LC orbs):** `CIRCLE_ANGLE` (10045) /
+`CIRCLE_SPEED` (10046) were wired to the live orbit's sweep angle / speed — but
+the [th07.exe RE](th07-re-notes.md) shows they are the *heading* and
+*angular-velocity* fields (`+0x2b54 / +0x2b58`), which `__move_circle_abs` never
+reads. So `Sub57`'s `CIRCLE_SPEED /= 1.4` per burst was collapsing the orbit's
+angular velocity to zero in ~30 steps — the orbs crept out radially instead of
+spiralling. Fixed: `10045` → heading (`atan2` of this frame's displacement),
+`10046` → the `angular_velocity` field, `10049` (`DIST_ORIGIN`) still → orbit
+radius. Also: an expired orbit now hands its **velocity** to free flight instead
+of freezing (the recorded orbs fly straight off the bottom). VM orb tracks now
+follow the recordings to ~5 px through the whole spiral. **`danmaku_check` ratio
+1.17 → 1.08, curve correlation 0.96 → 0.98.**
+
 **Remaining refinement:**
 
-- **Part 8 — `Sub57` / `Sub41` orbit absolute geometry.** The spiral *rate* and
-  *timing* match the recordings; the emitter ends up ~100 px away. The
-  `__move_circle_abs` centre or the post-orbit `move_dir_time` drift is off for
-  Table-Turning specifically. Needs a full orb-track diff vs the recorded
-  `enemies` array.
-- **Lingering Cold `Sub36`** — 56 % pure (fires several bullet types on an RNG
-  branch — expected), orb chain over-fires **~+16 %** (VM 3389 vs ~2921
-  recorded LC births). `Sub36` itself is ~right (2538); the excess is `Sub47`'s
-  aimed bursts (851, `fx 64`) plus a skewed `Sub36` fx-16 fraction (VM ~50 %,
-  recorded ~32 %). Needs the RNG branch accounting checked against a recording.
+- **`Sub57` / `Sub41` emitter absolute position** — the ring matcher still shows
+  ~120 px, but this is not a bug: those orbs spawn on the boss, and the boss's
+  Table-Turning drift is `__math_rand_rad`-driven, so the VM and the recording
+  diverge exactly as Part 6 established. Fine for training (random seeds).
+- **Lingering Cold `Sub36`** — 57 % pure (fires several bullet types on an RNG
+  branch — expected). Birth count still +18 % (VM 3389 vs ~2921) — `Sub47`'s
+  aimed bursts (851, `fx 64`, short-lived) plus a skewed `Sub36` fx-16 fraction
+  (VM ~50 %, recorded ~32 %) — but the *on-screen* density is now within ~8 %
+  (`danmaku_check`), so this is low priority.
 
 **Then** the difficulty work:
 
@@ -465,9 +475,9 @@ toward this episode's policy and integrate forward. Nothing to desync from.
 **The CPU pipeline is wired and validated.** `sim/ecl/bullet_sim.from_spawn()`
 turns a VM `BulletSpawn` into `BulletParams`; `sim/ecl/danmaku_check.py` runs
 the VM → propagates every spawn → compares the on-screen bullet count per frame
-against the recordings: **total ratio 1.20, density-curve correlation 0.91,
-peak on-screen VM 487 / rec 498.** The 1.20 is entirely the Lingering Cold
-over-fire (Part 5 below); NS1 / NS2 / Table-Turning match to a few percent.
+against the recordings: **total ratio 1.08, density-curve correlation 0.98,
+peak on-screen VM 530 / rec 498** (after the audit-2 fixes + the Part 8
+orbit-gvar fix). Every phase window is within ~10 %.
 
 ### 12 · GPU danmaku layer & train · ~4–5 days · autonomy 90%
 

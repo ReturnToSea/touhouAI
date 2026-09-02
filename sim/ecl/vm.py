@@ -67,11 +67,14 @@ class _Motion:
 
     `kind='circle'` — `__move_circle_abs`: orbit the fixed centre `(cx,cy,cz)`.
     Each frame the engine places the enemy at `centre + radius·[cos,sin](angle)`
-    then advances `angle += ang_speed` and `radius += radius_growth`. `duration`
-    frames then stop (0 == until the sub ends). Matches TH08's documented circle
-    op and fits Letty's recorded orb tracks to 0.0 px. The centre/angle/radius
-    are exposed back to the script via the `ORIGIN_*` / `CIRCLE_*` /
-    `DIST_ORIGIN` gvars, which the ECL both reads and writes mid-orbit."""
+    then advances `angle += ang_speed` and `radius += radius_growth`. After
+    `duration` frames (0 == until the sub ends) the orbit ends and the enemy
+    keeps its current *velocity* (tangential + radial) as free flight — it does
+    NOT freeze; the recorded Table-Turning orbs fly straight off the bottom.
+    The orbit centre and current radius are exposed via `ORIGIN_*` /
+    `DIST_ORIGIN`; `CIRCLE_ANGLE` / `CIRCLE_SPEED` are the *heading* and
+    *angular-velocity* fields (+0x2b54/58), separate from the orbit's own sweep
+    — so Sub57's `CIRCLE_SPEED /= 1.4` per burst does not touch the orbit."""
     kind: str
     start_frame: int
     duration: int
@@ -171,6 +174,8 @@ class Enemy:
         self.mangle = 0.0
         self.maccel = 0.0
         self.mangvel = 0.0
+        self.vel_x = 0.0                            # this frame's displacement — the
+        self.vel_y = 0.0                            # engine's `CIRCLE_ANGLE` (+0x2b54)
         self.stop_at: int | None = None             # frame to zero `mspeed` (move_dir_time duration)
         self.move_bounds = (0.0, 0.0, 384.0, 448.0)  # move_bounds_set: (xmin, ymin, xmax, ymax)
 
@@ -204,15 +209,20 @@ class Enemy:
         }
         if gid in ro:
             return ro[gid]
+        # movement-reflection gvars (th07.exe: +0x2b54/58/6c/8c). CIRCLE_ANGLE is
+        # the enemy's *heading* (atan2 of this frame's displacement) — NOT the
+        # orbit's internal sweep angle; CIRCLE_SPEED is the `angular_velocity`
+        # field, which `__move_circle_abs` does not read (so Sub57's
+        # `CIRCLE_SPEED /= 1.4` per burst leaves the orbit untouched).
+        if gid == 10045:                             # CIRCLE_ANGLE  (+0x2b54)
+            return math.atan2(self.vel_y, self.vel_x)
+        if gid == 10046:                             # CIRCLE_SPEED  (+0x2b58)
+            return self.mangvel
         m = self.motion
         if m is not None and m.kind == "circle":     # live orbit state
-            if gid == 10045:                          # CIRCLE_ANGLE
-                return m.angle0
-            if gid == 10046:                          # CIRCLE_SPEED
-                return m.ang_speed
-            if gid == 10049:                          # DIST_ORIGIN (current radius)
+            if gid == 10049:                          # DIST_ORIGIN — orbit radius
                 return m.radius
-            if gid == 10050:                          # ORIGIN_X/Y/Z
+            if gid == 10050:                          # ORIGIN_X/Y/Z — orbit centre
                 return m.cx
             if gid == 10051:
                 return m.cy
@@ -242,15 +252,14 @@ class Enemy:
             self.life = int(value)
         elif gid in (10016, 10017, 10021, 10022, 10023):
             pass                          # read-only specials
-        elif gid in (10045, 10046, 10049) and self.motion is not None \
+        elif gid == 10045:                # CIRCLE_ANGLE — the heading field
+            self.mangle = float(value)
+        elif gid == 10046:                # CIRCLE_SPEED — angular_velocity field;
+            self.mangvel = float(value)   #   Sub57's `/= 1.4` per burst lands here,
+            #                                 harmless to an active __move_circle_abs
+        elif gid == 10049 and self.motion is not None \
                 and self.motion.kind == "circle":
-            m = self.motion               # ECL tweaks the live orbit (Sub57 scales
-            if gid == 10045:              # CIRCLE_SPEED down each burst)
-                m.angle0 = value
-            elif gid == 10046:
-                m.ang_speed = value
-            else:
-                m.radius = value
+            self.motion.radius = value    # DIST_ORIGIN — retarget the live orbit
         else:
             self.extra[gid] = value       # ARG_*/PARAM_*/misc
 
@@ -322,6 +331,7 @@ class VM:
         return next((e for e in self.enemies if e.is_boss), None)
 
     def _update_motion(self, e: Enemy) -> None:
+        px, py = e.x, e.y
         m = e.motion
         if m is not None:
             t = self.frame - m.start_frame
@@ -340,16 +350,24 @@ class VM:
                 m.angle0 += m.ang_speed
                 m.radius += m.radius_growth
                 if m.duration and t + 1 >= m.duration:
-                    e.motion = None                # orbit expired — freeze here
-            return
-        # free flight — the engine's per-frame integration
-        if e.stop_at is not None and self.frame >= e.stop_at:
-            e.mspeed, e.stop_at = 0.0, None
-        e.mspeed += e.maccel
-        e.mangle += e.mangvel
-        if e.mspeed:
-            e.x += e.mspeed * math.cos(e.mangle)
-            e.y += e.mspeed * math.sin(e.mangle)
+                    # orbit expires -> the engine keeps the enemy's *velocity*
+                    # (tangential + radial), it does not freeze. Hand it to
+                    # free-flight as speed + heading.
+                    vx, vy = e.x - px, e.y - py
+                    e.mspeed = math.hypot(vx, vy)
+                    e.mangle = math.atan2(vy, vx) if e.mspeed else e.mangle
+                    e.maccel = e.mangvel = 0.0
+                    e.motion = None
+        else:
+            # free flight — the engine's per-frame integration
+            if e.stop_at is not None and self.frame >= e.stop_at:
+                e.mspeed, e.stop_at = 0.0, None
+            e.mspeed += e.maccel
+            e.mangle += e.mangvel
+            if e.mspeed:
+                e.x += e.mspeed * math.cos(e.mangle)
+                e.y += e.mspeed * math.sin(e.mangle)
+        e.vel_x, e.vel_y = e.x - px, e.y - py
 
     # -- Part 5: bullet spawning & sub-enemies ---------------------------
     def _emit_bullets(self, e: Enemy, kind: str, args: list, source_ip: int = -1) -> None:

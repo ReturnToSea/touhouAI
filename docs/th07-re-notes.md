@@ -301,3 +301,25 @@ phase-machine / bullet-update functions in `decomp_all.c`. Everything below was
 `enemy_create_rel` *timing*, which needs the Part 11 trace↔spawn alignment to
 pin down (align is only 39 % tagged). Motion + cull + effects are confirmed
 faithful, so the residual is purely spawn scheduling.
+
+### Movement-reflection gvars (from this audit, applied 2026-09-01)
+
+The float-read switch in `FUN_004182d0`-ish (gvar getter) maps, per enemy struct:
+
+| gvar | id | offset | meaning |
+|---|---|---|---|
+| `CIRCLE_ANGLE` | 10045 | `+0x2b54` | the enemy's **heading** — `atan2` of this frame's displacement, rewritten every frame |
+| `CIRCLE_SPEED` | 10046 | `+0x2b58` | the **`angular_velocity`** field (`move_angular_velocity` op 48 target) |
+| `DIST_ORIGIN` | 10049 | `+0x2b6c` | the orbit **radius** (shared with `__move_circle_abs`) |
+| `ORIGIN_X/Y/Z` | 10050-52 | `+0x2b8c…` | the orbit **centre** |
+| — | 10053/54 | `+0x2b5c / +0x2b60` | the orbit's *own* sweep angle / ang-speed (the integrator at `FUN_...+6746` reads these) |
+
+So `CIRCLE_ANGLE` / `CIRCLE_SPEED` are **not** the orbit's internal state —
+`__move_circle_abs` keeps its own `angle` / `ang_speed` at `+0x2b5c / +0x2b60`
+and never reads `10045` / `10046`. `Sub57`'s `CIRCLE_SPEED /= 1.4` per burst
+therefore lands on the unused `angular_velocity` field and leaves the spiral
+untouched — matching the recording (constant `0.0262` rad/f for 320 f). The VM
+had wired `10045/46` straight to the live `_Motion`, which collapsed the orbit;
+fixed. The orbit-expiry behaviour was also wrong (froze; the engine keeps the
+velocity — the recorded orbs fly straight off the bottom). `danmaku_check`
+1.17 → **1.08**, corr 0.96 → **0.98**.
