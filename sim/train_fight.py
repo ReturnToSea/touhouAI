@@ -89,14 +89,17 @@ def main():
         ecl_eval_recs = build_schedules(8, seed0=10_000)   # held-out seeds
         args.fight = "letty"
 
-    # ECL sim: no x-mirror, no field rotation -- each schedule is already a
-    # fresh RNG roll, and both augments distort the real geometry / aim frame
-    ecl_kw = dict(mirror=False, field_rot_deg=0.0) if args.sim == "ecl" else {}
+    # ECL sim: no x-mirror, no field rotation (each schedule is already a fresh
+    # RNG roll), no mid-fight phase starts for now -- every episode is a real run
+    # from NS1. (phase_start_mix can come back with annealing if phases 2+ starve.)
+    ecl_kw = (dict(mirror=False, field_rot_deg=0.0, phase_start_mix=0.0)
+              if args.sim == "ecl" else {})
     sim = FightSim(B=args.B, name=args.fight, device=dev, seed=args.seed,
                    max_frames=args.max_frames, recs=ecl_recs, **ecl_kw)
+    ev_kw = {**ecl_kw, "phase_start_mix": 0.0}
     ev = FightSim(B=1024, name=args.fight, device=dev, seed=args.seed + 999,
-                  max_frames=args.max_frames, phase_start_mix=0.0,
-                  randomize=False, recs=ecl_eval_recs, **ecl_kw)   # clean phase-0
+                  max_frames=args.max_frames,
+                  randomize=False, recs=ecl_eval_recs, **ev_kw)   # clean phase-0
     if args.sim != "ecl":                        # replay: eval shares the training
         for k in ("pos", "bhalf", "boss", "en"):  # data (identical) to save memory;
             setattr(ev, k, getattr(sim, k))       # ecl eval uses held-out seeds
@@ -147,12 +150,7 @@ def main():
     hist = []
     best_score = -1e9
 
-    psm0 = sim.phase_start_mix
     while total < args.steps:
-        # anneal the mid-fight phase-start curriculum to 0 over the first 70% of
-        # training: phases 2+ get signal early, the final policy trains on real
-        # NS1-start runs
-        sim.phase_start_mix = float(max(0.0, psm0 * (1.0 - total / (0.7 * args.steps))))
         for t in range(T):
             with torch.no_grad():
                 lg = ac.actor(obs); v = ac.critic(obs).squeeze(-1)
