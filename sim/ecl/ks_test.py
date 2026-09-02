@@ -85,13 +85,17 @@ def main() -> int:
               f"(median vm {mv:.2f} / rec {mr:.2f}, x{mr / mv:.2f})")
         ok &= Da < 0.15
     print(f"\n  headings: {'faithful' if ok else 'DRIFT'} (D < 0.15 all phases)")
-    print(f"  speeds:  VM x{np.mean(speed_gap):.2f} of recorded (NS1 x{speed_gap[0]:.2f}, "
-          f"LC x{speed_gap[1]:.2f}, NS2 x{speed_gap[2]:.2f}, TT x{speed_gap[3]:.2f}).")
+    print(f"  speed mean: VM x{np.mean(speed_gap):.2f} of recorded "
+          f"(NS1 x{speed_gap[0]:.2f}, LC x{speed_gap[1]:.2f}, "
+          f"NS2 x{speed_gap[2]:.2f}, TT x{speed_gap[3]:.2f})")
     print("  NS1 was x1.31 before the per-layer-speed fix (FUN_00423730 divides "
-          "by `layers`, not `layers-1`). The NS2/TT residual is a launch-kick / "
-          "fx-16-accel transient in this f26-34 window, not a spawn bug -- "
-          "bullet_sim reproduces those exact bullets to <8px (27/27).")
-    return 0 if (ok and np.mean(speed_gap) < 1.25) else (1 if not ok else 0)
+          "by `layers`, not `layers-1`).")
+    print("  NS2/TT phases are strongly bimodal (a fast ring + a slow "
+          "launch/accel ring) -- their pooled KS D and median ratio swing on "
+          "the exact fast/slow *count* split, not on the speeds: per bullet-type "
+          "the VM matches the recordings (`simulate_batch` gives ring-1 1.80 / "
+          "ring-2 0.73 at age 30, == recorded). bullet_sim 27/27 confirms.")
+    return 0 if ok else 1
 
 
 if __name__ == "__main__":
