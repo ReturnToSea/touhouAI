@@ -367,7 +367,8 @@ class VM:
             idx = i % max(1, count)
             if k == "random":
                 ang = self.rng.rand_range(lo, hi)      # fresh direction per bullet
-                sp = spd1 + spd2 * self.rng.rand()     # spd2 is the speed variance
+                sp = self.rng.rand_range(spd2, spd1)   # uniform [spd2, spd1] — matches
+                #   FUN_00423730 mode 7/8 and the recorded NS2-icicle speed spread
             elif k == "circle":
                 ang = base + (2 * math.pi) * idx / max(1, count)
                 sp = spd1 + (spd2 - spd1) * (layer / max(1, layers - 1) if layers > 1 else 0)
