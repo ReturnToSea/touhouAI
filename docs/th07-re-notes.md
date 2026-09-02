@@ -106,18 +106,76 @@ Each frame, for each entry, the engine applies it **only if
 confirmed here): an entry with `flag == 0` in `FUN_00424290` falls through
 without applying.
 
-### Bullet-pattern angle/speed math (`FUN_00423730`, `mode` = param `+0xC0`)
+### Bullet-pattern angle/speed math (`FUN_00423730`, `mode` = emitter `+0xC0`)
 
-Confirms the VM's `_emit_bullets`:
+`FUN_00424d20` loops `for layer in [0,layers): for i in [0,count): FUN_00423730(emitter, i, layer, aim)`.
+Emitter field map (short* index → byte): `+0xBC`=count, `+0xBE`=layers, `+0xC0`=mode,
+`+0xC4`=bullet-type flags; float `+0x10`=base_angle, `+0x14`=span, `+0x18`=spd1, `+0x1C`=spd2.
+`aim` = `atan2(player − muzzle)` computed once by the wrapper. Verified against
+the decomp `switch(*(short*)(emitter+0xC0))` and implemented literally in the
+VM's `_emit_bullets` (commit: "implement all 9 bullet emitter modes"):
 
-- mode 0/1 — fan: `angle = base + step·(i − (n−1)/2)`  (+ aim toward player if mode 0)
-- mode 2/3 — ring: `angle = base + i·2π/n`  (+ layer term; + aim if mode 2)
-- mode 4/5 — ring offset by `π/n`
-- mode 6 — random angle in `[step, base)`
-- mode 7 — random speed in `[spd2, spd1)`
-- mode 8 — random both
+- mode 0/1 — fan. `count & 1` (the count field, **not** the type flags) picks
+  centering: odd → `0, ±span, ±2span…`; even → `±0.5span, ±1.5span…`. Sign flips
+  on odd `i`. `+ aim` only for mode 0. Then `+ base_angle`.
+- mode 2/3 — ring: `angle = aim + layer·span + base + i·2π/count`. The
+  `layer·span` term (case 3) was missing — layered rings all fired one angle set.
+- mode 4/5 — offset ring: `aim + i·2π/count + π/count + base`. **No** `layer·span`
+  (case 5 has no such term). Was aliased onto plain ring, losing the half-step.
+- mode 6 — `angle = rand·(base − span) + span`; speed = per-layer structured.
+- mode 7 — structured ring (with `layer·span`); `speed = rand·(spd1 − spd2) + spd2`.
+- mode 8 — both random.
 
-Speed: `layers < 2` → `spd1`; else `spd1 − (spd1 − spd2)·layer/layers`.
+RNG draws per bullet: 0 (modes 0–5), 1 (6, 7), 2 (8) — matches the engine so the
+PRNG stream stays in sync.
+
+Speed: `layers < 2` → `spd1`; else `spd1 − (spd1 − spd2)·layer/layers` (divisor
+`layers`, not `layers−1`).
+
+### Non-spell rank scaling (`fn410520` cases 0x3f–0x47, `if DAT_012fe0c8 == 0`)
+
+After the emitter fields are set, and **only when no spellcard is up**
+(`DAT_012fe0c8 == 0`), the handler blends in difficulty:
+
+```
+count  += ((nb_b - nb_a) * coeff) >> 5 + nb_a ; count  = max(1, count)
+layers += ((sh_b - sh_a) * coeff) >> 5 + sh_a ; layers = max(1, layers)
+if spd1 != 0: spd1 += ((spd_ab - spd_aa) * coeff)/32 + spd_aa ; if spd1 < 0.3: spd1 = 0.3
+spd2 += (((spd_ab - spd_aa) * coeff)/32 + spd_aa) / 2 ;          if spd2 < 0.3: spd2 = 0.3
+```
+
+`coeff` = `DAT_0062f8a4`, a byte read from stage-descriptor `+0x25`
+(`FUN_00...` line 29400) — **not a code constant**, so the Lunatic value isn't
+directly recoverable. `nb_a/nb_b` (`+0x2BB0/2`), `sh_a/sh_b` (`+0x2BB4/6`),
+`spd_aa/spd_ab` (`+0x2BA8/AC`) are set by **op 131 `bullet_rank_influence`**
+(dispatch `case 0x82`), which reset to defaults `spd_aa=-0.5, spd_ab=+0.5,
+nb=sh=0` on every phase/spell change (decomp 13351–13356). **Stage 1's ECL never
+calls op 131** (0 uses in `ecldata1.ecl`; 85 uses across stages 2–6), so for
+Letty: count/layers untouched, speeds get a flat `coeff/32 − 0.5` offset.
+
+The default fields describe a symmetric ±0.5 px/f blend over `coeff` 0..32, so
+Lunatic = 32 (`+0.5` on spd1, `+0.25` on spd2). This is what `VM.RANK_COEFF[3]`
+uses; it takes `danmaku_check`'s NS2 window from +13 % to −3 % and the overall
+on-screen ratio from 1.07 to 1.03. `VM.spell_active` (any enemy has a spellcard)
+gates it so Table-Turning / Lingering Cold orbs are exempt.
+
+### `enemy_flag_collision` (op 102, dispatch `case 0x65`)
+
+Sets flag byte `+0x2E29` bit 1 to `arg0 & 1`. The player-collision test
+(decomp 13747) needs bit 0 (enemy live) **and** bit 1 **and** a non-degenerate
+hitbox. Default is set. Letty's LC emitter orb (Sub43) clears it → harmless;
+NS2/TT orbs (Sub41/57) leave it → lethal. VM: `Enemy.collidable`, used by the
+`danmaku_ecl` lethal-orb filter in place of the old `hitbox[0] > 0.5` heuristic.
+
+### `FX_PAUSE_REDIR` / `FX_PAUSE_AIM` decel (pytouhou `bullet.pyx` 197–222, TH06)
+
+The speed interpolator is armed as `cur → 0` over `[t0, t0 + interval − 1]`, so
+the per-frame factor is `1 − ctr/(interval − 1)` and speed reaches exactly 0 on
+the last decel frame — not `/interval`. Applied to `bullet_sim.simulate`,
+`simulate_batch`, and `aim_pool`. (TH07's off-screen handling for these flags is
+a 128-frame grace counter — `FUN_00425a50`, `+0xBFE` up to 0x80 — **not**
+pytouhou's full `flags &= ~448` exemption; the baked `cull_frame` already models
+the 128f grace.)
 
 ## Enemy movement (Part 8)
 
