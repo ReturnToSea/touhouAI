@@ -211,10 +211,11 @@ class FightSim:
     def __init__(self, B=8192, name="cirno", device="cuda", max_frames=11000,
                  min_start=0, seed=0, phase_start_mix=0.5, mirror=True,
                  randomize=True, recs=None, field_rot_deg=FIELD_ROT_DEG,
-                 power_lo=POWER_LO, power_hi=POWER_HI):
+                 power_lo=POWER_LO, power_hi=POWER_HI, immortal=False):
         self.B, self.d = B, device
         self.randomize = randomize        # eval instance passes False (clean metric)
         self.power_lo, self.power_hi = float(power_lo), float(power_hi)
+        self.immortal = immortal          # viz only: bullets/bodies don't end the run
         self._field_rot = np.radians(field_rot_deg)   # 0 for the ECL sim: fresh
         #   RNG per schedule already unmemorisable, and rotation distorts the
         #   real danmaku geometry + the aim-pool emitter frame
@@ -472,6 +473,9 @@ class FightSim:
         er = en[..., 2] + PLAYER_HB                              # [B, MAX_EN]
         hit_e = (en_a & (erel[..., 0] < er) & (erel[..., 1] < er)).any(dim=1)
         hit = hit_b | hit_e
+        self.last_hit = hit                # viz reads this for a hit flash
+        if self.immortal:
+            hit = torch.zeros_like(hit)
 
         ended = (self.t0 + self.t) >= (self.rec_len_gpu[self.rec_id] - 2)
         rew = SURV_REW - HIT_PEN * hit.float()
