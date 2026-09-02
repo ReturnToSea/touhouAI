@@ -63,11 +63,12 @@ typically ~8–16 frames). When the anim completes → `state = 1`, full velocit
 
 **Net effect:** the bullet is placed 4 velocity-steps *behind* its nominal spawn
 point and crawls forward at ⅓–½ speed for the anim's duration — covering exactly
-those 4 steps — then releases at full speed from the nominal point. A visible
-~8–16-frame "charge" with **no speed spike above base**. The earlier Part 10
-measurement that looked like "hover then launch at 4×" was reading the `speed`
-field (`+0xBB0`, unchanged) while the *actual* displacement ramped from ~0.4× to
-1×.
+those 4 steps — then releases from the nominal point. The `speed` field
+(`+0xBB0`) never changes during the hang; the *actual* displacement is
+`vel · ratio`.
+
+The visible "launch" that looks like a spike above base is a **separate
+effect** — `bullet_effects` flag 1 (see below) — not the hang.
 
 `+0xBF0` is a separate "young" countdown: while `> 0` the bullet skips the
 out-of-bounds despawn check (it can start off-screen).
@@ -79,6 +80,11 @@ Each frame, for each entry, the engine applies it **only if
 `bullet.flags(+0xBF6) & entry.flag`**. `TS` below is the global timescale
 (`DAT_00575AC8`, `1.0` in normal play).
 
+- **flag `0x1`** (`FUN_004250d0`) — the **launch kick**. For 17 frames:
+  `|vel| = speed + 5.0 · (1 − t/16)` (`t` = frames since arm). Fixed constants.
+  Armed when the type-word has bit `0x1` *and* a flag-1 entry is staged (the
+  `(−1,−1,−1,−1,1,0)` entry — not a "clear sentinel" as first assumed). This is
+  the "hover then launch" and the Table-Turning spike.
 - **flag `0x10`** — for `interval` frames: `vel += TS · p1 · (cos,sin)(dir)`,
   where `dir = p2`, or the bullet's **current heading** if `p2 ≤ -990`. `angle`
   is then recomputed as `atan2(vel.y, vel.x)` — so when `p1 < 0` drives the speed

@@ -314,38 +314,33 @@ trajectories `(frame, x, y, vx, vy)` + birth class / fx flag.
 
     Letty has **no delay bullets** — every bullet moves the frame it spawns.
 
-### 10 · Bullet motion model · engine-faithful sim built (RE); two behaviours still open
+### 10 · Bullet motion model · ✅ engine-faithful sim, reproduces to the recorder's noise floor
 
-The [th07.exe RE session](th07-re-notes.md) replaced guesswork with the actual
-per-frame bullet update. `sim/ecl/bullet_sim.py` implements it — the reference
-Part 12's GPU layer vectorises:
+The [th07.exe RE session](th07-re-notes.md) plus a recorder extension (log the
+`state` track + all 5 `bullet_effects` staging entries) turned this from a
+guessed empirical fit into the engine's actual per-frame update.
+`sim/ecl/bullet_sim.py` — the reference Part 12's GPU layer vectorises:
 
-- **The hang / launch** (what the earlier "hover then launch at 4×" was): a
-  bullet whose type-word has bit `0x2`/`0x4`/`0x8` spawns **4 velocity-steps
-  behind** its point in state 2/3/4, crawls at **0.5 / 0.4 / 0.333×** while its
-  materialise animation plays (~8–16 f), then on completion runs the live step
-  too (a one-frame crawl+full spike) and goes to full velocity. No spike above
-  base for plain bullets. Reproduces those to **0 px**.
-- **All 5 `bullet_effects` flags** decoded and implemented: `0x10` directional
-  accel (with the `−999` "along heading" sentinel and the automatic 180° flip
-  when speed reverses — the Lingering Cold snow), `0x20` turn+accel, `0x40`
-  pause-redirect, `0x80` pause-re-aim-at-player, `0xc00` **wall bounce**
-  (playfield 384 × 448) — Table-Turning.
+- **The hang** — a bullet whose type-word has bit `0x2`/`0x4`/`0x8` spawns
+  **4 velocity-steps behind** its point in state 2/3/4, crawls at
+  **0.5 / 0.4 / 0.333×** while its materialise animation plays, then runs the
+  live step too (a one-frame crawl+full spike) and goes full. Read straight from
+  the recorded `state` column.
+- **The launch kick** — `bullet_effects` flag 1 (`FUN_004250d0`): for 17 frames,
+  `|vel| = speed + 5.0·(1 − t/16)`. Fixed constants; armed when the type-word
+  has bit `0x1` **and** a flag-1 entry is staged. This is the "hover then
+  launch" and the Table-Turning spike.
+- **All 5 fx flags** — `0x10` directional accel (`−999` = "along heading",
+  auto 180° flip on reversal — Lingering Cold), `0x20` turn+accel, `0x40`
+  pause-redirect (Letty's "spam phase" — it was this all along, not a mid-flight
+  op), `0x80` pause-re-aim-at-player, `0xc00` **wall bounce** (384 × 448) —
+  Table-Turning. Each is **gated `(type-word & entry.flag)`**, so btype `0x200`
+  ignores the same staged flag-`0x10` entry that `0x211`/`0x215` act on.
 
-**Two behaviours are not fully modelled yet:**
-
-1. **The go-live launch ramp.** Some bullet graphics (not all) kick forward with
-   a decaying overshoot (~3–5× base, decaying over ~16 f) the frame the hang
-   ends. The RE confirms it happens but the exact code path isn't read; it's
-   currently fitted per-type from the recordings.
-2. **Mid-flight ECL speed-ups.** Letty's "spam phase" fires plain bullets then,
-   ~50 frames later, runs an ECL op that adds a big acceleration to the
-   already-live bullets. This uses effect slots the recorder doesn't log
-   (`+0xCF0`/`+0xD04`, not the `+0xC2C`/`+0xC34` it captures), so the params
-   aren't in the recording — needs a recorder extension or the ECL op decoded.
-
-The older empirical `fit_motion.py` (median displacement profiles, ~75 % within
-5 px) stays as the fallback / sanity check.
+**Verify** (`python -m sim.ecl.bullet_sim`): **26/27 Letty bullet groups
+reproduce within 8 px / 90 f — overall p50 2.2 px, p90 6.2 px.** The ~6 px
+residual is the recorder's own frame-phase noise, not the model. The empirical
+`fit_motion.py` (~75 %) stays as a fallback / sanity check.
 
 <details><summary>earlier `fit_motion.py` notes</summary>
 
