@@ -100,10 +100,6 @@ def main():
                     help="player can't die (RECORDING ONLY) - lets a weak driver "
                     "reach a Stage 2+ boss. The trained policy never sees this.")
     ap.add_argument("--n", type=int, default=1, help="record N drive-throughs")
-    ap.add_argument("--maxpower", action="store_true",
-                    help="lock player power to 128 (RECORDING ONLY) - the drive "
-                    "policy doesn't collect power items, but a 1CC run is at max "
-                    "power for the Stage-1 boss, so DPS must be measured there")
     args = ap.parse_args()
     args.which_list = [int(w) for w in str(args.which).split(",")]
 
@@ -158,12 +154,6 @@ def _record_one(env, pm, pol, boss, args, out, run):
             a = a % 18 + 18
         obs, r, term, trunc, info = env.step(a)
         step += 1
-        if args.maxpower:
-            try:
-                g = struct.unpack("<I", pm.read_bytes(0x00626270 + 8, 4))[0]
-                pm.write_bytes(g + 0x7C, struct.pack("<f", 128.0), 4)
-            except Exception:
-                pass
         b = boss()
         if b is None:
             null_run += 1

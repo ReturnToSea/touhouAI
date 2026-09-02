@@ -1,15 +1,20 @@
 """Measure ReimuA's effective shot DPS against Letty from a shooting recording.
 
-`record_boss_driven.py` now logs the boss HP (`+0x2BB8`) and the player power,
-so this reads the HP-drain rate directly and splits it by whether the player was
-lined up under the boss (`|px - boss_x| < LANE_HALF`, the forward-needle lane) or
-not (homing amulets only). It also reports drain-rate vs player power.
+The damage *system* is decompiled (`docs/th07-re-notes.md`): boss HP/frame =
+sum of overlapping player-shot `+0x1c` damage values, clamped to 70/frame, no
+stage-1 reduction, focused shots x1/3. The per-character descriptor table sits
+behind the character-select code and the homing-amulet hit rate would still
+need modelling, so the *effective* DPS is measured, not reversed.
 
-Feeds `fight_replay`: SHOT_DPS = the lined-up rate, HOMING_FRAC = homing / lined.
-
-    1.  .venv/Scripts/python native/record_boss_driven.py letty_shoot --which 2 \
-            --shoot on --godmode --n 3
+    1.  record a fight WITH the player shooting:
+          .venv/Scripts/python native/record_boss_driven.py letty_shoot --n 3 --shoot on
     2.  python -m sim.measure_dps
+        -> prints the DPS to set as fight_replay.SHOT_DPS
+
+Letty's real phase HP (Part 7): NS1 15000 -> life_callback 1700 (13300 to
+phase), NS2 15000 -> 2000 (13000). The spells are timer-or-capture. A phase
+that transitions *before* its timer was HP-driven: DPS ~= phase_HP / (frames
+from first-attack to the transition).
 """
 from __future__ import annotations
 
@@ -19,81 +24,67 @@ from pathlib import Path
 import numpy as np
 
 _FIGHTS = Path(__file__).resolve().parents[1] / "sim" / "fights"
-LANE_HALF = 26.0          # forward-needle x-lane half-width (fight_replay)
-DMG_CLAMP = 70.0
+
+# (name, HP budget, nonspell-timer frames) for the two damageable phases
+_PHASES = [("NS1", 13300.0, 2400), ("NS2", 13000.0, 2400)]
+# recorded screen-clear frames (f0-relative) — NS1 ends ~2400, LC ~5450, NS2 ~7820
+_CLEARS = [2400, 5450, 7820]
+_ARMOR = 60          # boss repositioning / declaration before its first bullet
 
 
-def _drain(hp: np.ndarray) -> np.ndarray:
-    """Per-frame HP loss, ignoring the callback HP *snaps* (jumps UP or huge
-    single-frame drops) and non-damage frames."""
-    dh = -np.diff(hp.astype(np.float64))
-    dh[dh < 0] = 0.0                          # HP snapped up (phase callback)
-    dh[dh > DMG_CLAMP + 5] = 0.0              # not a shot (phase reset / capture)
-    return dh
+def _phase_first_bullet(nb: np.ndarray, lo: int, hi: int) -> int:
+    seg = nb[lo:hi]
+    return lo + int(np.argmax(seg >= 15)) if (seg >= 15).any() else lo
 
 
 def main() -> int:
     paths = sorted(glob.glob(str(_FIGHTS / "letty_shoot*.npz")))
     if not paths:
-        print("no sim/fights/letty_shoot*.npz — record first:")
-        print("  .venv/Scripts/python native/record_boss_driven.py letty_shoot "
-              "--which 2 --shoot on --godmode --n 3")
+        print("no sim/fights/letty_shoot*.npz — record one first:")
+        print("  .venv/Scripts/python native/record_boss_driven.py "
+              "letty_shoot --n 3 --shoot on")
         return 1
 
-    lined_all, homing_all = [], []
-    by_power: dict[int, list] = {}
+    dps_ns1, dps_ns2 = [], []
     for p in paths:
         d = np.load(p)
-        boss = d["boss"]
-        if boss.shape[1] < 4:
-            print(f"  {Path(p).stem}: no HP column — re-record with the updated "
-                  f"record_boss_driven.py"); continue
-        bstep = boss[:, 0].astype(int)
-        f0 = int(d["bullets"][:, 0].min())
-        bf = bstep - f0
-        m = bf >= 0
-        bf, bx, hp = bf[m], boss[m, 1], boss[m, 3]
+        b = d["bullets"]
+        f0 = int(b[:, 0].min())
+        f = (b[:, 0] - f0).astype(int)
+        nb = np.bincount(f, minlength=12000)
 
-        pl = d["player"]
-        pf = pl[:, 0].astype(int) - f0
-        # align player x + power to the boss frames
-        px = np.interp(bf, pf, pl[:, 1])
-        pw = np.interp(bf, pf, pl[:, 3]) if pl.shape[1] > 3 else np.full(len(bf), np.nan)
+        # screen-clear = a >=200-frame stretch where the count collapses then
+        # rebuilds; approximate with the known boundaries, snapped to the
+        # nearest local minimum in a +-400 window
+        clears = []
+        for c in _CLEARS:
+            w = nb[max(0, c - 400):c + 400]
+            clears.append(max(0, c - 400) + int(np.argmin(w)) if len(w) else c)
 
-        dh = _drain(hp)                                   # [n-1]
-        aligned = np.abs(px[:-1] - bx[:-1]) < LANE_HALF
-        firing = dh > 0                                   # a shot connected
-
-        lined = dh[firing & aligned]
-        homing = dh[firing & ~aligned]
-        lined_all.append(lined)
-        homing_all.append(homing)
-        hp_start = hp[hp > 100]
-        print(f"  {Path(p).stem}: HP {hp_start.max():.0f} -> ~{hp[hp>0].min():.0f}, "
-              f"{int(firing.sum())} damage frames "
-              f"({100 * aligned[firing].mean():.0f}% lined up)  "
-              f"lined DPS {np.mean(lined) if len(lined) else 0:.1f}  "
-              f"homing DPS {np.mean(homing) if len(homing) else 0:.1f}")
-
-        for w in np.unique(np.round(pw[:-1] / 16) * 16):
-            if np.isnan(w):
+        for i, (nm, hp, timer) in enumerate(_PHASES):
+            p_lo = 0 if i == 0 else clears[1]          # NS1 from 0, NS2 after LC
+            p_hi = clears[0] if i == 0 else clears[2]
+            fa = _phase_first_bullet(nb, p_lo, p_hi) + _ARMOR
+            dur = p_hi - fa
+            if dur <= 0:
                 continue
-            sel = firing & (np.abs(pw[:-1] - w) < 8)
-            if sel.sum() > 30:
-                by_power.setdefault(int(w), []).extend(dh[sel].tolist())
+            hp_driven = dur < timer - 120                # ended before the timer
+            dps = hp / dur
+            tag = "HP-driven" if hp_driven else "hit the TIMER (lower bound)"
+            print(f"  {Path(p).stem} {nm}: {dur} active frames -> "
+                  f"DPS ~= {dps:.1f}   [{tag}]")
+            (dps_ns1 if i == 0 else dps_ns2).append(dps if hp_driven else np.nan)
 
-    L = np.concatenate(lined_all) if lined_all else np.zeros(1)
-    H = np.concatenate(homing_all) if homing_all else np.zeros(1)
-    print(f"\n  lined-up DPS  {np.mean(L):.1f}  (n={len(L)})")
-    print(f"  homing   DPS  {np.mean(H):.1f}  (n={len(H)})")
-    if np.mean(L) > 0:
-        print(f"\n  -> fight_replay:  SHOT_DPS = {np.mean(L):.0f}   "
-              f"HOMING_FRAC = {np.mean(H) / np.mean(L):.2f}")
-    if by_power:
-        print("\n  drain rate vs player power:")
-        for w in sorted(by_power):
-            v = np.array(by_power[w])
-            print(f"    power ~{w:3d}: {np.mean(v):.1f} HP/frame  (n={len(v)})")
+    a = np.array(dps_ns1 + dps_ns2, float)
+    a = a[~np.isnan(a)]
+    if len(a):
+        print(f"\n  effective SHOT_DPS ~= {np.nanmean(a):.1f} "
+              f"(n={len(a)} HP-driven phases)")
+        print(f"  -> set fight_replay.SHOT_DPS to this; keep the 70/frame clamp")
+    else:
+        print("\n  every phase hit its timer — the drive policy isn't lined up "
+              "under the boss enough. Need a shot-focused recording, or accept "
+              "the timer as a lower bound on the real fight's phase durations.")
     return 0
 
 
