@@ -147,7 +147,12 @@ def main():
     hist = []
     best_score = -1e9
 
+    psm0 = sim.phase_start_mix
     while total < args.steps:
+        # anneal the mid-fight phase-start curriculum to 0 over the first 70% of
+        # training: phases 2+ get signal early, the final policy trains on real
+        # NS1-start runs
+        sim.phase_start_mix = float(max(0.0, psm0 * (1.0 - total / (0.7 * args.steps))))
         for t in range(T):
             with torch.no_grad():
                 lg = ac.actor(obs); v = ac.critic(obs).squeeze(-1)

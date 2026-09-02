@@ -57,7 +57,10 @@ SPAWN_Y_LO, SPAWN_Y_HI = 160.0, 420.0
 # roughly lined up in x under the boss). So dodging in a corner still chips, but
 # a real kill needs positioning. Numbers approximate - tune SHOT_DPS against
 # real damage-phased fight lengths (Letty ~50-70s).
-SHOT_DPS = 14.0                  # peak HP/frame (fully lined up, shoot held)
+SHOT_DPS = 14.0                  # peak HP/frame (fully lined up, shoot held);
+#   measure the real value: `python -m sim.measure_dps` on a --shoot recording
+DMG_CLAMP = 70.0                 # th07.exe FUN_00420620: boss HP loss is hard-
+#   clamped to 70/frame regardless of shot power (decompiled)
 HOMING_FRAC = 0.20              # fraction of DPS that lands regardless of x
 LANE_HALF = 17.5               # |px - boss_x| under this -> the forward shot lands
 
@@ -263,18 +266,15 @@ class FightSim:
                 (torch.rand(n, generator=self._g) * npj).long().clamp(max=npj - 1),
                 torch.zeros(n, dtype=torch.long))
             row = self.ph_cpu[rid, pj]                              # [n, 4]
-            cs, fa, pe, hp = row[:, 0], row[:, 1], row[:, 2], row[:, 3]
-            # rand_later episodes drop in at ANY frame of the phase (not just its
-            # start) with a random slice of HP left - so a phase can't be
-            # memorised as a fixed sequence and phases 2+ get seen mid-flow.
-            u = torch.rand(n, generator=self._g)
-            mid = fa + u * (pe - fa - 400).clamp(min=1.0)
-            off = torch.where(rand_later, mid, cs).long()
-            hpf = torch.where(rand_later,
-                              0.1 + 0.9 * torch.rand(n, generator=self._g),
-                              torch.ones(n))
+            cs, hp = row[:, 0], row[:, 3]
+            # a rand_later episode starts at its phase's clear-frame with FULL HP
+            # - a genuine "you just cleared the previous phase" state - so phases
+            # 2+ get gradient signal without ever training on a state that can't
+            # occur. phase_start_mix anneals to 0 (train_fight) so the final
+            # policy is tuned on real NS1-start runs.
+            off = cs.long()
             self.phase_idx[idx] = pj.to(self.d)
-            self.boss_hp[idx] = (hp * hpf).to(self.d)
+            self.boss_hp[idx] = hp.to(self.d)
         else:
             maxstart = (self.rec_len[rid] - 800).clamp(min=self.min_start + 1)
             off = (torch.rand(n, generator=self._g) *
@@ -451,7 +451,7 @@ class FightSim:
             aligned = (self.px - bx).abs() < LANE_HALF
             dps = (SHOT_DPS * self.dps_mult *
                    (HOMING_FRAC + (1.0 - HOMING_FRAC) * aligned.float()))
-            dmg = dps * shoot_bit.float()
+            dmg = (dps * shoot_bit.float()).clamp(max=DMG_CLAMP)   # engine cap
             dmg = torch.minimum(dmg, self.boss_hp.clamp(min=0))
             self.boss_hp = self.boss_hp - dmg
             rew = rew + DMG_REW * dmg
