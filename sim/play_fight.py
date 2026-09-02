@@ -24,10 +24,14 @@ import sys
 from pathlib import Path
 
 os.environ["FIGHTSIM_NOCOMPILE"] = "1"          # B=1 on CPU
+os.environ.setdefault("OMP_NUM_THREADS", "1")   # B=1 eager torch thrashes threads
+os.environ.setdefault("MKL_NUM_THREADS", "1")
 
 import numpy as np
 import pygame
 import torch
+
+torch.set_num_threads(1)
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))

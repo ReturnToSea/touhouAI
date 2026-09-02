@@ -19,10 +19,16 @@ import time
 from pathlib import Path
 
 os.environ["FIGHTSIM_NOCOMPILE"] = "1"     # B=1 on CPU - compiling isn't worth it
+# B=1 eager torch: tiny ops fan out across every core and thrash. Pin to 1 thread
+# so this viewer stays a light background task next to a GPU training run.
+os.environ.setdefault("OMP_NUM_THREADS", "1")
+os.environ.setdefault("MKL_NUM_THREADS", "1")
 
 import numpy as np
 import pygame
 import torch
+
+torch.set_num_threads(1)
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))

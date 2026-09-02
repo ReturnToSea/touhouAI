@@ -29,11 +29,16 @@ from obs import (build_obs_batch as _build_obs_eager, OBS_DIM,  # noqa: E402
 # torch.compile fuses build_obs_batch's ~40 tiny kernels (topk, the march-step
 # loop + scatter_reduce, the 9-dir escape raycast) - it's ~3/4 of a step and
 # entirely launch-overhead bound in eager mode. FIGHTSIM_NOCOMPILE=1 to disable.
+#   dynamic=True: one compile covers every batch size (training B *and* the
+#   eval sim's smaller B / the two aim-pool pool sizes) - dynamic=False was
+#   doing a fresh ~6-min max-autotune compile per shape, four of them, which
+#   made the first ~25 min of a run look like it had stalled.
+#   mode default (not max-autotune): the win here is fusing launch overhead,
+#   not per-kernel tuning, and default compiles in seconds.
 if os.environ.get("FIGHTSIM_NOCOMPILE"):
     build_obs_batch = _build_obs_eager
 else:
-    build_obs_batch = torch.compile(_build_obs_eager, dynamic=False,
-                                    mode="max-autotune-no-cudagraphs")
+    build_obs_batch = torch.compile(_build_obs_eager, dynamic=True)
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from boss_phases import phase_windows, has_phases, KILL_FRAC   # noqa: E402

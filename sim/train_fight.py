@@ -132,8 +132,9 @@ def main():
     # snapshots. FightSim.step == 1 frame; the full fight is ~10750 frames but a
     # ~5000-frame window (83s, into phase 3) is enough to see it learning.
     @torch.no_grad()
-    def evaluate(n=11500):                       # n > full 179s fight -> a pure
-        o = ev.reset()                           # dodge-survivor is fully visible
+    def evaluate(n=7000):                        # ~117s - deep enough to see it
+        o = ev.reset()                           # learning; the rollout tracker
+        #   carries the frequent signal, this is an occasional clean argmax check
         alive = torch.ones(ev.B, dtype=torch.bool, device=dev)
         life = torch.zeros(ev.B, device=dev)
         cleared = torch.zeros(ev.B, dtype=torch.bool, device=dev)
@@ -165,8 +166,32 @@ def main():
     rb = torch.zeros(T, B, device=dev)
     db = torch.zeros(T, B, device=dev)
     total, upd, t0 = 0, 0, time.perf_counter()
+    _sps_ref = [0.0, 0]                  # (wall, total) at last report -> interval k/s
     hist = []
     best_score = -1e9
+
+    # --- rollout episode tracker (replaces the per-update 11500-step eval loop,
+    # which cost ~7 min at B=1024 because FightSim.step is launch-bound at ~26
+    # calls/s regardless of B). Each env finishes <=1x per T=32 window (min phase
+    # is ~2400 frames), so we can score completed episodes from the rollout with
+    # ONE sync/update. `evaluate()` still runs, but rarely, for a clean number.
+    LB = 16384
+    ep_len = torch.zeros(B, device=dev)
+    kf = torch.zeros(T, B, device=dev)
+    ph_seen = torch.zeros(B, device=dev)
+    buf_len = torch.full((LB,), float("nan"), device=dev)
+    buf_kill = torch.zeros(LB, device=dev)
+    buf_ph = torch.zeros(LB, device=dev)
+    hp_ptr = 0
+    _tar = torch.arange(T, device=dev).view(T, 1)
+
+    def roll_stats():
+        m = ~torch.isnan(buf_len)
+        if not bool(m.any()):
+            return float("nan"), float("nan"), 0.0, 1.0
+        L = buf_len[m] / 60.0
+        return (float(L.median()), float(L.mean()),
+                float(buf_kill[m].mean()), float(buf_ph[m].mean()) + 1.0)
 
     while total < args.steps:
         for t in range(T):
@@ -177,8 +202,29 @@ def main():
             ob[t], ab[t], lb[t], vb[t] = obs, a, dist.log_prob(a), v
             obs, r, dn = sim.step(a)
             rb[t], db[t] = r, dn.float()
+            ep_len += 1
+            kf[t] = getattr(sim, "last_killed", dn).float()
+            ph_seen = torch.maximum(ph_seen, sim.phase_idx.float())
         total += T * B
         upd += 1
+
+        with torch.no_grad():                       # score finished episodes
+            fd = torch.where(db.bool(), _tar,
+                             torch.full_like(db, T).long()).amin(0)   # [B]
+            fin = fd < T
+            after = torch.where(fin, (T - 1 - fd).float(), torch.zeros_like(ep_len))
+            comp_len = ep_len - after
+            comp_kill = kf.gather(0, fd.clamp(max=T - 1).view(1, -1)).squeeze(0)
+            k = int(fin.sum())
+            if k:
+                src = fin.nonzero(as_tuple=True)[0]
+                dst = (torch.arange(k, device=dev) + hp_ptr) % LB
+                buf_len[dst] = comp_len[src]
+                buf_kill[dst] = comp_kill[src]
+                buf_ph[dst] = ph_seen[src]
+                hp_ptr = (hp_ptr + k) % LB
+            ep_len = torch.where(fin, after, ep_len)
+            ph_seen = torch.where(fin, torch.zeros_like(ph_seen), ph_seen)
 
         if args.sim == "ecl" and ph_mix0 > 0:      # anneal mid-fight starts -> 0
             frac = min(1.0, total / max(1.0, args.phase_mix_frac * args.steps))
@@ -219,28 +265,35 @@ def main():
                 opt.step()
         sched.step()
 
-        # dense early so the HUD/transfer daemon have something within a minute
-        # of compile, then settle to every 25 updates
-        if upd in (1, 3, 6, 12, 20) or upd % 25 == 0:
-            med, mean, f30, ph, ktime = evaluate()   # f30 = kill rate, ktime = median kill-time (s)
+        # frequent report from the (free) rollout tracker; the slow deterministic
+        # evaluate() only every ~150 updates for a clean argmax number.
+        if upd in (2, 5, 10, 20) or upd % 15 == 0:
             wall = time.perf_counter() - t0
-            sps = total / wall
+            sps = (total - _sps_ref[1]) / max(1e-6, wall - _sps_ref[0])
+            _sps_ref[0], _sps_ref[1] = wall, total
+            if upd == 2 or upd % 300 == 0:
+                med, mean, f30, ph, ktime = evaluate()
+                tag = "eval"
+            else:
+                med, mean, f30, ph = roll_stats()
+                ktime = float("nan")
+                tag = "roll"
             kts = f"{ktime:4.0f}s" if not np.isnan(ktime) else "  --"
+            m = med if not np.isnan(med) else 0.0
             print(f"upd {upd:4d}  {total/1e6:6.1f}M  {sps/1e3:4.0f}k/s  "
-                  f"surv med {med:5.1f}s  kill {f30*100:3.0f}%  "
-                  f"kill-time {kts}  phase {ph:.2f}/4  lr {sched.get_last_lr()[0]:.1e}",
-                  flush=True)
-            hist.append((wall, total, med, mean, f30, ktime))  # 6-col fight schema
+                  f"surv med {m:5.1f}s  kill {f30*100:3.0f}%  "
+                  f"kill-time {kts}  phase {ph:.2f}/4  lr {sched.get_last_lr()[0]:.1e}"
+                  f"  [{tag}]", flush=True)
+            hist.append((wall, total, m, mean if not np.isnan(mean) else m,
+                         f30, ktime))            # 6-col fight schema
             np.save(run / "history.npy", np.array(hist))
             ac.export(run / "last_mlp.pt")
-            # keep the best checkpoint by kill-rate (tie-break survival) so a
-            # later training thrash can't lose the peak
-            score = f30 + med / 1000.0
+            score = f30 + m / 1000.0
             if score > best_score:
                 best_score = score
                 ac.export(run / "best_mlp.pt")
-                print(f"    ^ new best (kill {f30*100:.0f}%, surv {med:.0f}s)", flush=True)
-            if upd in (6, 20) or upd % 50 == 0:   # snapshots the transfer daemon keeps
+                print(f"    ^ new best (kill {f30*100:.0f}%, surv {m:.0f}s)", flush=True)
+            if upd in (5, 20) or upd % 40 == 0:   # snapshots the transfer daemon keeps
                 ac.export(run / f"mlp_{int(total/1e6)}M.pt")
 
     ac.export(run / "final_mlp.pt")
