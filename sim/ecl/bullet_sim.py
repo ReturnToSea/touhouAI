@@ -192,6 +192,120 @@ def _norm(a: float) -> float:
     return a
 
 
+_FIELDS = ("x", "y", "angle", "speed", "hang_state", "hang_frames",
+           "fx_flag", "fx_p1", "fx_p2", "fx_interval", "fx_repeat", "launch",
+           "player_x", "player_y")
+
+
+def batch_from_spawns(spawns, player_xy=(192.0, 400.0)) -> dict:
+    """Struct-of-arrays `BulletParams` for `simulate_batch`, one row per spawn."""
+    ps = [from_spawn(s, player_xy) for s in spawns]
+    n = len(ps)
+    b = {k: np.empty(n, np.float64) for k in _FIELDS}
+    for i, p in enumerate(ps):
+        b["x"][i], b["y"][i] = p.x, p.y
+        b["angle"][i], b["speed"][i] = p.angle, p.speed
+        b["hang_state"][i], b["hang_frames"][i] = p.hang_state, p.hang_frames
+        b["fx_flag"][i], b["fx_p1"][i], b["fx_p2"][i] = p.fx_flag, p.fx_p1, p.fx_p2
+        b["fx_interval"][i], b["fx_repeat"][i] = p.fx_interval, max(1, p.fx_repeat)
+        b["launch"][i] = 1.0 if p.launch else 0.0
+        b["player_x"][i], b["player_y"][i] = p.player_xy
+    return b
+
+
+def simulate_batch(b: dict, n_frames: int) -> np.ndarray:
+    """Vectorised `simulate` — `b` is `batch_from_spawns(...)`, returns
+    `[N, n_frames, 2]`. Same per-frame update as `simulate`, masked over N."""
+    x, y = b["x"].copy(), b["y"].copy()
+    ang, spd = b["angle"].copy(), b["speed"].copy()
+    hs, hf = b["hang_state"], b["hang_frames"]
+    flag = b["fx_flag"].copy()
+    p1, p2, iv, rep = b["fx_p1"], b["fx_p2"], b["fx_interval"], b["fx_repeat"]
+    launch, plx, ply = b["launch"] > 0.5, b["player_x"], b["player_y"]
+
+    vx, vy = np.cos(ang) * spd, np.sin(ang) * spd
+    hang = hs > 0
+    px = np.where(hang, x - 4.0 * vx, x)
+    py = np.where(hang, y - 4.0 * vy, y)
+    ratio = np.select([hs == 2, hs == 3, hs == 4], [0.5, 0.4, 1.0 / 3.0], 1.0)
+
+    # FX_ACCEL_DIR arms a fixed accel vector at go-live
+    ad = np.where(p2 <= -990.0, ang, p2)
+    acc_x = np.where(flag == FX_ACCEL_DIR, np.cos(ad) * p1, 0.0)
+    acc_y = np.where(flag == FX_ACCEL_DIR, np.sin(ad) * p1, 0.0)
+
+    fx_ctr = np.zeros_like(spd)
+    bounces = np.zeros_like(spd)
+    cycles = np.zeros_like(spd)
+    lt = np.zeros_like(spd)
+
+    out = np.empty((len(spd), n_frames, 2), np.float64)
+    for t in range(n_frames):
+        out[:, t, 0], out[:, t, 1] = px, py
+
+        did_crawl = hang & (t <= hf)
+        px += np.where(did_crawl, vx * ratio, 0.0)
+        py += np.where(did_crawl, vy * ratio, 0.0)
+        live = ~(hang & (t < hf))               # transition frame also steps live
+
+        m = live & launch & (lt < 17)
+        mag = spd + 5.0 * (1.0 - lt / 16.0)
+        vx = np.where(m, np.cos(ang) * mag, vx)
+        vy = np.where(m, np.sin(ang) * mag, vy)
+        lt += m
+
+        act = live & (fx_ctr < iv)
+        # FX_ACCEL_DIR
+        a = act & (flag == FX_ACCEL_DIR)
+        vx = np.where(a, vx + acc_x, vx)
+        vy = np.where(a, vy + acc_y, vy)
+        upd = a & ((np.abs(vx) > 1e-4) | (np.abs(vy) > 1e-4))
+        ang = np.where(upd, np.arctan2(vy, vx), ang)
+        # FX_TURN_ACCEL
+        tu = act & (flag == FX_TURN_ACCEL)
+        ang = np.where(tu, _wrap(ang + p2), ang)
+        spd = np.where(tu, spd + p1, spd)
+        vx = np.where(tu, np.cos(ang) * spd, vx)
+        vy = np.where(tu, np.sin(ang) * spd, vy)
+        fx_ctr += (a | tu)
+        # FX_PAUSE_REDIR / FX_PAUSE_AIM  (fx_ctr tested pre-increment, like simulate)
+        pr = (flag == FX_PAUSE_REDIR) | (flag == FX_PAUSE_AIM)
+        decel = live & pr & (fx_ctr < iv)
+        arrive = live & pr & (fx_ctr >= iv)
+        f = 1.0 - np.where(iv > 0, fx_ctr / np.maximum(iv, 1), 0.0)
+        vx = np.where(decel, np.cos(ang) * spd * f, vx)
+        vy = np.where(decel, np.sin(ang) * spd * f, vy)
+        fx_ctr += decel
+        aim = arrive & (flag == FX_PAUSE_AIM)
+        ang = np.where(aim, np.arctan2(ply - py, plx - px) + p1, ang)
+        ang = np.where(arrive & ~aim, _wrap(ang + p1), ang)
+        spd = np.where(arrive & (p2 > -999.0), p2, spd)
+        vx = np.where(arrive, np.cos(ang) * spd, vx)
+        vy = np.where(arrive, np.sin(ang) * spd, vy)
+        cycles += arrive
+        fx_ctr = np.where(arrive, 0.0, fx_ctr)
+        flag = np.where(arrive & (cycles >= np.maximum(rep, 1)), 0.0, flag)
+        # FX_BOUNCE
+        bnc = live & (flag == FX_BOUNCE)
+        hx = bnc & ((px < 0.0) | (px >= PLAYFIELD_W))
+        hy = bnc & ((py < 0.0) | (py >= PLAYFIELD_H))
+        ang = np.where(hx, _wrap(-ang - math.pi), ang)
+        ang = np.where(hy, _wrap(-ang), ang)
+        hit = hx | hy
+        vx = np.where(hit, np.cos(ang) * spd, vx)
+        vy = np.where(hit, np.sin(ang) * spd, vy)
+        bounces += hit
+        flag = np.where(hit & (iv > 0) & (bounces >= iv), 0.0, flag)
+
+        px += np.where(live, vx, 0.0)
+        py += np.where(live, vy, 0.0)
+    return out
+
+
+def _wrap(a: np.ndarray) -> np.ndarray:
+    return (a + math.pi) % (2.0 * math.pi) - math.pi
+
+
 # bullets carrying one of these fx bits are expected to leave and come back, so
 # the engine gives them a 128-frame off-screen grace (`FUN_00425a50`, counter
 # +0xbfe counts up to 0x80).  Every other bullet is culled the *first* frame its
@@ -332,7 +446,26 @@ def verify(npz_paths: list[str]) -> bool:
           "fx flags (accel, turn+accel, pause-redirect, pause-reaim, wall\n"
           "  bounce) all read straight from the recording's staging entries. "
           "The ~6 px residual is the recorder's own frame-phase noise.")
-    return tot_ok >= tot - 2 and float(np.median(ae)) < 4.0
+    ok = tot_ok >= tot - 2 and float(np.median(ae)) < 4.0
+    return ok and _verify_batch(npz_paths)
+
+
+def _verify_batch(npz_paths: list[str]) -> bool:
+    """simulate_batch must reproduce simulate bullet-for-bullet (the Part 12
+    GPU path shares no code with the scalar reference)."""
+    from pathlib import Path
+    from .parser import parse_file
+    from .vm import VM
+    _E = Path(__file__).resolve().parents[2] / "tools" / "th07_ecl" / "ecldata1.ecl"
+    vm = VM(parse_file(str(_E)), difficulty=3, seed=0)
+    vm.start_boss(sub=31, interrupt=0)
+    vm.run(13000)
+    sp = vm.bullets[:8000]
+    ref = np.stack([simulate(from_spawn(s), 250) for s in sp])
+    bat = simulate_batch(batch_from_spawns(sp), 250)
+    d = float(np.abs(ref - bat).max())
+    print(f"\n  simulate_batch vs simulate: {len(sp)} bullets, max abs diff {d:.2e}")
+    return d < 1e-6
 
 
 if __name__ == "__main__":

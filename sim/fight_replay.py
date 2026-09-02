@@ -178,12 +178,13 @@ def _mirror_rec(r):
 class FightSim:
     def __init__(self, B=8192, name="cirno", device="cuda", max_frames=11000,
                  min_start=0, seed=0, phase_start_mix=0.5, mirror=True,
-                 randomize=True):
+                 randomize=True, recs=None):
         self.B, self.d = B, device
         self.randomize = randomize        # eval instance passes False (clean metric)
         self._g = torch.Generator(device="cpu").manual_seed(seed)
-        paths = sorted(glob.glob(str(FIGHTS / f"{name}*.npz")))
-        recs = [_load_dense(p) for p in paths]
+        if recs is None:                  # load recordings; else use pre-built
+            paths = sorted(glob.glob(str(FIGHTS / f"{name}*.npz")))   # dicts (Part 12
+            recs = [_load_dense(p) for p in paths]                     # ECL schedules)
         recs = [r for r in recs if r is not None and r["pos"].shape[0] > 600]
         assert recs, f"no usable recordings matching {name}*"
         if mirror:
@@ -222,11 +223,13 @@ class FightSim:
             for i, r in enumerate(recs):
                 pw = r["phases"] or [(0, 0, self.maxF)]
                 self.n_ph[i] = min(len(pw), MAX_PHASES)
+                hp_real = r.get("phase_hp")          # Part 7 thresholds (ECL schedules)
                 for j, (cs, fa, e) in enumerate(pw[:MAX_PHASES]):
                     cs = max(0, min(cs, self.maxF - 4))
                     fa = max(cs, min(fa, self.maxF - 3))
                     e = min(self.maxF - 2, max(fa + 1, e))
-                    hp = SHOT_DPS * (e - fa) * KILL_FRAC
+                    hp = (hp_real[j] if hp_real and j < len(hp_real)
+                          else SHOT_DPS * (e - fa) * KILL_FRAC)
                     self.ph[i, j] = torch.tensor([cs, fa, e, hp],
                                                  dtype=torch.float32)
         self.ph_cpu = self.ph.clone()

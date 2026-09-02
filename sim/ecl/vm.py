@@ -188,6 +188,8 @@ class Enemy:
         self.move_bounds = (0.0, 0.0, 384.0, 448.0)  # move_bounds_set: (xmin, ymin, xmax, ymax)
         self.oob_immune = False        # enemy_flag_oob_immune — survive off-screen
         self.was_onscreen = False      # engine only culls once the enemy has shown
+        self.hitbox = (0.0, 0.0)       # enemy_set_hitbox (x, y) half-extents; a
+        #                                sub-enemy with x > 0.5 is a lethal orb
 
         # execution state
         self.sub = sub
@@ -404,6 +406,14 @@ class VM:
             if e.mspeed:
                 e.x += e.mspeed * math.cos(e.mangle)
                 e.y += e.mspeed * math.sin(e.mangle)
+        # the engine clamps scripted movement to move_bounds (FUN_004203b0);
+        # Sub38 sets Letty's to (32, 48, 352, 128) and it persists
+        x0, y0, x1, y1 = e.move_bounds
+        if not e.is_boss or (x0, y0, x1, y1) == (0.0, 0.0, 384.0, 448.0):
+            pass
+        else:
+            e.x = min(max(e.x, x0), x1)
+            e.y = min(max(e.y, y0), y1)
         e.vel_x, e.vel_y = e.x - px, e.y - py
 
     # -- Part 5: bullet spawning & sub-enemies ---------------------------
@@ -924,6 +934,11 @@ def _death_cb(vm, e, ins):
 @_op(104)  # enemy_flag_can_take_damage(on)
 def _can_take_dmg(vm, e, ins):
     e.can_take_damage = bool(int(e.get(ins.args[0])))
+
+
+@_op(101)  # enemy_set_hitbox(x, y, z) — body half-extents (orb lethality)
+def _set_hitbox(vm, e, ins):
+    e.hitbox = (float(e.get(ins.args[0])), float(e.get(ins.args[1])))
 
 
 @_op(106)  # enemy_flag_death(mode) — what HP<=0 does: &7, 2=drop+callback,

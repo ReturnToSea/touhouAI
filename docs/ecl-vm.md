@@ -511,28 +511,38 @@ against the recordings: **total ratio 1.08, density-curve correlation 0.98,
 peak on-screen VM 530 / rec 498** (after the audit-2 fixes + the Part 8
 orbit-gvar fix). Every phase window is within ~10 %.
 
-### 12 · GPU danmaku layer & train · ~4–5 days · autonomy 90%
+### 12 · GPU danmaku layer & train · pipeline built, training not yet run
 
-`sim/danmaku_ecl.py`: at startup, run the CPU VM ~1–2 k times with different
-seeds → a pool of spawn schedules + boss tracks (a few seconds; replaces
-"recordings", but now we can make thousands). Each episode picks one. Bullet
-positions come from a **vectorised `bullet_sim.simulate`** (the hang, the flag-1
-launch, and the 5 fx flags — all branch-free integer math over a `[B, N, 2]`
-tensor). Aimed bullets resolve toward this episode's policy; RNG spreads reroll
-per episode. Collision, obs, damage-phasing — **reuse the existing FightSim code
-unchanged**. Then `train_fight.py --sim ecl`.
+- **`sim/ecl/bullet_sim.simulate_batch`** — the scalar `simulate` vectorised
+  over `N` bullets (numpy, masked branches for hang / launch / all 5 fx flags).
+  Verified **bit-for-bit vs `simulate`** (max abs diff 6e-12 over 8 k bullets;
+  `bullet_sim` PASS gate).
+- **`sim/danmaku_ecl.py`** — `build_schedules(n)`: run the VM once per seed
+  (~2.4 s), propagate every spawn with `simulate_batch`, greedy-assign pool
+  slots, screen-clear each bullet at the next phase transition, and emit the
+  **same dense `[F, POOL, 2]` dict `_load_dense` produces** (+ `phase_hp` from
+  Part 7). Verify (`python -m sim.danmaku_ecl`): schedules build in ~2.4 s,
+  bullets-on-screen **ratio 1.13** vs the recordings, two seeds differ by
+  **~29 px mean** (fresh RNG), and a `FightSim` built on them `reset()` +
+  `step()`s cleanly (obs `[B, 236]`).
+- **`FightSim(recs=...)`** — injection param; when a rec carries `phase_hp` the
+  phase table uses the **real thresholds** (NS1 13300, LC 1700, NS2 13000, TT
+  2000) instead of the synthetic `SHOT_DPS·dur·KILL_FRAC`.
+- **`train_fight.py --sim ecl`** — builds `--ecl-schedules` (default 48) fresh
+  training schedules + 8 held-out-seed eval schedules; `--fight` forced to
+  `letty`. Collision / obs / damage-phasing reuse the existing code unchanged.
+  Smoke-tested (both sims build, step, real HP in the phase table); **training
+  not yet run.**
 
-- **Concerns:** vectorizing split / chained-effect bullets without a per-bullet
-  Python loop; schedule-pool size vs diversity (too small → back to memorising
-  2000 fights instead of 20); throughput (replay did ~270k steps/s, generated
-  motion is more per-frame math — expect 120–200 k).
-- **Verify — two gates:**
-    1. Viz side-by-side: VM-Letty vs a recording — a human signs off that it
-       looks right.
-    2. Train a policy, run the real-game daemon: real-transfer median and
-       kill-rate **beat** the replay baseline (~100 s median / ~15% real
-       kill-rate). If it doesn't beat replay, something in Stages A–B is still
-       wrong.
+Small simplifications in this first pass: bullet hitbox is a uniform 2.5 px
+(recordings carry per-type boxes); aimed bullets resolve toward the VM's default
+player point, not the live policy (re-aiming was what broke the replay approach —
+deferred deliberately).
+
+- **Verify — two gates (pending the training run):**
+    1. Viz side-by-side: VM-Letty vs a recording — a human signs off.
+    2. Train a policy, run the real-game daemon: real-transfer median +
+       kill-rate **beat** the replay baseline (~103 s / ~33 %).
 
 ---
 

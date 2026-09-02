@@ -66,6 +66,10 @@ def main():
     ap.add_argument("--minibatch", type=int, default=32768)
     ap.add_argument("--ent", type=float, default=0.002)
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--sim", choices=("replay", "ecl"), default="replay",
+                    help="replay = recorded fights; ecl = fresh ECL-VM danmaku "
+                         "schedules (sim/danmaku_ecl.py), Letty only")
+    ap.add_argument("--ecl-schedules", type=int, default=48)
     args = ap.parse_args()
 
     dev = "cuda" if torch.cuda.is_available() else "cpu"
@@ -77,13 +81,22 @@ def main():
         "algo": "ppo_fight", "steps": args.steps, "hidden": list(HID),
         "B": args.B, "fight": args.fight}))
 
+    ecl_recs = ecl_eval_recs = None
+    if args.sim == "ecl":
+        from danmaku_ecl import build_schedules
+        print(f"[ecl] building {args.ecl_schedules} + 8 danmaku schedules...", flush=True)
+        ecl_recs = build_schedules(args.ecl_schedules, seed0=0)
+        ecl_eval_recs = build_schedules(8, seed0=10_000)   # held-out seeds
+        args.fight = "letty"
+
     sim = FightSim(B=args.B, name=args.fight, device=dev, seed=args.seed,
-                   max_frames=args.max_frames)
+                   max_frames=args.max_frames, recs=ecl_recs)
     ev = FightSim(B=1024, name=args.fight, device=dev, seed=args.seed + 999,
                   max_frames=args.max_frames, phase_start_mix=0.0,
-                  randomize=False)   # eval: clean phase-0 starts, DPS x1, no wave jitter
-    for k in ("pos", "bhalf", "boss", "en"):
-        setattr(ev, k, getattr(sim, k))          # identical data - don't double it
+                  randomize=False, recs=ecl_eval_recs)   # eval: clean phase-0 starts
+    if args.sim != "ecl":                        # replay: eval shares the training
+        for k in ("pos", "bhalf", "boss", "en"):  # data (identical) to save memory;
+            setattr(ev, k, getattr(sim, k))       # ecl eval uses held-out seeds
     ac = AC().to(dev)
     opt = torch.optim.Adam(ac.parameters(), lr=args.lr, eps=1e-5)
     n_upd_tot = max(1, int(args.steps / (args.B * args.rollout)))

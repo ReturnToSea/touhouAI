@@ -365,6 +365,17 @@ mode 3 (TT capture → defeat). `enemy_life_set` (op 110) writes `+0x2bb8` and
 `+0x2bbc`; `boss_set` (op 99) sets/clears the is-boss bit 6, not the damage
 gates.
 
+### move_bounds + enemy_set_hitbox (Part 12 prep, 2026-09-01)
+
+- **`move_bounds_set` (op 62)** — the engine clamps scripted boss movement to
+  the box (`FUN_004203b0`). Sub38 sets Letty's to `(32, 48, 352, 128)` and it
+  persists into the later phases; the VM now clamps `_update_motion` output to
+  it (no-op when the box is the full playfield). Letty's `move_position(-32,32)`
+  → `move_point(→192,128)` entrance legitimately starts her off-screen.
+- **`enemy_set_hitbox (x,y,z)` (op 101)** — body half-extents. A sub-enemy with
+  `x > 0.5` is a *lethal* orb (Sub41 NS2, Sub57 TT — `8×8`); the LC shooter orbs
+  are `0×0` (harmless). `danmaku_ecl` filters on this for FightSim's `en` array.
+
 ### The "Part 10 motion tail" was a method artefact (2026-09-01)
 
 `fit_motion.py`'s median-displacement-profile fit reported ~75 % within 5 px /
