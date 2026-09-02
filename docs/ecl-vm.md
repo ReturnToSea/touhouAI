@@ -119,17 +119,23 @@ in `enemy.extra`.
   angles as `0, +2π/3, −2π/3` via `math_float_add` + `math_norm_angle`, and
   every arithmetic opcode reachable in the fight being handled.
 
-### 4 · The PRNG · generator done; KS-test validation not yet run
+### 4 · The PRNG · **real algorithm found** (RE); KS test still outstanding
 
-`sim/ecl/rng.py` — the EoSD-family LCG (`state·0x343FD + 0x269EC3`, bits 16–30),
-seeded per VM, wired into every `set_*_rand_*` / `__math_rand*` opcode and
-swappable. It is deterministic per seed and uniform (checked in `vm_verify`).
+The [th07.exe RE session](th07-re-notes.md) settled which generator the danmaku
+uses. It is **not** the EoSD-family LCG that `sim/ecl/rng.py` originally had —
+that constant (`0x343FD`) appears in `th07.exe` only inside the unused MSVC
+`rand()`. The real one (`FUN_00431870`) is a 16-bit generator:
 
-Whether PCB draws from *exactly* this stream is still open. Part 5 now emits
-real `bullet_random` spreads, so the KS test against the spreads measured from
-the recordings is doable — it just hasn't been run. For training only the
-distribution matters, so this is low-stakes; worth doing before Stage C, not
-urgent before Stage B.
+```
+next16():  u = (state ^ 0x9630) + 0x9AAD;  state = rotl16(u, 2);  return state
+rand_u32(): (next16() << 16) | (next16() & 0xFFFF)
+rand_float(): rand_u32() / 2**32
+```
+
+`sim/ecl/rng.py` now implements this, wired into every `set_*_rand_*` /
+`__math_rand*` opcode as before. Deterministic per seed and uniform
+(`vm_verify`). The KS test against recorded `bullet_random` spreads is still the
+remaining check — but the generator is now the right one.
 
 ### 5 · Spawn-event emission · ✅ done (Lingering Cold count loose, see below)
 
@@ -235,14 +241,20 @@ can't close.
   retargets the live orbit — Letty freezes hers with `(DIST_ORIGIN, 0)` at
   t = 120. The orbit state is exposed back through the `CIRCLE_*` / `DIST_ORIGIN`
   / `ORIGIN_*` gvars (read *and written* mid-orbit).
+- **`move_point` / `move_dir_time` arg 1 is an easing mode** (from the
+  [th07.exe RE](th07-re-notes.md) — the engine shapes the interpolation
+  progress: 0 linear, 1–3 ease-in `x²/³/⁴`, 4–6 ease-out). The VM ignored it;
+  now applied. `move_dir_time` reworked back onto the interpolator (travel
+  `speed·duration` px along `angle`, eased). Boss track still pixel-exact for
+  127 frames.
 - **Verify** (`vm_verify`): a synthetic orbit spirals at 0.5 px/f and sweeps its
   angle; **the VM's Sub57 orbs' spiral rate matches the recorded Table-Turning
-  orbs**; boss track still exact. `align` match rate **21 % → 34 %** (the
-  Table-Turning and NS2 orbs now place correctly, dpos ~9 px).
+  orbs**; the RE decompile confirms the orbit integration is exactly this.
+  `align` match rate **21 % → 37 %**.
 
-**Still owed:** a dedicated boss-track verify pass (RNG-stream-matched) and a
-`move_point` deceleration check (current model is pure linear); the `__move_unknown`
-(47) / `__move_change_*` (59–61) opcodes (Letty doesn't use them).
+**Still owed:** a dedicated boss-track verify pass (RNG-stream-matched); the
+`__move_unknown` (47) / `__move_change_*` (59–61) opcodes (Letty doesn't use
+them).
 
 ---
 
@@ -302,7 +314,40 @@ trajectories `(frame, x, y, vx, vy)` + birth class / fx flag.
 
     Letty has **no delay bullets** — every bullet moves the frame it spawns.
 
-### 10 · Per-type motion models · first pass done · **blocked on Part 11**
+### 10 · Bullet motion model · engine-faithful sim built (RE); two behaviours still open
+
+The [th07.exe RE session](th07-re-notes.md) replaced guesswork with the actual
+per-frame bullet update. `sim/ecl/bullet_sim.py` implements it — the reference
+Part 12's GPU layer vectorises:
+
+- **The hang / launch** (what the earlier "hover then launch at 4×" was): a
+  bullet whose type-word has bit `0x2`/`0x4`/`0x8` spawns **4 velocity-steps
+  behind** its point in state 2/3/4, crawls at **0.5 / 0.4 / 0.333×** while its
+  materialise animation plays (~8–16 f), then on completion runs the live step
+  too (a one-frame crawl+full spike) and goes to full velocity. No spike above
+  base for plain bullets. Reproduces those to **0 px**.
+- **All 5 `bullet_effects` flags** decoded and implemented: `0x10` directional
+  accel (with the `−999` "along heading" sentinel and the automatic 180° flip
+  when speed reverses — the Lingering Cold snow), `0x20` turn+accel, `0x40`
+  pause-redirect, `0x80` pause-re-aim-at-player, `0xc00` **wall bounce**
+  (playfield 384 × 448) — Table-Turning.
+
+**Two behaviours are not fully modelled yet:**
+
+1. **The go-live launch ramp.** Some bullet graphics (not all) kick forward with
+   a decaying overshoot (~3–5× base, decaying over ~16 f) the frame the hang
+   ends. The RE confirms it happens but the exact code path isn't read; it's
+   currently fitted per-type from the recordings.
+2. **Mid-flight ECL speed-ups.** Letty's "spam phase" fires plain bullets then,
+   ~50 frames later, runs an ECL op that adds a big acceleration to the
+   already-live bullets. This uses effect slots the recorder doesn't log
+   (`+0xCF0`/`+0xD04`, not the `+0xC2C`/`+0xC34` it captures), so the params
+   aren't in the recording — needs a recorder extension or the ECL op decoded.
+
+The older empirical `fit_motion.py` (median displacement profiles, ~75 % within
+5 px) stays as the fallback / sanity check.
+
+<details><summary>earlier `fit_motion.py` notes</summary>
 
 `sim/ecl/fit_motion.py` groups the Part 9 traces by an observable "type" —
 `(class, fx_flag, fx_p1, fx_interval, base_speed, turns?, ramps?)` — and fits
@@ -346,7 +391,9 @@ p90**. The remaining ~25 % is a hard tail, and its cause is structural:
 - **Fallback if a per-instruction group still won't fit:** a small piecewise
   state machine for that one type, not a project stall.
 
-### 11 · Trace-to-spawn alignment + difficulty coefficients · matcher built, 34 % tagged, refining
+</details>
+
+### 11 · Trace-to-spawn alignment + difficulty coefficients · matcher built, 37 % tagged, refining
 
 `sim/ecl/align.py` matches each Part 9 bullet trace to the VM spawn that
 produced it: per phase it cross-correlates the two birth-rate histograms for the
