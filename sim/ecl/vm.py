@@ -85,6 +85,25 @@ class _Motion:
     radius: float = 0.0        # current orbit radius (accumulates)
     ang_speed: float = 0.0
     radius_growth: float = 0.0
+    ease: int = 0             # move_point / move_dir_time arg1 — easing curve
+
+
+def _ease(mode: int, x: float) -> float:
+    """Progress-fraction easing, from th07's move interpolation (see
+    docs/th07-re-notes.md): 0 linear, 1-3 ease-in x^2/3/4, 4-6 ease-out."""
+    if mode == 1:
+        return x * x
+    if mode == 2:
+        return x * x * x
+    if mode == 3:
+        return x * x * x * x
+    if mode == 4:
+        return 1.0 - (1.0 - x) ** 2
+    if mode == 5:
+        return 1.0 - (1.0 - x) ** 3
+    if mode == 6:
+        return 1.0 - (1.0 - x) ** 4
+    return x
 
 
 @dataclass
@@ -297,6 +316,7 @@ class VM:
             t = self.frame - m.start_frame
             if m.kind == "linear":                 # move_point: interpolate to a target
                 f = 1.0 if m.duration <= 0 else min(1.0, t / m.duration)
+                f = _ease(m.ease, f)               # arg1 of move_point/move_dir_time
                 e.x = m.x0 + (m.x1 - m.x0) * f
                 e.y = m.y0 + (m.y1 - m.y0) * f
                 e.z = m.z0 + (m.z1 - m.z0) * f
@@ -723,18 +743,22 @@ def _set_angle(vm, e, ins):
     e.mangle, e.motion = e.get(ins.args[0]), None
 
 
-@_op(54)  # move_dir_time(duration, _, angle, speed) — set heading+speed for
-def _move_dir_time(vm, e, ins):   # `duration` frames then stop. The recorded orbs
-    dur, _u, angle, speed = (e.get(a) for a in ins.args)   # that call this with
-    e.mangle, e.mspeed, e.maccel, e.mangvel = angle, speed, 0.0, 0.0  # duration 0
-    e.stop_at = vm.frame + max(0, int(dur))   # sit ~still — so 0 == stop next frame
-    e.motion = None
+@_op(54)  # move_dir_time(duration, ease, angle, speed) — travel `speed*duration`
+def _move_dir_time(vm, e, ins):   # px along `angle` over `duration` frames, eased.
+    dur, ease, angle, speed = (e.get(a) for a in ins.args)
+    dur = max(0, int(dur))
+    tx = e.x + math.cos(angle) * speed * dur
+    ty = e.y + math.sin(angle) * speed * dur
+    e.motion = _Motion("linear", vm.frame, dur, e.x, e.y, e.z, tx, ty, e.z,
+                       ease=int(ease))
+    e.mspeed = 0.0
 
 
-@_op(55)  # move_point(duration, _, x, y, z) — linear move to an absolute point
+@_op(55)  # move_point(duration, ease, x, y, z) — move to an absolute point, eased
 def _move_point(vm, e, ins):
-    dur, _u, x, y, z = (e.get(a) for a in ins.args)
-    e.motion = _Motion("linear", vm.frame, int(dur), e.x, e.y, e.z, x, y, z)
+    dur, ease, x, y, z = (e.get(a) for a in ins.args)
+    e.motion = _Motion("linear", vm.frame, int(dur), e.x, e.y, e.z, x, y, z,
+                       ease=int(ease))
     e.mspeed = 0.0
 
 
