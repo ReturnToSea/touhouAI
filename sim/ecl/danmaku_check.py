@@ -15,7 +15,7 @@ import numpy as np
 
 from .parser import parse_file
 from .vm import VM
-from .bullet_sim import from_spawn, simulate
+from .bullet_sim import from_spawn, simulate, cull_frame
 from .bullet_trace import load_traces
 
 _ECL = Path(__file__).resolve().parents[2] / "tools" / "th07_ecl" / "ecldata1.ecl"
@@ -33,15 +33,16 @@ def vm_density(seed: int = 0, frames: int = 12000) -> np.ndarray:
 
     count = np.zeros(frames + MAXLIFE, np.int32)
     for s in vm.bullets:
-        xy = simulate(from_spawn(s), MAXLIFE)
-        on = ((xy[:, 0] >= -8) & (xy[:, 0] < PF_W + 8) &
-              (xy[:, 1] >= -8) & (xy[:, 1] < PF_H + 8))
-        # a bullet is gone once it leaves and doesn't come back
-        if not on[0]:
+        p = from_spawn(s)
+        xy = simulate(p, MAXLIFE)
+        on0 = (-8 <= xy[0, 0] < PF_W + 8) and (-8 <= xy[0, 1] < PF_H + 8)
+        if not on0:                       # spawned off-screen -> engine never shows it
             continue
-        last = np.max(np.where(on)[0]) if on.any() else 0
+        # the engine erases the bullet the frame it clears the play area (plain)
+        # or after a 128-frame grace (redirect/bounce) -- it does NOT come back.
+        life = cull_frame(xy, p.fx_flag)
         f0 = int(s.frame)
-        count[f0:f0 + last + 1] += 1
+        count[f0:f0 + life] += 1
     return count[:frames]
 
 

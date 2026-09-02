@@ -192,6 +192,39 @@ def _norm(a: float) -> float:
     return a
 
 
+# bullets carrying one of these fx bits are expected to leave and come back, so
+# the engine gives them a 128-frame off-screen grace (`FUN_00425a50`, counter
+# +0xbfe counts up to 0x80).  Every other bullet is culled the *first* frame its
+# bounding box fully clears the play area (grace counter starts at 0).
+FX_OFFSCREEN_GRACE_MASK = 0x40 | 0x80 | 0x100 | 0x400 | 0x800   # == 0xDC0
+_PLAIN_GRACE = 0
+_FX_GRACE = 128
+
+
+def cull_frame(xy: np.ndarray, fx_flag: int, size: float = 24.0) -> int:
+    """First frame index at which the engine would have erased this bullet.
+
+    `FUN_0042d6d8`: a bullet is off-screen once
+    ``x < -size/2 or x > 384+size/2 or y < -size/2 or y > 448+size/2``
+    (``size`` is the bullet type's sprite extent, ~16-64 px).  A plain bullet is
+    erased immediately; a redirect/bounce bullet survives 128 off-screen frames.
+    Returns ``len(xy)`` if it never leaves within the propagated window.
+    """
+    m = size / 2.0
+    off = ((xy[:, 0] < -m) | (xy[:, 0] > PLAYFIELD_W + m) |
+           (xy[:, 1] < -m) | (xy[:, 1] > PLAYFIELD_H + m))
+    grace = _FX_GRACE if (int(fx_flag) & FX_OFFSCREEN_GRACE_MASK) else _PLAIN_GRACE
+    run = 0
+    for i, is_off in enumerate(off):
+        if is_off:
+            run += 1
+            if run > grace:
+                return i - run + 1 + grace
+        else:
+            run = 0
+    return len(xy)
+
+
 def _measure_hang(dm: np.ndarray, base: float) -> tuple[int, int]:
     """(hang_state, hang_frames) from a bullet's leading displacement run."""
     h = 0

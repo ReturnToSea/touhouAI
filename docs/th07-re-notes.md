@@ -235,8 +235,69 @@ C:\Users\spore\th07_re\              — decomp_all.c, functions.csv, bullet_poo
 - **`move_dir_time` (54)** — `duration < 1` just sets the angle; `≥ 1`
   interpolates. Matches our impl.
 
-**Still open after the audit:** Lingering Cold over-fire — the snow's
-*spawn* count is now roughly right, but bullet_sim keeps each snowflake on
-screen ~20–25 f too long: after the decel-reversal the recorded steady speed is
-~0.67 px/f where the flag-0x10 model gives ~1.5–1.9. The post-reversal regime of
-flag `0x10` needs another look.
+## Disassembly audit 2 (2026-09-01) — the VM execution backbone
+
+Read the remaining inferred handlers straight from `fn410520.c` + the
+phase-machine / bullet-update functions in `decomp_all.c`. Everything below was
+"inferred, matches recordings"; it is now engine-confirmed. Fixes folded in.
+
+- **`call` (op 41, `caseD_28`)** — pushes the whole context (IP + all locals,
+  0x86 dwords) onto a **16-deep stack** (`+0x8fc`, frame stride 0x218; ptr
+  `+0x2a7c`), loads sub `arg0 & 0xFFFF`, resets time/IP to 0. `arg0` is the only
+  operand. ✓ our VM (the 16-limit is academic for Letty).
+- **`ret` (op 42, `caseD_29`)** — pops, restores context; the `+0x8f4` flag
+  routes an interrupt-return through `+0x2ee8`→`+0x6fc`. ✓
+- **`wait` (op 45)** — sets a frame timer at `+0x76c`; `LAB_0041069a` halts all
+  instruction processing while `+0x76c > 0`. ✓
+- **`jump` (op 2, `caseD_1`)** — `time = arg0; ip += arg1` **bytes**. Our parser
+  resolves the byte delta to an instruction index (`off_to_idx`), so
+  `e.ip = arg1` is correct. ✓
+- **`jump_dec` (op 3, `case 2`)** — decrements the counter gvar
+  **unconditionally** (`*p += -1`) and jumps while the result stays positive.
+  **FIX:** our handler only wrote the counter back when it jumped, so a loop
+  counter ended on 1 instead of 0. Now unconditional (`vm.py:_jump_dec`).
+- **Unknown opcodes** — `caseD_7e` just advances to the next instruction. ✓
+  validates stubbing the ~25 cosmetic opcodes (anm/sound/UI) as no-ops.
+- **Phase machine** — `FUN_0041fd70` (life thresholds) + `FUN_0041ff80`
+  (`boss_timer`): up to **4 HP thresholds** at `+0x2ebc[4]` with callback subs
+  at `+0x2ecc[4]`; the timer sub is at `+12000`, the interrupt sub at `+0x2ee4`.
+  On any transition the engine: **snaps HP up to the threshold value**, jumps to
+  the callback, **zeroes the call stack** (`+0x2a7c = 0`), clears the timer +
+  interrupt, and **kills / resets every sub-enemy** (0x1e0-slot loop). The timer
+  path additionally clears bullets (`FUN_00424740(10)`). ✓ our `_fire` already
+  killed children + `switch_to` zeroed the stack; **added** the HP-snap
+  (`vm.py:_service_callbacks`, matters for Part 7).
+- **`enemy_create_rel` / `_abs` (op 93 / 92)** → `FUN_0041f430`: **gated by
+  `0 < enemy.life` (`+0x2bb8`)** — a boss at 0 HP (the death/transition window)
+  spawns nothing. Free-slot scan over the **480-slot shared enemy pool** (stride
+  0x4f48); child inherits the parent's 0x1a-dword arg block; **the child's
+  frame-0 block runs immediately, this frame**. ✓ our `_spawn_child` matches;
+  **added** the `life > 0` gate (only when `max_life > 0`, i.e. the boss).
+- **`bullet_effects` (op 79, `case 0x4e`)** — **arg0 is a staging-slot index
+  0..4**, written to `enemy+0x2bf4 + slot*0x18`. It is an **overwrite, not an
+  append**, and there is no "flag 1 starts a fresh list". Arg order is
+  `(slot, flag, gate, interval, repeat, p1, p2)`. **FIX:** our handler appended
+  (capped at 5) and used `flag == 1` as a reset heuristic → an orb firing the
+  same `bullet_effects(0, flag=0x40)` in a loop stacked 5 identical redirect
+  entries, so those bullets stopped-and-redirected 5× and lingered on screen.
+  Now a fixed 5-slot template written by index (`vm.py:_bullet_effects`).
+  Lingering Cold `danmaku_check` ratio 1.23 → 1.17, curve corr 0.93 → 0.96.
+- **Bullet cull** — `FUN_0042d6d8`: a bullet is off-screen once its box fully
+  clears `[0,384]×[0,448]` (margin = ½ the type's sprite extent, ~8–32 px). A
+  plain bullet is erased that **first** frame; a bullet carrying a bit in mask
+  `0xDC0` (pause-redirect / pause-aim / bounce) gets a **128-frame** off-screen
+  grace (`+0xbfe` counts up to 0x80). **FIX:** `danmaku_check` took the *last*
+  on-screen frame (allowed re-entry); now `bullet_sim.cull_frame` applies the
+  engine rule.
+- **flag 0x10** (`FUN_004251a0`) — re-read and cross-checked against a recorded
+  snow bullet: it is a clean `vel += p1·(cos,sin)(dir)` for `interval` frames
+  with `angle = atan2(vel)` each frame, `dir` fixed at arm time (`p2`, or the
+  spawn heading if `p2 ≤ -990`). The recording is a textbook `p1 = -0.025`
+  parabola — **our model was already exact.** The earlier "snow lingers ~20 f
+  too long" note was the effect-*stacking* bug above, not the motion model.
+
+**Still open:** Lingering Cold still births ~+18 % bullets vs the recordings
+(VM 3389 vs ~2861 for the phase) — an orb count / fire-cadence gap in
+`enemy_create_rel` *timing*, which needs the Part 11 trace↔spawn alignment to
+pin down (align is only 39 % tagged). Motion + cull + effects are confirmed
+faithful, so the residual is purely spawn scheduling.

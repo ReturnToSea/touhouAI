@@ -32,6 +32,9 @@ _F_LO, _F_HI = 10004, 10011        # F0..F7  -> slots 0..7
 _I2_LO, _I2_HI = 10012, 10015      # I4..I7  -> slots 4..7
 _F2_LO, _F2_HI = 10072, 10073      # F8..F9  -> slots 8..9
 
+# an unused bullet_effects staging slot (flag 0 -> never arms)
+_INERT_FX = (0.0, 0.0, 0, 0, 0, 0.0)   # (p1, p2, interval, repeat, flag, gate)
+
 _CMP = {
     28: lambda a, b: a == b, 29: lambda a, b: a == b,
     30: lambda a, b: a != b, 31: lambda a, b: a != b,
@@ -156,10 +159,11 @@ class Enemy:
         self.pending_interrupt: int | None = None
 
         self.shoot_offset = (0.0, 0.0, 0.0)
-        # bullet_effects staging list built up by op 79, copied onto every spawn.
-        # Each entry: (p1, p2, interval, repeat, flag, gate). flag 1 starts a
-        # fresh list (it's the launch-kick entry the ECL always writes first).
-        self.pending_effects: list[tuple] = []
+        # bullet_effects staging template (op 79). The engine keeps FIVE fixed
+        # slots on the enemy struct (+0x2bf4, 0x18 bytes each); op 79 arg0 is the
+        # slot *index* to overwrite, not an append. Every spawn copies all five.
+        # Each entry: (p1, p2, interval, repeat, flag, gate); flag 0 == inert.
+        self.pending_effects: list[tuple] = [_INERT_FX] * 5
         self.motion: _Motion | None = None          # move_point interpolator / orbit
         # free-flight physics (used when `motion` is None) — the engine integrates
         # these every frame: speed += accel, angle += ang_vel, pos += speed·[cos,sin]
@@ -257,7 +261,7 @@ class Enemy:
         self.stack = []
         self.running = True
         self.spell = None
-        self.pending_effects = []
+        self.pending_effects = [_INERT_FX] * 5
         self.vm._emit("enter_sub", f"Sub{sub}  <{reason}>")
 
     def damage(self, amount: int):
@@ -439,7 +443,9 @@ class VM:
                 self._fire(e, e.death_sub, "timeout -> death_callback")
         elif (e.life_thresh is not None and e.life_sub is not None
               and e.life <= e.life_thresh):
-            tgt, e.life_thresh = e.life_sub, None
+            # FUN_0041fd70 snaps HP back *up* to the threshold so it can't keep
+            # draining into the next phase before the callback re-declares it.
+            tgt, e.life, e.life_thresh = e.life_sub, e.life_thresh, None
             if e.spell is not None:
                 self._emit("spell_captured", str(e.spell))
             self._fire(e, tgt, "life_callback")
@@ -508,10 +514,12 @@ def _jump(vm, e, ins):
 
 @_op(3)  # jump_dec(time, target, counter_var) — loop
 def _jump_dec(vm, e, ins):
+    # FUN_00410520 case 2: the engine decrements the counter *unconditionally*
+    # (`*piVar10 += -1`) and jumps while the result is still positive.
     t, tgt, var = ins.args
     c = e.get(var) - 1
+    e.set(var, c)
     if c > 0:
-        e.set(var, c)
         e.frame, e.ip = t, tgt
 
 
@@ -699,15 +707,18 @@ def _bullet(vm, e, ins):
     vm._emit_bullets(e, _BULLET_KIND[ins.opcode], ins.args, source_ip=ins.index)
 
 
-@_op(79)  # bullet_effects(gate, flag, _, interval, repeat, p1, p2) — appends a
-def _bullet_effects(vm, e, ins):      # staging entry; flag 1 starts a fresh list.
+@_op(79)  # bullet_effects(slot, flag, gate, interval, repeat, p1, p2)
+def _bullet_effects(vm, e, ins):
+    # FUN_00410520 case 0x4e: arg0 is the staging-slot index (0..4) to OVERWRITE
+    # (`param_1 + 0x2bf4 + slot*0x18`), not an append. args -> entry fields:
+    #   arg1->flag  arg2->gate  arg3->interval  arg4->repeat  arg5->p1  arg6->p2
     a = [e.get(x) for x in ins.args]
-    entry = (float(a[5]), float(a[6]), int(a[3]), int(a[4]), int(a[1]), float(a[0]))
+    slot = int(a[0]) & 7
+    if slot > 4:
+        return
+    entry = (float(a[5]), float(a[6]), int(a[3]), int(a[4]), int(a[1]), float(a[2]))
     #        p1           p2           interval    repeat      flag        gate
-    if entry[4] == 1:                              # the launch-kick entry
-        e.pending_effects = [entry]
-    elif len(e.pending_effects) < 5:
-        e.pending_effects.append(entry)
+    e.pending_effects[slot] = entry
 
 
 @_op(78)  # shoot_offset(x, y, z)
@@ -729,14 +740,25 @@ def _kill_all(vm, e, ins):
     vm._pending_children.clear()
 
 
+def _cannot_spawn(e) -> bool:
+    # FUN_0041f430 is gated by `0 < enemy.life` (+0x2bb8): a boss whose HP has
+    # already hit 0 (the death/transition window) spawns nothing.  Life-less
+    # sub-enemies (orbs) keep `max_life == 0` and are never gated.
+    return e.max_life > 0 and e.life <= 0
+
+
 @_op(93)  # enemy_create_rel(sub, x, y, z, ...)
 def _create_rel(vm, e, ins):
+    if _cannot_spawn(e):
+        return
     sub, dx, dy, dz = (e.get(a) for a in ins.args[:4])
     vm._spawn_child(e, int(sub), dx, dy, dz)
 
 
 @_op(92)  # enemy_create_abs(sub, x, y, z, ...)
 def _create_abs(vm, e, ins):
+    if _cannot_spawn(e):
+        return
     sub, x, y, z = (e.get(a) for a in ins.args[:4])
     c = e.__class__(vm, int(sub), is_boss=False)
     c.x, c.y, c.z = x, y, z

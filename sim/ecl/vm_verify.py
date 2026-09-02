@@ -132,8 +132,9 @@ def test_control_flow() -> bool:
         _instr(0, 4, __V(10001), 1),            # after the loop: I1 = 1
     ]})
     e = _run_sub(ecl, 0, 3)
+    # the engine decrements unconditionally, so the counter lands on 0 (not 1)
     ok &= _check("jump_dec loop iterates then exits",
-                 e.ivars[0] == 7 and e.ivars[4] == 1 and e.ivars[1] == 1,
+                 e.ivars[0] == 7 and e.ivars[4] == 0 and e.ivars[1] == 1,
                  f"I0={e.ivars[0]} I4={e.ivars[4]} I1={e.ivars[1]}")
 
     # conditional jump: DIFFICULTY(3) != 0 -> take the jump, skip the trap

@@ -152,22 +152,32 @@ transition clear the sub-enemies (the screen-clear).
 Three engine details this pinned down: `wait(N)` **freezes** the per-sub frame
 for N frames rather than advancing it (otherwise every instruction after a
 `wait` gets skipped by the time gate); `call` maps the caller's `ARG_*` onto the
-callee's `PARAM_*` and restores locals on `ret`; and **`bullet_effects`'s first
-argument is an enable bit** — every `arg0 == 0` call (including the
-`(0, 1, 0, −1, …)` "clear" sentinel) leaves the recorded bullets `fx_flag 0`,
-while every `arg0 == 1` call's flag / interval / p1 / p2 match the recording
-exactly. Reading it as a payload field flagged ~2160 NS2 bullets that are
-actually plain.
+callee's `PARAM_*` and restores locals on `ret`; and `bullet_effects`'s first
+argument selects behaviour.
+
+> **Superseded by disassembly audit 2 (see `th07-re-notes.md`).** `call` / `ret`
+> / `wait` / `jump` / `jump_dec` and the phase machine were all read from
+> `fn410520.c` + `FUN_0041fd70` / `FUN_0041ff80` and confirmed. Two fixes fell
+> out: `jump_dec` decrements its counter **unconditionally**; and
+> **`bullet_effects` arg0 is a staging-slot index 0..4, an overwrite** — not an
+> enable bit and not an append. The enable-bit reading happened to zero the
+> right NS2 bullets (their slot-0 write carries `flag 0`), but an orb looping
+> `bullet_effects(0, flag=0x40)` was stacking 5 redirect entries. The slot-write
+> fix cut the Lingering Cold `danmaku_check` ratio 1.23 → 1.17 (corr → 0.96).
+> The engine also gates `enemy_create_rel` on `boss.life > 0` and snaps HP up to
+> the crossed threshold on a phase transition — both now in the VM.
 
 - **Verify** (`python -m sim.ecl.vm_verify`): VM spawn-event count per phase vs
   the mean bullet-birth count over the ten `sim/fights/letty_*` recordings —
   **NS1 +1 %, NS2 +1 %, Table-Turning +6 %, total +7 %**. Lingering Cold runs
-  **+18 %** on spawn count (**~55 %** on on-screen count once bullet lifetimes
-  compound — see `danmaku_check.py`) — the `Sub42 → Sub43 → Sub36` orbiting-orb
-  chain over-fires. The other three phases match to a few percent end to end.
-  This is the one open danmaku discrepancy for Letty; the frame-level pipeline
-  now makes it directly debuggable. Also: Sub40 computes its three sub-enemy
-  spawn angles `0, ±2π/3`.
+  **+18 %** on spawn count — the `Sub42 → Sub43 → Sub36` orbiting-orb chain
+  over-fires. After disassembly audit 2 (effect-slot fix + engine-faithful
+  bullet cull), `danmaku_check` is **ratio 1.17, curve corr 0.96, peak VM 502 /
+  rec 498**; the residual is concentrated in the Lingering Cold window (VM ~300
+  vs rec ~230 on-screen). Motion, cull and effects are now confirmed faithful,
+  so this is purely an orb count / fire-cadence gap — it needs the Part 11
+  trace↔spawn alignment (39 % tagged) to localise. Also: Sub40 computes its
+  three sub-enemy spawn angles `0, ±2π/3`.
 
 ### 6 · Sub-enemies — `enemy_create_rel` · ✅ done
 
