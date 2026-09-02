@@ -109,10 +109,15 @@ def main():
             dmg_frac = min(1.0, r["dmg"] / hp_scale) if r["dmg"] > 0 else 0.0
             killed = 1.0 if r["killed"] else 0.0
             rows.append([time.time(), steps, r["active_s"], killed, dmg_frac])
+            kk, kb, kd = r.get("killer_kind", 0), r.get("killer_box", 0.0), r.get("killer_dist", 0.0)
+            where = (f"phase {r.get('death_phase','?')} (bar {r.get('n_bars','?')}, "
+                     f"HP {r.get('death_life',0):.0f})") if not killed else ""
+            killer = (f"  killer: class {kk} box {kb:.1f} @ {kd:.1f}px"
+                      if not killed and kd > 0 else "")
             print(f"[transfer] {steps/1e6:5.0f}M ep{k}: {r['active_s']:5.1f}s active "
                   f"(lead-in {r['lead_in_s']:.0f}s, total {r['total_s']:.0f}s)  "
-                  f"{'KILL' if killed else 'died'}  "
-                  f"lives {r['lives0']:.0f}->{r['lives_end']:.0f} stage {r['stage_end']}",
+                  f"{'KILL' if killed else 'died ' + where}  "
+                  f"lives {r['lives0']:.0f}->{r['lives_end']:.0f}{killer}",
                   flush=True)
 
         if rows:

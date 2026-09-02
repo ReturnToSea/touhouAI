@@ -69,8 +69,16 @@ def _type_hitboxes() -> dict[int, float]:
 _TYPE_HB = _type_hitboxes()
 
 
-def _bullet_hb(btype: int) -> float:
-    return _TYPE_HB.get(int(btype) & 0xFFFF, BULLET_HB)
+def _bullet_hb(btype: int, speed: float = 0.0) -> float:
+    bt = int(btype) & 0xFFFF
+    # Lingering Cold's big snow crystals: the game renders the speed-3.5 "lead"
+    # bullet of every Sub44-47 fan (btype 576) as the large class-2 sprite with a
+    # 10px box (half 5.0), not the 6px class-3 (half 3.0) the other 96% get.
+    # Verified from the recordings: 100% of class-2 LC bullets are btype-576 born
+    # at |vel| = 3.5.  _TYPE_HB medians it away to 3.0, so special-case it.
+    if bt == 576 and speed >= 3.0:
+        return 5.0
+    return _TYPE_HB.get(bt, BULLET_HB)
 
 # Letty's real per-phase HP budget + damage multiplier (Part 7, revised twice):
 #   NS1 (Sub38): life_set 15000, life_callback_ex -> LC at HP 1700 (13300 drain),
@@ -175,7 +183,7 @@ def build_schedule(seed: int, difficulty: int = 3) -> dict:
             if L <= 0:
                 continue
             pos[f0:f0 + L, sl] = xy[i, :L]
-            half[f0:f0 + L, sl] = _bullet_hb(s.btype)
+            half[f0:f0 + L, sl] = _bullet_hb(s.btype, s.speed)
 
     # --- aimed bullets -> param table (re-aimed at runtime) --------------
     vpx, vpy = VM_PLAYER
@@ -191,7 +199,7 @@ def build_schedule(seed: int, difficulty: int = 3) -> dict:
             x0=ab["x"].astype(np.float32), y0=ab["y"].astype(np.float32),
             speed=ab["speed"].astype(np.float32),
             unaim=unaim.astype(np.float32),
-            hb=np.array([_bullet_hb(s.btype) for s in aimed], np.float32),
+            hb=np.array([_bullet_hb(s.btype, s.speed) for s in aimed], np.float32),
             hang_state=ab["hang_state"].astype(np.float32),
             hang_frames=ab["hang_frames"].astype(np.float32),
             fx_flag=ab["fx_flag"].astype(np.float32),
