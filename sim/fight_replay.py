@@ -49,7 +49,13 @@ FIGHTS = Path(__file__).resolve().parent / "fights"
 POOL = 1025                      # th07 bullet pool size
 PW, PH = 384.0, 448.0           # playfield size (re-aimed bullets despawn off it)
 MAX_EN = 48                      # max satellite sub-enemies tracked per frame
-PLAYER_HB = 1.8                  # measured player half-extent
+# measured player half-extent is ~1.6-1.8; we train against 2.0 as a deliberate
+# safety margin. A policy that keeps 2.0 px of clearance is still safe when the
+# real hitbox is smaller, and a constant +0.2 (vs random jitter) doesn't distort
+# the pattern geometry -- it just asks for uniformly more room. Both the sim
+# collision AND the obs strike radius (native/obs.py PLAYER_HALF) use this value
+# so the policy's danger perception stays calibrated to its sim reality.
+PLAYER_HB = 2.0
 BULLET_HB_DEFAULT = 2.5          # fallback when a recording has no hitbox column
 ENEMY_BODY_SCALE = 2.0 / 3.0     # player-body vs enemy-body box (pytouhou)
 
@@ -301,6 +307,42 @@ class FightSim:
             print(f"[FightSim] aim pool on ({int(self.aim.src_n.float().mean())} "
                   f"aimed shots/schedule)", flush=True)
         self.reset()
+
+    def swap_slot(self, i: int, r: dict) -> None:
+        """Overwrite schedule slot i with a freshly-generated danmaku layout
+        (streaming schedules). maxF is fixed; a longer rec is clamped to it.
+        Callers should reset any env currently assigned to slot i afterwards."""
+        L = min(r["pos"].shape[0], self.maxF)
+        pos = torch.full((self.maxF, POOL, 2), float("nan"))
+        pos[:L] = torch.from_numpy(r["pos"][:L])
+        self.pos[i].copy_(pos.to(self.d))
+        half = torch.full((self.maxF, POOL), BULLET_HB_DEFAULT)
+        half[:L] = torch.from_numpy(r["half"][:L])
+        self.bhalf[i].copy_(half.to(self.d))
+        boss = torch.full((self.maxF, 2), 192.0)
+        boss[:L] = torch.from_numpy(r["boss"][:L])
+        self.boss[i].copy_(boss.to(self.d))
+        en = torch.full((self.maxF, MAX_EN, 3), float("nan"))
+        en[:L] = torch.from_numpy(r["en"][:L])
+        self.en[i].copy_(en.to(self.d))
+        self.rec_len[i] = r["pos"].shape[0]
+        self.rec_len_gpu[i] = r["pos"].shape[0]
+        if self.phasing:
+            pw = r["phases"] or [(0, 0, self.maxF)]
+            self.n_ph[i] = min(len(pw), MAX_PHASES)
+            hp_real, dm = r.get("phase_hp"), r.get("phase_dmg_mult")
+            ph = torch.zeros(MAX_PHASES, 5)
+            for j, (cs, fa, e) in enumerate(pw[:MAX_PHASES]):
+                cs = max(0, min(cs, self.maxF - 4))
+                fa = max(cs, min(fa, self.maxF - 3))
+                e = min(self.maxF - 2, max(fa + 1, e))
+                hp = (hp_real[j] if hp_real and j < len(hp_real)
+                      else _SYNTH_DPS * (e - fa) * KILL_FRAC)
+                mult = dm[j] if dm and j < len(dm) else 1.0
+                ph[j] = torch.tensor([cs, fa, e, hp, mult], dtype=torch.float32)
+            self.ph[i].copy_(ph.to(self.d))
+            self.n_ph_gpu[i] = self.n_ph[i].item()
+        self.aim.swap_slot(i, r.get("aimed"))
 
     def _sample_starts(self, idx):
         n = len(idx)

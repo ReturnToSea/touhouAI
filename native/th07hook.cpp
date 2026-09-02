@@ -165,7 +165,8 @@ constexpr float DIR_SPEED_FOCUS = 1.6f;  // focused move speed (obs.py v28: esca
                                          // uses this when the player is focused)
 constexpr float DIR_HORIZON = 20.0f;     // escape look-ahead (frames)
 constexpr float DIR_HIT_R2  = 7.0f * 7.0f;   // fallback only (real bullets carry a box)
-constexpr float PLAYER_HALF = 1.8f;      // player AABB half-extent (== sim PLAYER_HB);
+constexpr float PLAYER_HALF = 2.0f;      // player AABB half-extent (== sim PLAYER_HB);
+//   measured ~1.6-1.8; 2.0 is a deliberate safety margin (train conservative).
 //   a bullet's real strike radius is its half-extent + PLAYER_HALF. Mirror of
 //   native/obs.py: the danger grid stamps a plus of cells its (half+PLAYER_HALF)
 //   disc reaches, and the escape scan uses the same per-bullet radius.

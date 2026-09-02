@@ -45,15 +45,22 @@ class AimPool:
         self.active_any = any(r.get("aimed") is not None for r in recs)
         if not self.active_any:
             return
-        f = {k: _pad(recs, k).to(device) for k in
-             ("frame", "x0", "y0", "speed", "unaim", "hb", "hang_state",
-              "hang_frames", "fx_flag", "fx_p1", "fx_p2", "fx_interval",
-              "fx_repeat", "launch", "end")}
+        self._src_keys = ("frame", "x0", "y0", "speed", "unaim", "hb",
+                          "hang_state", "hang_frames", "fx_flag", "fx_p1",
+                          "fx_p2", "fx_interval", "fx_repeat", "launch", "end")
+        # +256 head-room so a streamed schedule with a few more aimed shots than
+        # the startup pool doesn't get clamped when swapped into a slot
+        pad = {k: _pad(recs, k) for k in self._src_keys}
+        self.S = max(t.shape[1] for t in pad.values()) + 256
+        f = {}
+        for k, t in pad.items():
+            g = torch.zeros(t.shape[0], self.S, dtype=t.dtype)
+            g[:, :t.shape[1]] = t
+            f[k] = g.to(device)
         self.src = f                                    # [n_rec, S] each
         self.src_n = torch.tensor(
             [len(r["aimed"]["frame"]) if r.get("aimed") else 0 for r in recs],
             device=device)
-        self.S = f["frame"].shape[1]
         z = lambda: torch.zeros(B, max_aim, device=device)         # noqa: E731
         self.px, self.py = z(), z()
         self.vx, self.vy = z(), z()
@@ -71,6 +78,21 @@ class AimPool:
         self.rec_id = torch.zeros(B, dtype=torch.long, device=device)
         self.t0 = torch.zeros(B, dtype=torch.long, device=device)
         self._bi = torch.arange(B, device=device)
+
+    def swap_slot(self, i: int, aim_tbl) -> None:
+        """Replace schedule slot i's aimed-bullet source (streaming schedules)."""
+        if not self.active_any:
+            return
+        for k in self._src_keys:
+            self.src[k][i].zero_()
+        if aim_tbl is None:
+            self.src_n[i] = 0
+            return
+        n = min(len(aim_tbl["frame"]), self.S)
+        for k in self._src_keys:
+            self.src[k][i, :n] = torch.as_tensor(
+                aim_tbl[k][:n], dtype=self.src[k].dtype, device=self.d)
+        self.src_n[i] = n
 
     # ------------------------------------------------------------------
     def reset(self, idx, rec_id, t0):

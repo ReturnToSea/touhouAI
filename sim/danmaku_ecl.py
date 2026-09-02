@@ -19,6 +19,7 @@ bullets are *generated* from `(spawn, angle, speed)`.
 from __future__ import annotations
 
 import heapq
+import os
 import sys
 from pathlib import Path
 
@@ -244,6 +245,63 @@ def build_schedule(seed: int, difficulty: int = 3) -> dict:
 
 def build_schedules(n: int, seed0: int = 0, difficulty: int = 3) -> list[dict]:
     return [build_schedule(seed0 + i, difficulty) for i in range(n)]
+
+
+# --- streaming: a background process keeps a directory topped up with fresh
+# schedules so training never sees the same 48 layouts for 800M steps ----------
+_AIM_KEYS = ("frame", "x0", "y0", "speed", "unaim", "hb", "hang_state",
+             "hang_frames", "fx_flag", "fx_p1", "fx_p2", "fx_interval",
+             "fx_repeat", "launch", "end")
+
+
+def save_schedule(path, s: dict) -> None:
+    """Flatten a schedule dict to a single .npz (dicts/lists don't savez)."""
+    out = dict(pos=s["pos"], half=s["half"], boss=s["boss"], en=s["en"],
+               phases=np.asarray(s["phases"], np.int64),
+               phase_hp=np.asarray(s["phase_hp"], np.float32),
+               phase_dmg_mult=np.asarray(s["phase_dmg_mult"], np.float32),
+               has_aimed=np.array(s.get("aimed") is not None))
+    if s.get("aimed"):
+        for k in _AIM_KEYS:
+            out[f"aim_{k}"] = s["aimed"][k]
+    tmp = str(path) + ".tmp"
+    np.savez_compressed(tmp, **out)            # pos is ~40% NaN -> compresses ~3x;
+    os.replace(tmp + ".npz", path)             # write-then-rename so readers never
+    #                                            see a half-written file
+
+
+def load_schedule(path) -> dict:
+    d = np.load(path, allow_pickle=False)
+    aimed = ({k: d[f"aim_{k}"] for k in _AIM_KEYS}
+             if bool(d["has_aimed"]) else None)
+    return dict(pos=d["pos"], half=d["half"], boss=d["boss"], en=d["en"], trim=0,
+               name="letty_ecl_stream",
+               phases=[tuple(int(x) for x in row) for row in d["phases"]],
+               phase_hp=list(map(float, d["phase_hp"])),
+               phase_dmg_mult=list(map(float, d["phase_dmg_mult"])), aimed=aimed)
+
+
+def stream_worker(pooldir, seed0: int = 100_000, difficulty: int = 3,
+                  max_pending: int = 60) -> None:
+    """Loop forever: build a schedule, drop it in `pooldir` as NNNNNNNNN.npz.
+    Throttles when the consumer is behind (dir already has max_pending files).
+    `seed0` is offset by the worker's pid so parallel workers don't collide."""
+    import time
+    from pathlib import Path
+    pooldir = Path(pooldir)
+    pooldir.mkdir(parents=True, exist_ok=True)
+    ctr = seed0 + (os.getpid() % 997) * 100_000
+    while True:
+        pend = list(pooldir.glob("[0-9]*.npz"))
+        if len(pend) >= max_pending:
+            time.sleep(2.0)
+            continue
+        try:
+            s = build_schedule(ctr, difficulty)
+            save_schedule(pooldir / f"{ctr:09d}.npz", s)
+        except Exception as e:               # never let the worker die on one bad seed
+            print(f"[stream] seed {ctr} failed: {e}", flush=True)
+        ctr += 1
 
 
 # --------------------------------------------------------------------------

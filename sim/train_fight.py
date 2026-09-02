@@ -78,6 +78,12 @@ def main():
                     help="initial phase_start_mix (ecl default 0.55), annealed to 0")
     ap.add_argument("--phase-mix-frac", type=float, default=0.6,
                     help="anneal phase_start_mix to 0 over this fraction of steps")
+    ap.add_argument("--stream-schedules", type=int, default=3,
+                    help="ecl only: background processes keep generating fresh "
+                         "danmaku layouts; swap this many schedule slots every "
+                         "--swap-every updates (0 = static pool, the old way)")
+    ap.add_argument("--swap-every", type=int, default=15)
+    ap.add_argument("--stream-workers", type=int, default=2)
     args = ap.parse_args()
 
     dev = "cuda" if torch.cuda.is_available() else "cpu"
@@ -87,12 +93,27 @@ def main():
     import json
 
     ecl_recs = ecl_eval_recs = None
+    stream_proc = stream_dir = None
     if args.sim == "ecl":
-        from danmaku_ecl import build_schedules
+        from danmaku_ecl import build_schedules, load_schedule, stream_worker
         print(f"[ecl] building {args.ecl_schedules} + 8 danmaku schedules...", flush=True)
         ecl_recs = build_schedules(args.ecl_schedules, seed0=0)
         ecl_eval_recs = build_schedules(8, seed0=10_000)   # held-out seeds
         args.fight = "letty"
+        if args.stream_schedules > 0:
+            import multiprocessing as _mp
+            stream_dir = run / "schedpool"
+            stream_dir.mkdir(parents=True, exist_ok=True)
+            for _f in stream_dir.glob("*.npz*"):
+                _f.unlink()
+            _ctx = _mp.get_context("spawn")
+            stream_proc = [_ctx.Process(target=stream_worker, args=(str(stream_dir),),
+                                        daemon=True) for _ in range(args.stream_workers)]
+            for _p in stream_proc:
+                _p.start()
+            print(f"[ecl] streaming fresh schedules -> {stream_dir} "
+                  f"({args.stream_workers} workers); swap {args.stream_schedules} "
+                  f"slots / {args.swap_every} updates", flush=True)
 
     (run / "meta.json").write_text(json.dumps({
         "algo": "ppo_fight", "steps": args.steps, "hidden": list(HID),
@@ -183,6 +204,7 @@ def main():
     buf_kill = torch.zeros(LB, device=dev)
     buf_ph = torch.zeros(LB, device=dev)
     hp_ptr = 0
+    swap_cur = 0
     _tar = torch.arange(T, device=dev).view(T, 1)
 
     def roll_stats():
@@ -229,6 +251,27 @@ def main():
         if args.sim == "ecl" and ph_mix0 > 0:      # anneal mid-fight starts -> 0
             frac = min(1.0, total / max(1.0, args.phase_mix_frac * args.steps))
             sim.phase_start_mix = ph_mix0 * (1.0 - frac)
+
+        # streaming schedules: cycle fresh danmaku layouts into the pool so the
+        # policy never trains on the same N boss tracks for 800M steps
+        if stream_dir is not None and upd % args.swap_every == 0:
+            ready = sorted(stream_dir.glob("[0-9]*.npz"))
+            for p in ready[-args.stream_schedules:]:
+                try:
+                    rec = load_schedule(p)
+                except Exception:
+                    p.unlink(missing_ok=True)
+                    continue
+                slot = swap_cur % sim.n_rec
+                swap_cur += 1
+                sim.swap_slot(slot, rec)
+                hit = (sim.rec_id == slot)                 # envs on the old layout
+                if hit.any():
+                    fresh = sim.reset(hit.nonzero(as_tuple=True)[0])
+                    obs[hit] = fresh[hit]
+                p.unlink(missing_ok=True)
+            for p in ready[:-args.stream_schedules]:       # drop the backlog we skipped
+                p.unlink(missing_ok=True)
 
         with torch.no_grad():
             lastv = ac.critic(obs).squeeze(-1)

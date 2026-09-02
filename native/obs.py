@@ -46,8 +46,9 @@ DIR_SPEED_FOCUS = 1.6    # focused move speed - the escape scan uses this when
                         # focused policy thought it could out-run bullets it can't)
 DIR_HORIZON = 20.0
 DIR_HIT_R = 7.0          # fallback strike radius when a bullet has no known half-extent
-PLAYER_HALF = 1.8        # player AABB half-extent (matches sim PLAYER_HB); the real
-#                          strike radius for a bullet is bullet_half + PLAYER_HALF
+PLAYER_HALF = 2.0       # player AABB half-extent, matches sim PLAYER_HB. Measured
+#   is ~1.6-1.8; 2.0 is a deliberate safety margin so a policy that dodges here
+#   stays safe when the real hitbox is smaller. strike = bullet_half + PLAYER_HALF.
 K_NEAREST = 128          # only the K nearest bullets feed the local grid + escape scan
 # plus-shaped kernel for the danger grid: a bullet threatens its own cell and any
 # 4-neighbour its (half + player_half) disc reaches into. Lets a big Lingering-Cold
