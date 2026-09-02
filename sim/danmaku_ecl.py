@@ -100,9 +100,12 @@ def _run_vm(seed: int, difficulty: int = 3, frames: int = 13000):
         vm.step()
         b = vm.boss()
         boss_xy.append((b.x, b.y) if b else (192.0, 112.0))
+        # lethal orb = alive sub-enemy with player-collision on (flag bit 1) and
+        # a non-degenerate body box. Sub43 (LC emitter) clears the flag.
         fo = [(e.x, e.y, max(e.hitbox) * 0.5 * ENEMY_BODY_SCALE)
               for e in vm.enemies
-              if not e.is_boss and e.alive and e.hitbox[0] > 0.5]
+              if not e.is_boss and e.alive and e.collidable
+              and e.hitbox[0] > 0.5 and e.hitbox[1] > 0.5]
         orbs.append(fo[:MAX_EN])
     return vm, np.asarray(boss_xy, np.float32), orbs
 

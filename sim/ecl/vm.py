@@ -188,8 +188,11 @@ class Enemy:
         self.move_bounds = (0.0, 0.0, 384.0, 448.0)  # move_bounds_set: (xmin, ymin, xmax, ymax)
         self.oob_immune = False        # enemy_flag_oob_immune — survive off-screen
         self.was_onscreen = False      # engine only culls once the enemy has shown
-        self.hitbox = (0.0, 0.0)       # enemy_set_hitbox (x, y) half-extents; a
-        #                                sub-enemy with x > 0.5 is a lethal orb
+        self.hitbox = (0.0, 0.0)       # enemy_set_hitbox (x, y) half-extents
+        self.collidable = True          # flag byte +0x2e29 bit 1 (enemy_flag_
+        #   collision, op 102). Default set; the player-collision test at
+        #   decomp 13747 needs bit 1 AND a non-degenerate hitbox. LC's emitter
+        #   orb (Sub43) clears it -> harmless; NS2/TT orbs (Sub41/57) leave it.
 
         # execution state
         self.sub = sub
@@ -450,7 +453,10 @@ class VM:
             lsp = spd1 if layers < 2 else spd1 - (spd1 - spd2) * layer / layers
             for idx in range(count):
                 if mode in (0, 1):                    # fan: ±0.5,±1.5,... * span
-                    a0 = (((idx + 1) // 2) * span if btype & 1
+                    # FUN_00423730 case 0/1 tests `count & 1` (emitter +0xbc is
+                    # the count field): odd count -> 0,±span,±2span (centre
+                    # bullet); even -> ±0.5span,±1.5span (no centre).
+                    a0 = (((idx + 1) // 2) * span if count & 1
                           else span * 0.5 + (idx // 2) * span)
                     if idx & 1:
                         a0 = -a0
@@ -962,6 +968,11 @@ def _can_take_dmg(vm, e, ins):
 @_op(101)  # enemy_set_hitbox(x, y, z) — body half-extents (orb lethality)
 def _set_hitbox(vm, e, ins):
     e.hitbox = (float(e.get(ins.args[0])), float(e.get(ins.args[1])))
+
+
+@_op(102)  # enemy_flag_collision(on) — flag byte +0x2e29 bit 1 (player collision)
+def _flag_collision(vm, e, ins):
+    e.collidable = bool(int(e.get(ins.args[0])) & 1)
 
 
 @_op(106)  # enemy_flag_death(mode) — what HP<=0 does: &7, 2=drop+callback,
