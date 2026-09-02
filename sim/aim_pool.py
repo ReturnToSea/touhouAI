@@ -76,10 +76,8 @@ class AimPool:
         self.t0[idx] = t0
 
     def _spawn(self, fnow, px, py, cs, sn):
-        """Vectorised, compile-friendly: the K sources due this frame go to pool
-        slots `source_index % MA`. A ring fires into consecutive slots and the
-        pool wraps every MA sources — with MA >> the live count, collisions are
-        vanishingly rare (one dropped bullet if so)."""
+        """Vectorised, compile-friendly. The K sources due this frame take the
+        K lowest-index free pool slots (a proper free-list, no Python loop)."""
         rid = self.rec_id
         k = torch.arange(_SPAWN_PER_FRAME, device=self.d)          # [K]
         s_idx = self.cur[:, None] + k[None, :]                     # [B, K] source ptr
@@ -105,7 +103,13 @@ class AimPool:
         accx = torch.where(fxf == FX_ACCEL_DIR, torch.cos(ad) * g("fx_p1"), 0.0)
         accy = torch.where(fxf == FX_ACCEL_DIR, torch.sin(ad) * g("fx_p1"), 0.0)
 
-        tgt = (s_idx % self.MA)                                    # [B, K] pool slot
+        # free-list: the j-th spawn goes to the (j+1)-th lowest free slot
+        free = ~self.alive                                        # [B, MA]
+        frank = free.long().cumsum(1) - 1                         # rank among free
+        match = (frank.unsqueeze(1) == k.view(1, -1, 1)) & free.unsqueeze(1)
+        tgt = match.float().argmax(2)                             # [B, K]
+        take = take & match.any(2)                                # a free slot exists
+        self.cur = self.cur + take.long().sum(1)
         w = take.float()
 
         def put(pool, val):
@@ -130,7 +134,6 @@ class AimPool:
         self.lt = put(self.lt, torch.zeros_like(bx))
         self.alive = self.alive.scatter(1, tgt, (take | torch.gather(
             self.alive, 1, tgt)))
-        self.cur = self.cur + take.long().sum(1)
 
     def _advance(self):
         live = self.alive

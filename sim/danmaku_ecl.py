@@ -287,8 +287,54 @@ def _verify() -> bool:
         print(f"  aimed ring turns {turn:+.0f} deg between player x=70 and x=314 "
               f"(want ~{want:+.0f})")
         ok &= abs(turn - want) < 12.0
+
+        # AimPool physics must match the scalar bullet_sim.simulate exactly:
+        # aim at the VM's own point -> should reproduce simulate_batch(s.angle)
+        from sim.ecl.parser import parse_file
+        from sim.ecl.vm import VM
+        from sim.ecl.bullet_sim import batch_from_spawns, simulate_batch
+        vm = VM(parse_file(str(_ECL)), difficulty=3, seed=0)
+        vm.start_boss(sub=31, interrupt=0)
+        vm.run(13000)
+        am = sorted((s for s in vm.bullets if s.aimed), key=lambda s: s.frame)
+        ref = simulate_batch(batch_from_spawns(am), 135)
+        ap = AimPool([r], B=1, device="cpu")
+        z = torch.zeros(1, dtype=torch.long)
+        ap.reset(z, z.clone(), z.clone())
+        traj, born = {}, {}
+        for fr in range(int(am[0].frame), int(am[-1].frame) + 140):
+            was = ap.alive[0].clone()
+            ap.step(torch.full((1,), fr), torch.full((1,), VM_PLAYER[0]),
+                    torch.full((1,), VM_PLAYER[1]), torch.ones(1), torch.zeros(1))
+            for s in (ap.alive[0] & ~was).nonzero().flatten().tolist():
+                traj[(s, fr)] = []
+                born[(s, fr)] = fr
+            for kk in list(traj):
+                if ap.alive[0, kk[0]] and born[kk] == kk[1]:
+                    traj[kk].append((float(ap.px[0, kk[0]]), float(ap.py[0, kk[0]])))
+                elif not ap.alive[0, kk[0]]:
+                    born[kk] = -1
+        de, used = [], set()
+        for kk, tj in traj.items():
+            tj = np.array(tj)
+            if len(tj) < 20:
+                continue
+            cand = [i for i in range(len(am))
+                    if abs(am[i].frame - kk[1]) <= 1 and i not in used]
+            if not cand:
+                continue
+            bi = min(cand, key=lambda i: float(np.hypot(*(tj[0] - ref[i, 1]))))
+            used.add(bi)
+            L = min(len(tj), 133)
+            de.append(float(np.hypot(*(tj[:L] - ref[bi, 1:L + 1]).T).max()))
+        de = np.array(de)
+        print(f"  AimPool vs bullet_sim.simulate: {len(de)} aimed bullets, "
+              f"max {de.max():.2f}px  (must be ~0)")
+        ok &= de.max() < 1.0
     except Exception as exc:                            # noqa: BLE001
-        print(f"  aim-tracking check FAILED: {exc!r}")
+        import traceback
+        traceback.print_exc()
+        print(f"  aim check FAILED: {exc!r}")
         ok = False
 
     # FightSim smoke test
