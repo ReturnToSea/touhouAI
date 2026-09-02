@@ -46,9 +46,9 @@ DIR_SPEED_FOCUS = 1.6    # focused move speed - the escape scan uses this when
                         # focused policy thought it could out-run bullets it can't)
 DIR_HORIZON = 20.0
 DIR_HIT_R = 7.0          # fallback strike radius when a bullet has no known half-extent
-PLAYER_HALF = 2.0       # player AABB half-extent, matches sim PLAYER_HB. Measured
-#   is ~1.6-1.8; 2.0 is a deliberate safety margin so a policy that dodges here
-#   stays safe when the real hitbox is smaller. strike = bullet_half + PLAYER_HALF.
+PLAYER_HALF = 0.825    # ReimuA's exact lethal hitbox half-extent, read from
+#   th07.exe (FUN_0043e260 collision box = pos +- (shot_root+0x0C)/2 = 0.825;
+#   probe_player.py confirms). matches sim PLAYER_HB. strike = bullet_half + this.
 K_NEAREST = 128          # only the K nearest bullets feed the local grid + escape scan
 
 M_ENEMIES = 6
@@ -140,7 +140,7 @@ def build_obs_batch(player_pos, player_vel, player_focus,
     # per-bullet danger weight: a big Lingering-Cold crystal (strike ~7) marks its
     # cell harder than a pellet (strike ~4). Single-cell stamp - the 12 px grid is
     # too coarse for a spatial footprint to be worth 5x the march cost.
-    sz = (strike * (1.0 / 4.8)).clamp(0.7, 1.6)   # [B,K]  4.8 = a ball's strike -> 1.0
+    sz = (strike * (1.0 / 3.83)).clamp(0.7, 1.6)  # [B,K]  3.83 = a ball's strike -> 1.0
     for t in _MARCH_T_PY:                       # plain float t -> no .item() break
         bp = bpos + bv * t
         rel = (bp - player_pos[:, None, :]) / GRID_CELL

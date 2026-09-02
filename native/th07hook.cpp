@@ -165,8 +165,8 @@ constexpr float DIR_SPEED_FOCUS = 1.6f;  // focused move speed (obs.py v28: esca
                                          // uses this when the player is focused)
 constexpr float DIR_HORIZON = 20.0f;     // escape look-ahead (frames)
 constexpr float DIR_HIT_R2  = 7.0f * 7.0f;   // fallback only (real bullets carry a box)
-constexpr float PLAYER_HALF = 2.0f;      // player AABB half-extent (== sim PLAYER_HB);
-//   measured ~1.6-1.8; 2.0 is a deliberate safety margin (train conservative).
+constexpr float PLAYER_HALF = 0.825f;    // ReimuA exact lethal hitbox half-extent
+//   from th07.exe (FUN_0043e260: pos +- (shot_root+0x0C)/2). == sim PLAYER_HB.
 //   strike radius for a bullet = its half-extent + PLAYER_HALF. Mirror of obs.py:
 //   the danger grid scales a cell's value by strike/4.8 (a big Lingering-Cold
 //   crystal marks harder than a pellet); the escape scan uses per-bullet strike.
@@ -296,7 +296,7 @@ static void build_obs(float* o, int frame_skip) {
     for (int k = 0; k < nb; ++k) {
         float bx = lbx[k], by = lby[k], vx = lvx[k], vy = lvy[k];
         float strike = lbh[k] + PLAYER_HALF; if (strike < 1.0f) strike = 1.0f;
-        float sz = strike * (1.0f / 4.8f);
+        float sz = strike * (1.0f / 3.83f);   // ball strike -> 1.0
         if (sz < 0.7f) sz = 0.7f; else if (sz > 1.6f) sz = 1.6f;
         for (int it = 0; it <= 48; ++it) {                 // 24 frames @ 0.5f
             float t = it * 0.5f;

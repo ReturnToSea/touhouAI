@@ -49,13 +49,16 @@ FIGHTS = Path(__file__).resolve().parent / "fights"
 POOL = 1025                      # th07 bullet pool size
 PW, PH = 384.0, 448.0           # playfield size (re-aimed bullets despawn off it)
 MAX_EN = 48                      # max satellite sub-enemies tracked per frame
-# measured player half-extent is ~1.6-1.8; we train against 2.0 as a deliberate
-# safety margin. A policy that keeps 2.0 px of clearance is still safe when the
-# real hitbox is smaller, and a constant +0.2 (vs random jitter) doesn't distort
-# the pattern geometry -- it just asks for uniformly more room. Both the sim
-# collision AND the obs strike radius (native/obs.py PLAYER_HALF) use this value
-# so the policy's danger perception stays calibrated to its sim reality.
-PLAYER_HB = 2.0
+# ReimuA's LETHAL hitbox, read straight from th07.exe: the collision fn
+# FUN_0043e260 tests an AABB of pos +- player[+0x990/+0x994], and those are set
+# to (shot_root+0x0C)/2 = 1.65/2 = 0.825 (native/probe_player.py confirms it,
+# and confirms move speed 4.0 / 1.6 exactly). The sim used 1.8-2.0 for the whole
+# project -- ~2.4x too big -- so the policy learned to keep 2px of clearance
+# everywhere and then, in the real game where 0.83px is enough, avoids gaps it
+# could actually thread and gets cornered. This is the single biggest fidelity
+# bug found. Exact value, no safety margin (add one only if it transfers too
+# aggressively). Both sim collision and the obs strike radius use it.
+PLAYER_HB = 0.825
 BULLET_HB_DEFAULT = 2.5          # fallback when a recording has no hitbox column
 ENEMY_BODY_SCALE = 2.0 / 3.0     # player-body vs enemy-body box (pytouhou)
 
