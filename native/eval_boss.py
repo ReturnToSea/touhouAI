@@ -118,8 +118,8 @@ def run_episode(env, pm, drive, test, which, mask, drive_budget=16000,
     near = None                 # rolling (dist, box, kind) of the nearest bullet
     death_phase = "?"
     while step < fstart + fight_budget:
-        pxr, pyr = s.player_x, s.player_y
-        near = _nearest_bullet(pm, pxr, pyr) or near     # snapshot BEFORE stepping
+        ps = env.h.s
+        near = _nearest_bullet(pm, ps.player_x, ps.player_y) or near   # before stepping
         obs, r, term, trunc, info = env.step(mask(int(test.act(obs))))
         step += 1
         s = env.h.s
