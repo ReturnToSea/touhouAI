@@ -365,6 +365,41 @@ mode 3 (TT capture → defeat). `enemy_life_set` (op 110) writes `+0x2bb8` and
 `+0x2bbc`; `boss_set` (op 99) sets/clears the is-boss bit 6, not the damage
 gates.
 
+### ReimuA shot table + per-power damage — Part 12 (2026-09-02)
+
+The blocker ("descriptor table is behind character-select code, never shown
+written") is solved: `PLAYER (0x4BDAD8) + 0xb7e70` is a **fixed global**
+`0x00575948` holding the unfocused shot-table root ptr (`+0xb7e74` = `0x0057594C`
+= focused root; `+0x240b` selects). It can just be read from a running process —
+`native/probe_shot_damage.py --dumponly`.
+
+- **`FUN_0043d160`** walks `root + 0x34` as `(u32 table, i32 power_threshold)`
+  pairs, advancing while `threshold <= round(power)`. So the pair with the
+  *sentinel* threshold `999` is the one used at max power (128).
+- Each table is up to 96 **52-byte** (`0x1a` shorts) descriptor entries,
+  terminated by a leading `i16 period < 0`. `FUN_0043bdc0`:
+  `frame % period == phase` gates a shot; `FUN_0043bbd0` builds it. Layout:
+  `i16 period@0, i16 phase@2, f32 xoff@4, f32 yoff@8, f32 dir@0xc/0x10,
+  f32 speed@0x18, i16 DAMAGE@0x1c, u8 muzzle@0x1e, u8 type@0x1f,
+  i16 sprite@0x20, i16 sfx@0x22`.
+- **`FUN_0043d9e0`** (shot↔enemy AABB, `+0x318/+0x31c` shot box): sums
+  `shot+0x348` (= descriptor `+0x1c`) over every overlapping shot into the boss's
+  per-frame loss; **`/3` (min 1) when `player+0x16a20 != 0`** — appears to be the
+  option-deploy startup window, not modelled. `FUN_00420620` then hard-clamps to
+  70/frame.
+
+**Unfocused, `power < 999` tier (max power):** 4 forward needles (dmg ~29, every
+5f, muzzle 0, x-offset ±8) = **23.2 HP/f lined up** + 8 homing amulets (dmg 5,
+every 15f, muzzle 1/2, type 1) = **2.7 HP/f from anywhere** → **~25.9 HP/f peak**.
+Lower tiers are weaker and it is a real breakpoint: `power < 128` (i.e. power
+96–127) is only 9 shots / **19.5 HP/f**; the 4th needle + the 7th/8th amulet
+appear only at full power. Focused `power < 999`: 3 centre needles (~31 ea/5f) +
+4 type-2 persuasion needles → 23.9 HP/f, all forward.
+
+`sim/fight_replay.py`: `SHOT_DPS = 25.9`, `HOMING_FRAC = 0.10` (2.7/25.9),
+`LANE_HALF = 24`. A 1CC is full-power by the Stage-1 boss, so max power is the
+right model; `DPS_LO/HI = 0.55/1.0` randomisation covers real hit-rate < ceiling.
+
 ### move_bounds + enemy_set_hitbox (Part 12 prep, 2026-09-01)
 
 - **`move_bounds_set` (op 62)** — the engine clamps scripted boss movement to

@@ -52,17 +52,28 @@ ENEMY_BODY_SCALE = 2.0 / 3.0     # player-body vs enemy-body box (pytouhou)
 SPAWN_X_LO, SPAWN_X_HI = 40.0, 344.0
 SPAWN_Y_LO, SPAWN_Y_HI = 160.0, 420.0
 
-# synthetic damage-phasing (ReimuA). Her shot is ~20% homing amulets (connect
-# from anywhere on screen) + ~80% forward needle shot (only lands when she's
-# roughly lined up in x under the boss). So dodging in a corner still chips, but
-# a real kill needs positioning. Numbers approximate - tune SHOT_DPS against
-# real damage-phased fight lengths (Letty ~50-70s).
-SHOT_DPS = 14.0                  # peak HP/frame (fully lined up, shoot held);
-#   measure the real value: `python -m sim.measure_dps` on a --shoot recording
+# synthetic damage-phasing (ReimuA at MAX POWER - a 1CC run is full-power by the
+# Stage-1 boss). Values are read straight from th07.exe's shot descriptor table
+# (`native/probe_shot_damage.py --dumponly`, unfocused `power < 999` tier):
+#   * 4 forward needles  dmg ~29 every 5f  -> 23.2 HP/f  (land only lined up in x)
+#   * 8 homing amulets   dmg   5 every 15f ->  2.7 HP/f  (home, land from anywhere)
+# so peak (camped) ~25.9 HP/f, homing-only ~2.7 HP/f.  FUN_0043d9e0 applies the
+# descriptor dmg raw, summed per frame; FUN_00420620 hard-clamps boss loss to
+# 70/frame.  (A situational /3 exists when player+0x16a20 != 0 - looks like the
+# option-deploy startup window - not modelled.)  Lower power is weaker: the
+# `power < 128` tier (power 96-127) is only ~19.5 HP/f.
+SHOT_DPS = 25.9                  # peak HP/frame, fully lined up, shoot held, max power
+#   re-measure: `.venv/Scripts/python native/probe_shot_damage.py --which 2 --dumponly`
 DMG_CLAMP = 70.0                 # th07.exe FUN_00420620: boss HP loss is hard-
 #   clamped to 70/frame regardless of shot power (decompiled)
-HOMING_FRAC = 0.20              # fraction of DPS that lands regardless of x
-LANE_HALF = 17.5               # |px - boss_x| under this -> the forward shot lands
+HOMING_FRAC = 0.10              # 2.7 / 25.9 - fraction of DPS that lands regardless of x
+LANE_HALF = 24.0               # |px - boss_x| under this -> the forward needles land
+#   (needle muzzles are +-8 from player centre; Letty body half ~16)
+#   Cross-check: a drive-policy --shoot recording (`sim/measure_dps`) at power ~16
+#   drains ~10 HP/frame effective (damage lands ~55% of frames). It can't cleanly
+#   split lined vs homing - a moving policy leaves the x-lane in the ~8f a needle
+#   takes to land, so its "homing" bucket is mostly mis-tagged needle hits. The
+#   descriptor table above is the authoritative source for the split.
 
 # reward: "kill the boss, don't get hit". Terms:
 #   * SURV_REW / frame alive - a SMALL floor so the 60-70% of episodes that die
@@ -85,8 +96,9 @@ KILL_BONUS = 120.0           # reward += this on final-phase defeat
 FIELD_ROT_DEG = 10.0
 FIELD_ROT = np.radians(FIELD_ROT_DEG)
 CX, CY = 192.0, 192.0         # rotation centre (approx Letty's home position)
-DPS_LO, DPS_HI = 0.5, 1.1      # random damage multiplier - biased low (real DPS
-#                               is a guess and probably slower than SHOT_DPS)
+DPS_LO, DPS_HI = 0.55, 1.0     # random damage multiplier - SHOT_DPS is now the
+#                               measured theoretical ceiling, so real effective
+#                               (travel time, hit-rate, boss motion) sits below it
 NOPHASE_FRAC = 0.2            # fraction of episodes where shooting deals 0 damage
 #                               (pure survival - forces training on the full
 #                               phase, not just the part a fast kill skips)
