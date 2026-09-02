@@ -151,7 +151,8 @@ def simulate(p: BulletParams, n_frames: int) -> np.ndarray:
                 fx_ctr += 1
         elif p.fx_flag in (FX_PAUSE_REDIR, FX_PAUSE_AIM):
             if fx_ctr < p.fx_interval:                   # decelerate toward 0
-                f = 1.0 - fx_ctr / p.fx_interval
+                # pytouhou: cur -> 0 over [t0, t0 + interval - 1]
+                f = max(0.0, 1.0 - fx_ctr / max(1, p.fx_interval - 1))
                 vx, vy = math.cos(ang) * spd * f, math.sin(ang) * spd * f
                 fx_ctr += 1
             else:                                       # arrive: turn / re-aim
@@ -272,7 +273,8 @@ def simulate_batch(b: dict, n_frames: int) -> np.ndarray:
         pr = (flag == FX_PAUSE_REDIR) | (flag == FX_PAUSE_AIM)
         decel = live & pr & (fx_ctr < iv)
         arrive = live & pr & (fx_ctr >= iv)
-        f = 1.0 - np.where(iv > 0, fx_ctr / np.maximum(iv, 1), 0.0)
+        # cur -> 0 over [t0, t0 + interval - 1]  (divisor interval-1, matches simulate)
+        f = np.maximum(0.0, 1.0 - np.where(iv > 1, fx_ctr / np.maximum(iv - 1, 1), 1.0))
         vx = np.where(decel, np.cos(ang) * spd * f, vx)
         vy = np.where(decel, np.sin(ang) * spd * f, vy)
         fx_ctr += decel
