@@ -312,11 +312,14 @@ class Enemy:
 
 class VM:
     # DAT_0062f8a4 — the per-difficulty "rank coefficient" the bullet emitter
-    # blends with (fn410520 case 0x3f-0x47, non-spell only). It's a byte pulled
-    # from stage-descriptor +0x25 so the exact value isn't in code, but the
-    # emitter defaults (spd_aa=-0.5, spd_ab=+0.5) make the blend a symmetric
-    # ±0.5 px/f speed offset over coeff 0..32; Lunatic sits at the top.
-    RANK_COEFF = {0: 0, 1: 11, 2: 22, 3: 32, 4: 32}
+    # blends with (fn410520 case 0x3f-0x47, non-spell only). It's a byte from
+    # stage-descriptor +0x25, not in code; the emitter defaults (spd_aa=-0.5,
+    # spd_ab=+0.5) make it a ±0.5 px/f speed offset over coeff 0..32.
+    #   16 = exact no-op. The letty_* recordings ARE Lunatic and the VM matches
+    # their NS1/NS2 on-screen density best at coeff 16 (danmaku_check: coeff 32
+    # made NS1 -15%), i.e. the ECL args already encode the Lunatic speeds and no
+    # extra scaling should be applied. Kept configurable for other bosses.
+    RANK_COEFF = {0: 0, 1: 8, 2: 12, 3: 16, 4: 16}
 
     def __init__(self, ecl: ECLFile, difficulty: int = 3, rank: int | None = None,
                  seed: int = 0, player: tuple[float, float, float] = (192.0, 400.0, 0.0),

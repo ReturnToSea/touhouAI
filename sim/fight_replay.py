@@ -53,9 +53,15 @@ PLAYER_HB = 1.8                  # measured player half-extent
 BULLET_HB_DEFAULT = 2.5          # fallback when a recording has no hitbox column
 ENEMY_BODY_SCALE = 2.0 / 3.0     # player-body vs enemy-body box (pytouhou)
 
-# episode spawn box - randomised so the policy can't memorise one trajectory
+# episode spawn box - randomised so the policy can't memorise one trajectory.
+# y_hi is 432 (the real playfield floor) because the transfer handoff parks the
+# player at ~(205, 432): dialogue locks movement, so NS1 always starts from the
+# very bottom edge. A fraction of episodes (HANDOFF_SPAWN_FRAC) start exactly
+# there so the policy trains the real opening, not just a random interior point.
 SPAWN_X_LO, SPAWN_X_HI = 40.0, 344.0
-SPAWN_Y_LO, SPAWN_Y_HI = 160.0, 420.0
+SPAWN_Y_LO, SPAWN_Y_HI = 160.0, 432.0
+HANDOFF_XY = (205.0, 432.0)
+HANDOFF_SPAWN_FRAC = 0.25
 
 # synthetic damage-phasing (ReimuA).  Values are read straight from th07.exe's
 # shot descriptor table (`native/probe_shot_damage.py --which 2 --dumponly`),
@@ -366,6 +372,9 @@ class FightSim:
         k = len(idx)
         rx = torch.rand(k, device=self.d) * (SPAWN_X_HI - SPAWN_X_LO) + SPAWN_X_LO
         ry = torch.rand(k, device=self.d) * (SPAWN_Y_HI - SPAWN_Y_LO) + SPAWN_Y_LO
+        at_handoff = torch.rand(k, device=self.d) < HANDOFF_SPAWN_FRAC
+        rx = torch.where(at_handoff, torch.tensor(HANDOFF_XY[0], device=self.d), rx)
+        ry = torch.where(at_handoff, torch.tensor(HANDOFF_XY[1], device=self.d), ry)
         self.px[idx] = rx
         self.py[idx] = ry
         self._prev_active[idx] = False
@@ -461,7 +470,8 @@ class FightSim:
         return build_obs_batch(
             pl, pvel,
             self.focus,                       # real focus bit (escape scalars use it)
-            bp, bv, active.float(), head, enemies, items)
+            bp, bv, active.float(), head, enemies, items,
+            bullets_half=bh)                   # per-bullet AABB half-extent
 
     def step(self, act):
         act = act.long()

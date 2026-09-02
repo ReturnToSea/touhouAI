@@ -164,7 +164,12 @@ constexpr float DIR_SPEED   = 4.0f;      // measured unfocused player move speed
 constexpr float DIR_SPEED_FOCUS = 1.6f;  // focused move speed (obs.py v28: escape scan
                                          // uses this when the player is focused)
 constexpr float DIR_HORIZON = 20.0f;     // escape look-ahead (frames)
-constexpr float DIR_HIT_R2  = 7.0f * 7.0f;
+constexpr float DIR_HIT_R2  = 7.0f * 7.0f;   // fallback only (real bullets carry a box)
+constexpr float PLAYER_HALF = 1.8f;      // player AABB half-extent (== sim PLAYER_HB);
+//   a bullet's real strike radius is its half-extent + PLAYER_HALF. Mirror of
+//   native/obs.py: the danger grid stamps a plus of cells its (half+PLAYER_HALF)
+//   disc reaches, and the escape scan uses the same per-bullet radius.
+static const int KOFF[5][2] = {{0, 0}, {1, 0}, {-1, 0}, {0, 1}, {0, -1}};
 // measured player movement bounds (sim/physics.json)
 constexpr float PX_LO = 8.0f, PX_HI = 376.0f, PY_LO = 16.0f, PY_HI = 432.0f;
 constexpr int   M_ENEMIES   = 6;
@@ -253,7 +258,7 @@ static void build_obs(float* o, int frame_skip) {
     // pass 1: gather the K_NEAREST live bullets (insertion-sorted by distance),
     // exactly as native/obs.py does before it builds the grid + escape scalars.
     static float lbx[K_NEAREST], lby[K_NEAREST], lvx[K_NEAREST], lvy[K_NEAREST];
-    static float lbd[K_NEAREST];
+    static float lbd[K_NEAREST], lbh[K_NEAREST];
     int nb = 0;
     float near_d = 1e9f;
     uintptr_t bb = BULLET_MANAGER + BM_BULLETS;
@@ -272,6 +277,7 @@ static void build_obs(float* o, int frame_skip) {
         g_prev_by[i] = live ? by : -9999.f;
         if (!live) continue;
         if (vx > 24.f || vx < -24.f || vy > 24.f || vy < -24.f) vx = vy = 0.f;  // recycled slot
+        float bh = rd<float>(b + BULLET_HITBOX) * 0.5f;   // AABB half-extent
         float rx = bx - px, ry = by - py;
         float d = sqrtf(rx * rx + ry * ry);
         if (d < near_d) near_d = d;
@@ -279,23 +285,34 @@ static void build_obs(float* o, int frame_skip) {
         int j = (nb < K_NEAREST) ? nb++ : K_NEAREST - 1;
         for (; j > 0 && lbd[j - 1] > d; --j) {
             lbd[j] = lbd[j - 1]; lbx[j] = lbx[j - 1]; lby[j] = lby[j - 1];
-            lvx[j] = lvx[j - 1]; lvy[j] = lvy[j - 1];
+            lvx[j] = lvx[j - 1]; lvy[j] = lvy[j - 1]; lbh[j] = lbh[j - 1];
         }
-        lbd[j] = d; lbx[j] = bx; lby[j] = by; lvx[j] = vx; lvy[j] = vy;
+        lbd[j] = d; lbx[j] = bx; lby[j] = by; lvx[j] = vx; lvy[j] = vy; lbh[j] = bh;
     }
 
-    // pass 2: march those bullets to stamp the danger grid
+    // pass 2: march those bullets to stamp the danger grid. each bullet stamps a
+    // plus of cells its (half + PLAYER_HALF) disc reaches (mirror of obs.py).
     const float inv_h = 1.0f / GRID_HORIZON;
     for (int k = 0; k < nb; ++k) {
         float bx = lbx[k], by = lby[k], vx = lvx[k], vy = lvy[k];
+        float strike = lbh[k] + PLAYER_HALF; if (strike < 1.0f) strike = 1.0f;
+        float reach2 = strike + GRID_CELL * 0.5f; reach2 *= reach2;
         for (int it = 0; it <= 48; ++it) {                 // 24 frames @ 0.5f
             float t = it * 0.5f;
-            int gx = (int)floorf((bx + vx * t - px) / GRID_CELL + 0.5f) + GRID_R;
-            int gy = (int)floorf((by + vy * t - py) / GRID_CELL + 0.5f) + GRID_R;
-            if (gx < 0 || gx >= GRID || gy < 0 || gy >= GRID) continue;
+            float bpx = bx + vx * t, bpy = by + vy * t;
+            float basex = floorf((bpx - px) / GRID_CELL + 0.5f);
+            float basey = floorf((bpy - py) / GRID_CELL + 0.5f);
             float danger = 1.0f - t * inv_h;
-            float* c = &grid[gy * GRID + gx];
-            if (danger > *c) *c = danger;
+            for (int m = 0; m < 5; ++m) {
+                float cxf = basex + KOFF[m][0], cyf = basey + KOFF[m][1];
+                float ddx = bpx - (px + cxf * GRID_CELL);
+                float ddy = bpy - (py + cyf * GRID_CELL);
+                if (ddx * ddx + ddy * ddy >= reach2) continue;
+                int gx = (int)cxf + GRID_R, gy = (int)cyf + GRID_R;
+                if (gx < 0 || gx >= GRID || gy < 0 || gy >= GRID) continue;
+                float* c = &grid[gy * GRID + gx];
+                if (danger > *c) *c = danger;
+            }
         }
     }
 
@@ -326,7 +343,8 @@ static void build_obs(float* o, int frame_skip) {
             else { ts = -(r0x * rvx + r0y * rvy) / a; if (ts < 0.f) ts = 0.f; }
             if (ts >= safe_t) continue;
             float cx = r0x + rvx * ts, cy = r0y + rvy * ts;
-            if (cx * cx + cy * cy < DIR_HIT_R2) safe_t = ts;
+            float si = lbh[i] + PLAYER_HALF; if (si < 1.0f) si = 1.0f;
+            if (cx * cx + cy * cy < si * si) safe_t = ts;
         }
         od[dd] = safe_t / DIR_HORIZON;
     }

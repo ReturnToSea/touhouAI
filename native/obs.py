@@ -45,8 +45,14 @@ DIR_SPEED_FOCUS = 1.6    # focused move speed - the escape scan uses this when
                         # player_focus is set (v28: it assumed 4.0 always, so a
                         # focused policy thought it could out-run bullets it can't)
 DIR_HORIZON = 20.0
-DIR_HIT_R = 7.0          # player_r (~2) + typical stage-1 bullet_r (~4), a touch generous
+DIR_HIT_R = 7.0          # fallback strike radius when a bullet has no known half-extent
+PLAYER_HALF = 1.8        # player AABB half-extent (matches sim PLAYER_HB); the real
+#                          strike radius for a bullet is bullet_half + PLAYER_HALF
 K_NEAREST = 128          # only the K nearest bullets feed the local grid + escape scan
+# plus-shaped kernel for the danger grid: a bullet threatens its own cell and any
+# 4-neighbour its (half + player_half) disc reaches into. Lets a big Lingering-Cold
+# crystal (half 5) claim more cells than a pellet (half 2) at the same distance.
+_GRID_KERNEL = ((0, 0), (1, 0), (-1, 0), (0, 1), (0, -1))
 
 M_ENEMIES = 6
 M_ITEMS = 8
@@ -72,7 +78,7 @@ _MARCH_T_PY = tuple(float(x) for x in _MARCH_T)         # plain floats -> torch.
 @torch.no_grad()
 def build_obs_batch(player_pos, player_vel, player_focus,
                     bullets_pos, bullets_vel, bullets_active,
-                    head_aux, enemies, items):
+                    head_aux, enemies, items, bullets_half=None):
     """
     player_pos     [B,2]   playfield coords (px, py), origin top-left
     player_vel     [B,2]   per-frame velocity (head only; 0 is fine)
@@ -101,15 +107,24 @@ def build_obs_batch(player_pos, player_vel, player_focus,
         bad = (v.abs() > 24.0).any(dim=-1, keepdim=True)
         return torch.where(bad, torch.zeros_like(v), v)
 
+    if bullets_half is None:
+        bullets_half = torch.full_like(bullets_active, DIR_HIT_R - PLAYER_HALF,
+                                      dtype=dt)
+    else:
+        bullets_half = bullets_half.to(dt)
+
     # nearest-K for the local grid + escape scan
     if N > K_NEAREST:
         d_k, sel = torch.topk(d_all, K_NEAREST, dim=1, largest=False)
         bpos = torch.gather(bullets_pos, 1, sel[:, :, None].expand(-1, -1, 2))
         bvel = torch.gather(bullets_vel, 1, sel[:, :, None].expand(-1, -1, 2))
+        bhalf = torch.gather(bullets_half, 1, sel)
         act = d_k < 1e8
     else:
         bpos, bvel, act = bullets_pos, bullets_vel, act_all
+        bhalf = bullets_half
     bv = _guard(bvel)
+    strike = (bhalf + PLAYER_HALF).clamp(min=1.0)                  # [B, K]
 
     dirs = OBS_DIRS.to(dev, dt)
     o = torch.zeros(B, OBS_DIM, device=dev, dtype=dt)
@@ -125,15 +140,20 @@ def build_obs_batch(player_pos, player_vel, player_focus,
     wall = (wx < PX_LO) | (wx > PX_HI) | (wy < PY_LO) | (wy > PY_HI)
     grid = torch.where(wall, torch.full_like(grid, 0.5), grid)
 
+    reach2 = (strike + GRID_CELL * 0.5) ** 2               # [B, K] cell-overlap radius^2
+    koff = torch.tensor(_GRID_KERNEL, device=dev, dtype=dt)         # [5, 2]
     for t in _MARCH_T_PY:                       # plain float t -> no .item() break
         bp = bpos + bv * t
-        rel = (bp - player_pos[:, None, :]) / GRID_CELL
-        cell = torch.floor(rel + 0.5).long() + GRID_R
-        gx = cell[..., 0]
-        gy = cell[..., 1]
-        valid = (gx >= 0) & (gx < GRID) & (gy >= 0) & (gy < GRID) & act
-        lin = gy.clamp(0, GRID - 1) * GRID + gx.clamp(0, GRID - 1)
-        dval = valid.to(dt) * (1.0 - t / GRID_HORIZON)     # dv where valid, else 0
+        base = torch.floor((bp - player_pos[:, None, :]) / GRID_CELL + 0.5)  # [B,K,2]
+        cxy = base[:, :, None, :] + koff[None, None, :, :]              # [B,K,5,2]
+        wc = player_pos[:, None, None, :] + cxy * GRID_CELL             # cell world centre
+        d2 = ((bp[:, :, None, :] - wc) ** 2).sum(-1)                    # [B,K,5]
+        gx = (cxy[..., 0] + GRID_R).long()
+        gy = (cxy[..., 1] + GRID_R).long()
+        valid = ((gx >= 0) & (gx < GRID) & (gy >= 0) & (gy < GRID)
+                 & act[:, :, None] & (d2 < reach2[:, :, None]))
+        lin = (gy.clamp(0, GRID - 1) * GRID + gx.clamp(0, GRID - 1)).reshape(B, -1)
+        dval = (valid.to(dt) * (1.0 - t / GRID_HORIZON)).reshape(B, -1)
         grid.scatter_reduce_(1, lin, dval, reduce="amax")
     o[:, _O_GRID:_O_ENE] = grid
 
@@ -166,7 +186,7 @@ def build_obs_batch(player_pos, player_vel, player_focus,
     ts = torch.where(a < 1e-6, torch.zeros_like(a), -bdot / a.clamp(min=1e-6))
     ts = ts.clamp(min=0.0)
     cp = r0[:, :, None, :] + rv * ts[..., None]
-    hit = ((cp * cp).sum(-1) < DIR_HIT_R * DIR_HIT_R) & near[:, :, None]
+    hit = ((cp * cp).sum(-1) < (strike * strike)[:, :, None]) & near[:, :, None]
     cand = torch.where(hit, ts, torch.full_like(ts, 1e9))
     safe = torch.minimum(safe, cand.min(dim=1).values).clamp(min=0.0)
     o[:, _O_ESC:_O_GRID] = safe / DIR_HORIZON

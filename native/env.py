@@ -229,6 +229,27 @@ class Th07Env(_Base):
         self._prev_bpos[:] = -9999.0
         self._prev_ppos[:] = -9999.0
 
+    # bullet pool layout (probe_deathcam / th07_addrs.h) - for the Python obs
+    # fallback's per-bullet hitbox; the DLL reads this itself.
+    _BM_BASE = 0x0062F958 + 0x0000B8C0
+    _BM_STRIDE, _BM_MAX, _B_BOX = 0x00000D68, 0x401, 0x0B7C
+
+    def _bullet_half(self, n):
+        """AABB half-extent per pool slot [0, n). Falls back to a flat 3.0 if the
+        pool can't be read (keeps the obs finite; the DLL path is authoritative)."""
+        pm = getattr(self, "_pm", None)
+        out = np.full(n, 3.0, np.float32)
+        if pm is None:
+            return out
+        try:
+            blob = pm.read_bytes(self._BM_BASE, self._BM_STRIDE * n)
+            box = np.frombuffer(blob, np.float32)
+            box = box[self._B_BOX // 4::self._BM_STRIDE // 4][:n]
+            out[:] = np.where(box > 0.0, box * 0.5, 3.0)
+        except Exception:
+            pass
+        return out
+
     def _bullet_arrays(self):
         xy = self._bview[:, :2].copy()
         live = xy[:, 0] > -9000.0
@@ -236,7 +257,8 @@ class Th07Env(_Base):
         both = (live & prev_live)[:, None]
         vel = np.where(both, xy - self._prev_bpos, 0.0).astype(np.float32)
         self._prev_bpos = np.where(live[:, None], xy, -9999.0)
-        return xy, vel, live
+        half = self._bullet_half(len(xy))
+        return xy, vel, live, half
 
     # PCB stores the stage-1 MIDBOSS (Cirno) and the BOSS (Letty) as a zEnemy*
     # in EM_BOSSES[0] - NOT in the EM_ENEMIES array - so they're invisible unless
@@ -302,10 +324,11 @@ class Th07Env(_Base):
             pvx = pvy = 0.0
         self._prev_ppos[:] = (px, py)
 
-        xy, vel, live = self._bullet_arrays()          # [N,2], per-decision, [N]
+        xy, vel, live, half = self._bullet_arrays()    # [N,2], per-decision, [N], [N]
         bp = torch.from_numpy(np.ascontiguousarray(xy))[None]
         bv = torch.from_numpy(np.ascontiguousarray(vel / fs))[None]   # per-frame
         ba = torch.from_numpy(live.astype(np.float32))[None]
+        bh = torch.from_numpy(np.ascontiguousarray(half))[None]
 
         pstate = [0.0] * 5
         if 0 <= s.player_state < 5:
@@ -343,7 +366,7 @@ class Th07Env(_Base):
             torch.tensor([[px, py]], dtype=torch.float32),
             torch.tensor([[pvx, pvy]], dtype=torch.float32),
             torch.tensor([float(s.player_focus)]),
-            bp, bv, ba, head_aux, enemies, items)
+            bp, bv, ba, head_aux, enemies, items, bullets_half=bh)
         return o[0].numpy()
 
     def _item_arrays(self, px: float, py: float) -> "torch.Tensor":

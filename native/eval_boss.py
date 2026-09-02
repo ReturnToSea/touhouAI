@@ -104,6 +104,8 @@ def run_episode(env, pm, drive, test, which, mask, drive_budget=16000,
 
     s0 = env.h.s
     lives0 = s0.lives
+    handoff_xy = (float(s0.player_x), float(s0.player_y))   # where the driver parked us
+    live_xy = None                                          # player pos when danmaku starts
     # boss HP reads garbage (~1) during the entrance/declaration before
     # enemy_life_set runs - wait for it to land in a sane range so `dmg` means
     # something. hp_max tracks the peak (it snaps UP on every phase transition).
@@ -127,6 +129,7 @@ def run_episode(env, pm, drive, test, which, mask, drive_budget=16000,
         # orbs). Everything before this is entrance + dialogue + declaration.
         if live_frame is None and (s.bullet_count >= 8 or s.enemy_count >= 3):
             live_frame = step
+            live_xy = (float(s.player_x), float(s.player_y))
         b = boss_state(pm)
         if b is None:
             nf += 1
@@ -158,7 +161,8 @@ def run_episode(env, pm, drive, test, which, mask, drive_budget=16000,
             "lives0": lives0, "lives_end": s.lives, "stage_end": s.stage,
             "killed": nf > 90,
             "death_phase": death_phase, "death_life": last_life, "n_bars": n_jumps + 1,
-            "killer_dist": kd, "killer_box": kbox, "killer_kind": kkind}
+            "killer_dist": kd, "killer_box": kbox, "killer_kind": kkind,
+            "handoff_xy": handoff_xy, "live_xy": live_xy or handoff_xy}
 
 
 def main():
