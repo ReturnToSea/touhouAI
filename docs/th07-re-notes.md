@@ -207,3 +207,36 @@ C:\Users\spore\th07_re\              — decomp_all.c, functions.csv, bullet_poo
 ```
 
 `analyzeHeadless <proj_dir> th07re -import th07.exe -scriptPath tools/ghidra_scripts -postScript th07_dump.java <out_dir> -deleteProject`
+
+## Disassembly audit (2026-09-02) — the ECL opcode dispatch
+
+`FUN_00410520`, `switch(opcode - 1)`, 159 cases. Findings folded into the VM:
+
+- **`set_int_rand*` (op 6/7)** — `dst = rand_u32() % bound` (`+min`), *not*
+  `int(rand_float()*bound)`. `set_float_rand*` (8/9) is `rand_float()*scale
+  (+offset)` — matched already.
+- **`set_*_rand_sign` (op 10/11)** — one 16-bit draw, `& 1`. (Letty unused.)
+- **`__math_rand` (op 51)** — `(dst, lo, hi)` → `rand_float()*(hi-lo)+lo`, not
+  `(dst, bound)`. (Letty unused.)
+- **`__math_rand_rad` (op 52)** — **ignores lo/hi**. Case `0x33`: a ±45° cone
+  toward screen centre (right if `SELF_X ≤ 192`, else left), then reflected off
+  any wall within 96 px (x) / 48 px (y) of `move_bounds`. Implemented.
+- **`move_bounds_set` (62) / `move_bounds_disable` (63)** — now tracked (were
+  no-ops); `__math_rand_rad` needs them.
+- **Not-actually-no-ops** (Letty doesn't use them, so still stubbed, but for
+  Stage 2+): `__move_unknown` (47) sets `vel = (arg0, arg1)` directly;
+  `move_at_player` (53) sets the move angle to `atan2(player) + arg0`;
+  `__move_change_1/3/2` (59/60/61) switch the enemy into free / orbit /
+  interpolate mode for `arg0` frames without re-specifying params.
+- **`move_speed` (49) / `move_acceleration` (50) / `move_angular_velocity`
+  (48)** — confirmed: set the field + force free-flight mode. **`set_angle`
+  (58) takes two floats** (angle, ang-speed) and writes the orbit-angle pair;
+  our handler takes one — a gap for a boss that uses it.
+- **`move_dir_time` (54)** — `duration < 1` just sets the angle; `≥ 1`
+  interpolates. Matches our impl.
+
+**Still open after the audit:** Lingering Cold over-fire — the snow's
+*spawn* count is now roughly right, but bullet_sim keeps each snowflake on
+screen ~20–25 f too long: after the decel-reversal the recorded steady speed is
+~0.67 px/f where the flag-0x10 model gives ~1.5–1.9. The post-reversal regime of
+flag `0x10` needs another look.
