@@ -162,11 +162,12 @@ actually plain.
 - **Verify** (`python -m sim.ecl.vm_verify`): VM spawn-event count per phase vs
   the mean bullet-birth count over the ten `sim/fights/letty_*` recordings —
   **NS1 +1 %, NS2 +1 %, Table-Turning +6 %, total +7 %**. Lingering Cold runs
-  **+18 %** — the `Sub42 → Sub43 → Sub36` orbiting-orb chain over-fires; the
-  interpretation is clearly right (the other three phases land inside 6 %) but
-  the orb fire-rate needs the frame-level check that comes with Part 11's
-  trace-to-spawn alignment. Also: Sub40 computes its three sub-enemy spawn
-  angles `0, ±2π/3`.
+  **+18 %** on spawn count (**~55 %** on on-screen count once bullet lifetimes
+  compound — see `danmaku_check.py`) — the `Sub42 → Sub43 → Sub36` orbiting-orb
+  chain over-fires. The other three phases match to a few percent end to end.
+  This is the one open danmaku discrepancy for Letty; the frame-level pipeline
+  now makes it directly debuggable. Also: Sub40 computes its three sub-enemy
+  spawn angles `0, ±2π/3`.
 
 ### 6 · Sub-enemies — `enemy_create_rel` · ✅ done
 
@@ -440,15 +441,23 @@ The re-aiming problem that
 aimed bullet is *generated* from `(spawn, angle, speed)`, so we set the angle
 toward this episode's policy and integrate forward. Nothing to desync from.
 
+**The CPU pipeline is wired and validated.** `sim/ecl/bullet_sim.from_spawn()`
+turns a VM `BulletSpawn` into `BulletParams`; `sim/ecl/danmaku_check.py` runs
+the VM → propagates every spawn → compares the on-screen bullet count per frame
+against the recordings: **total ratio 1.20, density-curve correlation 0.91,
+peak on-screen VM 487 / rec 498.** The 1.20 is entirely the Lingering Cold
+over-fire (Part 5 below); NS1 / NS2 / Table-Turning match to a few percent.
+
 ### 12 · GPU danmaku layer & train · ~4–5 days · autonomy 90%
 
 `sim/danmaku_ecl.py`: at startup, run the CPU VM ~1–2 k times with different
 seeds → a pool of spawn schedules + boss tracks (a few seconds; replaces
-"recordings", but now we can make thousands). Each episode picks one. `_now()`
-computes bullet positions from the Part 10 motion functions, vectorized. Aimed
-bullets resolve toward this episode's policy; RNG spreads reroll per episode.
-Collision, obs, damage-phasing — **reuse the existing FightSim code unchanged**.
-Then `train_fight.py --sim ecl`.
+"recordings", but now we can make thousands). Each episode picks one. Bullet
+positions come from a **vectorised `bullet_sim.simulate`** (the hang, the flag-1
+launch, and the 5 fx flags — all branch-free integer math over a `[B, N, 2]`
+tensor). Aimed bullets resolve toward this episode's policy; RNG spreads reroll
+per episode. Collision, obs, damage-phasing — **reuse the existing FightSim code
+unchanged**. Then `train_fight.py --sim ecl`.
 
 - **Concerns:** vectorizing split / chained-effect bullets without a per-bullet
   Python loop; schedule-pool size vs diversity (too small → back to memorising
