@@ -452,22 +452,18 @@ def _test_hp(ecl) -> bool:
                      f_lc is not None and abs(f_lc - want) <= 20,
                      f"transitioned at {f_lc}, want ~{want}")
 
-    # full damage run -> the NON-spell phases fall to their life callbacks fast,
-    # but Lingering Cold / Table-Turning are SURVIVAL spells (no life_callback;
-    # the real engine freezes boss HP through them - verified against every probe
-    # recording). Heavy damage must NOT capture them: they still end on the timer.
-    vm = VM(ecl, difficulty=3, seed=0)
-    vm.start_boss(sub=31, interrupt=0)
-    for _ in range(13000):
-        vm.step()
-        b = vm.boss()
-        if b and b.alive:
-            b.damage(40)
-    evs = [e for _, e, _ in vm.trace]
-    ok &= _check("HP: spells are survival - damage can't capture them",
-                 evs.count("spell_captured") == 0
-                 and _phase_seq(vm) == [38, 42, 39, 55, 51],
-                 f"caps={evs.count('spell_captured')} seq={_phase_seq(vm)}")
+    # spell cards apply shot damage at 1/7 (FUN_00420620 spellcard divisor,
+    # floor 1). Unit-check it directly.
+    for spell, raw, want in ((None, 70, 70), ((0, 5), 70, 10), ((0, 5), 7, 1),
+                             ((0, 5), 3, 1), ((0, 5), 0, 0)):
+        v = VM(ecl, difficulty=3, seed=0)
+        e = Enemy(v, 100, is_boss=True)
+        e.life = e.max_life = 100000
+        e.engaged = True
+        e.spell = spell
+        e.damage(raw)
+        ok &= _check(f"HP: spell divisor raw {raw} -> {want} (spell={spell})",
+                     100000 - e.life == want, f"took {100000 - e.life}")
 
     # engaged gate: a boss that never sets enemy_flag_invulnerable(1) takes no damage
     vm = VM(ecl, difficulty=3, seed=0)

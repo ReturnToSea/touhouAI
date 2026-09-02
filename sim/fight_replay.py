@@ -246,29 +246,33 @@ class FightSim:
             setattr(self, k, getattr(self, k).to(device))
         self.rec_len_gpu = self.rec_len.to(device)  # step() reads it without a sync
         self.min_start = min_start
-        # per-recording phase table [n_rec, MAX_PHASES, 4]:
-        #   (clear_start, first_attack, phase_end, synthetic_hp)  all trim-relative
-        #   frame indices. clear_start = where t0 jumps to on advancing INTO this
-        #   phase; first_attack = when its bullets begin (armored until then);
-        #   phase_end = when its attack ends. hp = SHOT_DPS * attack_dur * KILL_FRAC.
+        # per-recording phase table [n_rec, MAX_PHASES, 5]:
+        #   (clear_start, first_attack, phase_end, synthetic_hp, dmg_mult)  the
+        #   frame indices are trim-relative. clear_start = where t0 jumps to on
+        #   advancing INTO this phase; first_attack = when its bullets begin
+        #   (armored until then); phase_end = when its attack ends. dmg_mult = 1
+        #   for nonspells, 1/7 for Letty's spell cards (the engine's spellcard-
+        #   active damage divisor - FUN_00420620 ~13817).
         self.phasing = has_phases(recs[0]["name"]) and recs[0]["phases"] is not None
         self.phase_start_mix = phase_start_mix   # fraction of resets that begin
         #   at a random later phase (curriculum so phases 2+ get trained while
         #   the policy still dies early); eval instance passes 0.0.
-        self.ph = torch.zeros(self.n_rec, MAX_PHASES, 4)
+        self.ph = torch.zeros(self.n_rec, MAX_PHASES, 5)
         self.n_ph = torch.ones(self.n_rec, dtype=torch.long)
         if self.phasing:
             for i, r in enumerate(recs):
                 pw = r["phases"] or [(0, 0, self.maxF)]
                 self.n_ph[i] = min(len(pw), MAX_PHASES)
                 hp_real = r.get("phase_hp")          # Part 7 thresholds (ECL schedules)
+                dm = r.get("phase_dmg_mult")         # 1/7 for spell phases
                 for j, (cs, fa, e) in enumerate(pw[:MAX_PHASES]):
                     cs = max(0, min(cs, self.maxF - 4))
                     fa = max(cs, min(fa, self.maxF - 3))
                     e = min(self.maxF - 2, max(fa + 1, e))
                     hp = (hp_real[j] if hp_real and j < len(hp_real)
                           else _SYNTH_DPS * (e - fa) * KILL_FRAC)
-                    self.ph[i, j] = torch.tensor([cs, fa, e, hp],
+                    mult = dm[j] if dm and j < len(dm) else 1.0
+                    self.ph[i, j] = torch.tensor([cs, fa, e, hp, mult],
                                                  dtype=torch.float32)
         self.ph_cpu = self.ph.clone()
         self.ph = self.ph.to(device)
@@ -496,18 +500,18 @@ class FightSim:
             # armored: from the phase's clear (t0) until its first bullet flies -
             # the boss is repositioning / declaring, deals & takes no damage
             armored = fnow < p_first
-            # survival phase (Lingering Cold / Table-Turning): the boss set
-            # enemy_flag_invulnerable(0) and has no life_callback - takes ZERO
-            # shot damage, ends only on its timer (p_end). Sentinel HP >= 5e8.
-            survival = cur[:, 3] >= 5.0e8
-            self.survival = survival
-            shoot_bit = (act >= 18) & ~armored & ~self.no_phase & ~survival
+            # Letty's spell cards (Lingering Cold / Table-Turning) take shot
+            # damage at 1/7 (cur[:, 4]) - capturable, but they usually time out.
+            spell = cur[:, 4] < 0.999
+            self.survival = spell           # viz flag ("spell - reduced damage")
+            shoot_bit = (act >= 18) & ~armored & ~self.no_phase
             bx = self._boss_xy(f)[:, 0]                 # rotated boss x this frame
             aligned = (self.px - bx).abs() < LANE_HALF
             hf = self.homing_frac
             dps = (self.shot_dps * self.dps_mult *
                    (hf + (1.0 - hf) * aligned.float()))
             dmg = (dps * shoot_bit.float()).clamp(max=DMG_CLAMP)   # engine cap
+            dmg = dmg * cur[:, 4]                                   # spell divisor
             dmg = torch.minimum(dmg, self.boss_hp.clamp(min=0))
             self.boss_hp = self.boss_hp - dmg
             rew = rew + DMG_REW * dmg

@@ -293,16 +293,17 @@ class Enemy:
         enemy_flag_can_take_damage. HP <= 0 triggers the death / spell-capture
         callback via `_service_callbacks`.
 
-        Letty's spell cards (Lingering Cold Sub42, Table-Turning Sub55) register a
-        `timer_callback` but NO `life_callback`, and the real engine keeps the
-        boss HP field frozen through them (verified: 0x2BB8 sits at the threshold
-        for the whole phase across every probe run). So a survival spell -
-        `self.spell` set with `life_thresh` unset - takes no damage; it ends only
-        on its timer / loop."""
+        While a spell card is active (`self.spell` set) the real engine divides
+        incoming shot damage by 7 (`FUN_00420620` ~13817: `DAT_012fe0c8 != 0 ->
+        local_1c /= 7`, set by spellcard_start / cleared by spellcard_end), with
+        a floor of 1 per connecting hit. Letty's spells (Lingering Cold Sub42,
+        Table-Turning Sub55) have no `life_callback` but still capture on HP 0 -
+        they just take ~50s of point-blank fire, so usually they time out."""
         if (not self.alive or not self.engaged or not self.can_take_damage
-                or self.vm.frame < self.armored_until
-                or (self.spell is not None and self.life_thresh is None)):
+                or self.vm.frame < self.armored_until):
             return
+        if self.spell is not None and amount > 0:
+            amount = max(1, amount // 7)
         self.life = max(0, self.life - amount)
 
 

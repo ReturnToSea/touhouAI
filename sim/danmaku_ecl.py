@@ -69,17 +69,21 @@ _TYPE_HB = _type_hitboxes()
 def _bullet_hb(btype: int) -> float:
     return _TYPE_HB.get(int(btype) & 0xFFFF, BULLET_HB)
 
-# Letty's real per-phase HP budget (Part 7, corrected 2026-09-02):
-#   NS1 (Sub38): enemy_flag_invulnerable(1) [= damageable], life_set 15000,
-#                life_callback_ex -> Lingering Cold at HP 1700  (13300 to drain)
-#   Lingering Cold (Sub42): enemy_flag_invulnerable(0) [= NOT damageable] and
-#                NO life_callback - it is a pure survival phase, ends only on its
-#                3000-frame loop timer. Same for Table-Turning (Sub55).
-#   NS2 (Sub39): damageable, life_set 15000, life_callback at HP 2000 (13000).
-# So the spell phases take ZERO shot damage and end on their timer (the phase
-# window's end frame). _NO_DAMAGE is a sentinel the sim reads as "un-drainable".
-_NO_DAMAGE = 1.0e9
-LETTY_PHASE_HP = (13300.0, _NO_DAMAGE, 13000.0, _NO_DAMAGE)
+# Letty's real per-phase HP budget + damage multiplier (Part 7, revised twice):
+#   NS1 (Sub38): life_set 15000, life_callback_ex -> LC at HP 1700 (13300 drain),
+#                full damage.
+#   Lingering Cold (Sub42): NO life_callback, but IS capturable - it inherits
+#                ~1700 HP and the engine applies shot damage at 1/7 while a
+#                spellcard is active (FUN_00420620 ~13817: `DAT_012fe0c8 != 0
+#                -> local_1c /= 7`; DAT_012fe0c8 is set by spellcard_start /
+#                cleared by spellcard_end). Plus the 480f declaration + 300f
+#                armor. So it lasts ~15-50s: captured if the player point-blanks
+#                it, else it times out at 3000f.
+#   NS2 (Sub39): life_set 15000, life_callback at HP 2000 (13000 drain), full dmg.
+#   Table-Turning (Sub55): same as LC, inherits ~2000 HP, 1/7 damage.
+SPELL_DMG_MULT = 1.0 / 7.0
+LETTY_PHASE_HP = (13300.0, 1700.0, 13000.0, 2000.0)
+LETTY_PHASE_DMG_MULT = (1.0, SPELL_DMG_MULT, 1.0, SPELL_DMG_MULT)
 
 
 def _run_vm(seed: int, difficulty: int = 3, frames: int = 13000):
@@ -220,7 +224,8 @@ def build_schedule(seed: int, difficulty: int = 3) -> dict:
 
     return dict(pos=pos, half=half, boss=boss, en=en, trim=0,
                name=f"letty_ecl_{seed}", phases=phw,
-               phase_hp=list(LETTY_PHASE_HP), aimed=aim_tbl)
+               phase_hp=list(LETTY_PHASE_HP),
+               phase_dmg_mult=list(LETTY_PHASE_DMG_MULT), aimed=aim_tbl)
 
 
 def build_schedules(n: int, seed0: int = 0, difficulty: int = 3) -> list[dict]:

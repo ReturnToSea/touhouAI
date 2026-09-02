@@ -355,18 +355,24 @@ Letty's subs set it `(1)` when a phase's attack starts and `(0)` in Sub31
 — the timed declaration grace. `+0x4f40 > 0` (armored) zeroes the damage
 (`/9` for a boss).
 
-**Correction (2026-09-02): Lingering Cold (Sub42) and Table-Turning (Sub55) are
-SURVIVAL spells — no damage-phasing.** They register `timer_callback(3000)` but
-**no `life_callback`**, and although the ECL does re-`enemy_flag_invulnerable(1)`
-after the 480f declaration, the real engine keeps `+0x2bb8` frozen at the entry
-threshold (1700 / 2000) for the entire phase — verified: HP does not move across
-~20s of shooting in every probe recording. So on Lunatic they end only on the
-3000-frame timer (~50s each). (The extra gating is probably the decompiled
-`DAT_009545c8 != 0` → damage `/7` path at `FUN_00420620` ~13817, which is set
-during spells and not otherwise RE'd.) NS1 (Sub38) and NS2 (Sub39) damage-phase
-normally at HP 1700 / 2000. `sim/danmaku_ecl.LETTY_PHASE_HP` = `(13300, 1e9,
-13000, 1e9)`; `FightSim` reads `>= 5e8` as "survival, boss takes no damage,
-ends on p_end"; `VM.damage()` no-ops when `spell` is set and `life_thresh` unset.
+**Spell-card damage divisor (2026-09-02, `/7`):** while a spell card is active,
+shot damage is **divided by 7** (integer, floor 1 per connecting hit) —
+`FUN_00420620` ~13817: `if (DAT_012fe0c8 != 0) local_1c = local_1c < 8 ? 1 :
+local_1c / 7;`. `DAT_012fe0c8` (= ENEMY_MANAGER `+0x9545c8`) is the "spell active"
+flag: **`FUN_0040fc90`** (op 90 `spellcard_start`, VM `case 0x59`) sets it `= 1`,
+**`FUN_004101a0`** (op 91 `spellcard_end`, `case 0x5a`) clears it. The clamp
+order is `min(Σdmg, 70)` → `/7` (spell) → `/9` (declaration armor `+0x4f40`).
+
+Letty's Lingering Cold (Sub42) / Table-Turning (Sub55) have **no `life_callback`**
+but still capture on HP 0 — they inherit ~1700 / 2000 from the preceding
+nonspell's threshold snap, and at `/7` that is ~1700·7 / (effective HP/f) worth
+of point-blank fire = usually a timeout at the 3000f (~50s) loop, or a capture
+around 20-40s if the player truly point-blanks it. Earlier probe runs showed
+`+0x2bb8` "frozen" only because that policy was corner-dodging (homing-only
+damage ≈ 0.2 HP/f → 0.03 after `/7`). `sim/danmaku_ecl`: `LETTY_PHASE_HP =
+(13300, 1700, 13000, 2000)`, `LETTY_PHASE_DMG_MULT = (1, 1/7, 1, 1/7)`;
+`FightSim` phase table gains a 5th `dmg_mult` column; `VM.damage()` does
+`amount = max(1, amount // 7)` while `self.spell` is set.
 
 **`enemy_flag_death(mode)`** (op 106, case 0x69 → `+0x2e2a & 7`): what HP ≤ 0
 does. The death handler (`FUN_00420620` ~13896: gated `life ≤ 0 && 0x2e29 bit0`)
