@@ -242,6 +242,11 @@ class FightSim:
               f"phasing {'on' if self.phasing else 'off'} "
               f"({int(self.n_ph.float().mean())} phases)", flush=True)
         self._dirs = _DIRS.to(device)
+        from aim_pool import AimPool          # aimed shots re-generated toward the
+        self.aim = AimPool(recs, self.B, device)   # live policy each episode
+        if self.aim.active_any:
+            print(f"[FightSim] aim pool on ({int(self.aim.src_n.float().mean())} "
+                  f"aimed shots/schedule)", flush=True)
         self.reset()
 
     def _sample_starts(self, idx):
@@ -297,6 +302,8 @@ class FightSim:
             idx = self._bi
         self._sample_starts(idx.cpu())
         self.t[idx] = 0
+        self.aim.reset(idx, self.rec_id[idx], self.t0[idx])
+        self._aim_now = None
         # random spawn: the policy must handle being anywhere on the lower field,
         # not memorise a path from one fixed point. Kept out of the top strip
         # (too close to the boss) and off the walls.
@@ -350,6 +357,12 @@ class FightSim:
         both = (active & self._prev_active)[..., None]
         bv = torch.where(both, bp - self._prev_bp, torch.zeros_like(bp))
         self._prev_bp, self._prev_active = bp, active
+        if self._aim_now is not None:                # fold in the runtime aim pool
+            ap, aa, ah, av = self._aim_now
+            bp = torch.cat([bp, ap], 1)
+            active = torch.cat([active, aa], 1)
+            bv = torch.cat([bv, av], 1)
+            bh = torch.cat([bh, ah], 1)
         bx = self._boss_xy(f)                                    # [B, 2] rotated
         pl = torch.stack([self.px, self.py], -1)
         head = torch.zeros(self.B, 9, device=self.d)
@@ -390,6 +403,10 @@ class FightSim:
         self.py = (self.py + mstep[:, 1]).clamp(PY_LO, PY_HI)
         self.t += 1
 
+        # runtime aimed-bullet pool: spawn toward the live player, integrate
+        self._aim_now = self.aim.step((self.t0 + self.t).long(), self.px, self.py,
+                                      self._rot_cs[:, 0], self._rot_sn[:, 0])
+
         now = self._now()
         bp, active, bh, en, en_a, f = now
         pxy = torch.stack([self.px, self.py], -1)[:, None, :]
@@ -397,6 +414,11 @@ class FightSim:
         rel = (bp - pxy).abs()
         r = bh + PLAYER_HB                                       # [B, POOL]
         hit_b = (active & (rel[..., 0] < r) & (rel[..., 1] < r)).any(dim=1)
+        ap, aa, ah, _av = self._aim_now
+        if ap.shape[1]:
+            arel = (ap - pxy).abs()
+            ar = ah + PLAYER_HB
+            hit_b = hit_b | (aa & (arel[..., 0] < ar) & (arel[..., 1] < ar)).any(1)
         # enemy bodies: (hb/2)*2/3 + player half, AABB
         erel = (en[..., :2] - pxy).abs()
         er = en[..., 2] + PLAYER_HB                              # [B, MAX_EN]

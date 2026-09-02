@@ -521,23 +521,32 @@ orbit-gvar fix). Every phase window is within ~10 %.
   (~2.4 s), propagate every spawn with `simulate_batch`, greedy-assign pool
   slots, screen-clear each bullet at the next phase transition, and emit the
   **same dense `[F, POOL, 2]` dict `_load_dense` produces** (+ `phase_hp` from
-  Part 7). Verify (`python -m sim.danmaku_ecl`): schedules build in ~2.4 s,
-  bullets-on-screen **ratio 1.13** vs the recordings, two seeds differ by
-  **~29 px mean** (fresh RNG), and a `FightSim` built on them `reset()` +
-  `step()`s cleanly (obs `[B, 236]`).
+  Part 7); aimed bullets go to a separate param table (see below). Verify
+  (`python -m sim.danmaku_ecl`): schedules build in ~2.4 s, bullets-on-screen
+  **ratio ~1.0** (baked 0.92 + the ~6 % aimed in the runtime pool), two seeds
+  differ by **~24 px mean** (fresh RNG), a `FightSim` built on them steps cleanly
+  (obs `[B, 236]`).
 - **`FightSim(recs=...)`** — injection param; when a rec carries `phase_hp` the
   phase table uses the **real thresholds** (NS1 13300, LC 1700, NS2 13000, TT
   2000) instead of the synthetic `SHOT_DPS·dur·KILL_FRAC`.
+- **Per-type hitboxes** — `danmaku_ecl._type_hitboxes()` reads the type-word →
+  AABB-half map from the recordings (`{4/5→3.0, 512/516/517/529→2.0,
+  530/533/576→3.0}` — pellets 2 px, balls 3 px); covers every Letty bullet.
+- **Live re-aiming** (`sim/aim_pool.py`) — aimed shots (`bullet_*_aimed`, ~6 %
+  of Letty's danmaku, mostly Lingering Cold's Sub47) can't be baked: they point
+  at the player *when they fire*. `danmaku_ecl` emits them as a param table
+  carrying the **un-aimed** angle (`angle − atan2(VM-player − emitter)`); at
+  runtime `AimPool` spawns each toward the live policy and integrates it with
+  the same per-frame update as `bullet_sim.simulate` (torch, vectorised over
+  `B × 256` slots, `source_index % 256` slot assignment). Re-aiming is safe here
+  — the bullet is *generated*, so there's no recorded track to desync from
+  (that's what broke the replay approach). Verified: the aimed ring turns +40°
+  between player x=70 and x=314, matching the geometry.
 - **`train_fight.py --sim ecl`** — builds `--ecl-schedules` (default 48) fresh
   training schedules + 8 held-out-seed eval schedules; `--fight` forced to
   `letty`. Collision / obs / damage-phasing reuse the existing code unchanged.
-  Smoke-tested (both sims build, step, real HP in the phase table); **training
-  not yet run.**
-
-Small simplifications in this first pass: bullet hitbox is a uniform 2.5 px
-(recordings carry per-type boxes); aimed bullets resolve toward the VM's default
-player point, not the live policy (re-aiming was what broke the replay approach —
-deferred deliberately).
+  Throughput **~189 k steps/s at B = 4096** (in the expected range). Smoke-tested
+  end to end; **training not yet run.**
 
 - **Verify — two gates (pending the training run):**
     1. Viz side-by-side: VM-Letty vs a recording — a human signs off.
