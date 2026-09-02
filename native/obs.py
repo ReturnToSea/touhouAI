@@ -50,10 +50,6 @@ PLAYER_HALF = 2.0       # player AABB half-extent, matches sim PLAYER_HB. Measur
 #   is ~1.6-1.8; 2.0 is a deliberate safety margin so a policy that dodges here
 #   stays safe when the real hitbox is smaller. strike = bullet_half + PLAYER_HALF.
 K_NEAREST = 128          # only the K nearest bullets feed the local grid + escape scan
-# plus-shaped kernel for the danger grid: a bullet threatens its own cell and any
-# 4-neighbour its (half + player_half) disc reaches into. Lets a big Lingering-Cold
-# crystal (half 5) claim more cells than a pellet (half 2) at the same distance.
-_GRID_KERNEL = ((0, 0), (1, 0), (-1, 0), (0, 1), (0, -1))
 
 M_ENEMIES = 6
 M_ITEMS = 8
@@ -141,22 +137,21 @@ def build_obs_batch(player_pos, player_vel, player_focus,
     wall = (wx < PX_LO) | (wx > PX_HI) | (wy < PY_LO) | (wy > PY_HI)
     grid = torch.where(wall, torch.full_like(grid, 0.5), grid)
 
-    reach2 = (strike + GRID_CELL * 0.5) ** 2               # [B, K] cell-overlap radius^2
-    koff = torch.tensor(_GRID_KERNEL, device=dev, dtype=dt)         # [5, 2]
+    # per-bullet danger weight: a big Lingering-Cold crystal (strike ~7) marks its
+    # cell harder than a pellet (strike ~4). Single-cell stamp - the 12 px grid is
+    # too coarse for a spatial footprint to be worth 5x the march cost.
+    sz = (strike * (1.0 / 4.8)).clamp(0.7, 1.6)   # [B,K]  4.8 = a ball's strike -> 1.0
     for t in _MARCH_T_PY:                       # plain float t -> no .item() break
         bp = bpos + bv * t
-        base = torch.floor((bp - player_pos[:, None, :]) / GRID_CELL + 0.5)  # [B,K,2]
-        cxy = base[:, :, None, :] + koff[None, None, :, :]              # [B,K,5,2]
-        wc = player_pos[:, None, None, :] + cxy * GRID_CELL             # cell world centre
-        d2 = ((bp[:, :, None, :] - wc) ** 2).sum(-1)                    # [B,K,5]
-        gx = (cxy[..., 0] + GRID_R).long()
-        gy = (cxy[..., 1] + GRID_R).long()
-        valid = ((gx >= 0) & (gx < GRID) & (gy >= 0) & (gy < GRID)
-                 & act[:, :, None] & (d2 < reach2[:, :, None]))
-        lin = (gy.clamp(0, GRID - 1) * GRID + gx.clamp(0, GRID - 1)).reshape(B, -1)
-        dval = (valid.to(dt) * (1.0 - t / GRID_HORIZON)).reshape(B, -1)
+        rel = (bp - player_pos[:, None, :]) / GRID_CELL
+        cell = torch.floor(rel + 0.5).long() + GRID_R
+        gx = cell[..., 0]
+        gy = cell[..., 1]
+        valid = (gx >= 0) & (gx < GRID) & (gy >= 0) & (gy < GRID) & act
+        lin = gy.clamp(0, GRID - 1) * GRID + gx.clamp(0, GRID - 1)
+        dval = valid.to(dt) * (1.0 - t / GRID_HORIZON) * sz
         grid.scatter_reduce_(1, lin, dval, reduce="amax")
-    o[:, _O_GRID:_O_ENE] = grid
+    o[:, _O_GRID:_O_ENE] = grid.clamp(max=1.6)
 
     # ---------- escape scalars ----------
     L = dirs.norm(dim=1, keepdim=True)

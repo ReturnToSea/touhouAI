@@ -313,18 +313,16 @@ class FightSim:
         (streaming schedules). maxF is fixed; a longer rec is clamped to it.
         Callers should reset any env currently assigned to slot i afterwards."""
         L = min(r["pos"].shape[0], self.maxF)
-        pos = torch.full((self.maxF, POOL, 2), float("nan"))
-        pos[:L] = torch.from_numpy(r["pos"][:L])
-        self.pos[i].copy_(pos.to(self.d))
-        half = torch.full((self.maxF, POOL), BULLET_HB_DEFAULT)
-        half[:L] = torch.from_numpy(r["half"][:L])
-        self.bhalf[i].copy_(half.to(self.d))
-        boss = torch.full((self.maxF, 2), 192.0)
-        boss[:L] = torch.from_numpy(r["boss"][:L])
-        self.boss[i].copy_(boss.to(self.d))
-        en = torch.full((self.maxF, MAX_EN, 3), float("nan"))
-        en[:L] = torch.from_numpy(r["en"][:L])
-        self.en[i].copy_(en.to(self.d))
+        # copy CPU->GPU straight into the slot's [:L] view (no full-maxF staging
+        # tensor -> minimal transient GPU memory during the swap)
+        self.pos[i, :L].copy_(torch.from_numpy(r["pos"][:L]))
+        self.pos[i, L:].fill_(float("nan"))
+        self.bhalf[i, :L].copy_(torch.from_numpy(r["half"][:L]))
+        self.bhalf[i, L:].fill_(BULLET_HB_DEFAULT)
+        self.boss[i, :L].copy_(torch.from_numpy(r["boss"][:L]))
+        self.boss[i, L:].fill_(192.0)
+        self.en[i, :L].copy_(torch.from_numpy(r["en"][:L]))
+        self.en[i, L:].fill_(float("nan"))
         self.rec_len[i] = r["pos"].shape[0]
         self.rec_len_gpu[i] = r["pos"].shape[0]
         if self.phasing:

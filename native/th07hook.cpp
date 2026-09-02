@@ -167,10 +167,9 @@ constexpr float DIR_HORIZON = 20.0f;     // escape look-ahead (frames)
 constexpr float DIR_HIT_R2  = 7.0f * 7.0f;   // fallback only (real bullets carry a box)
 constexpr float PLAYER_HALF = 2.0f;      // player AABB half-extent (== sim PLAYER_HB);
 //   measured ~1.6-1.8; 2.0 is a deliberate safety margin (train conservative).
-//   a bullet's real strike radius is its half-extent + PLAYER_HALF. Mirror of
-//   native/obs.py: the danger grid stamps a plus of cells its (half+PLAYER_HALF)
-//   disc reaches, and the escape scan uses the same per-bullet radius.
-static const int KOFF[5][2] = {{0, 0}, {1, 0}, {-1, 0}, {0, 1}, {0, -1}};
+//   strike radius for a bullet = its half-extent + PLAYER_HALF. Mirror of obs.py:
+//   the danger grid scales a cell's value by strike/4.8 (a big Lingering-Cold
+//   crystal marks harder than a pellet); the escape scan uses per-bullet strike.
 // measured player movement bounds (sim/physics.json)
 constexpr float PX_LO = 8.0f, PX_HI = 376.0f, PY_LO = 16.0f, PY_HI = 432.0f;
 constexpr int   M_ENEMIES   = 6;
@@ -291,29 +290,22 @@ static void build_obs(float* o, int frame_skip) {
         lbd[j] = d; lbx[j] = bx; lby[j] = by; lvx[j] = vx; lvy[j] = vy; lbh[j] = bh;
     }
 
-    // pass 2: march those bullets to stamp the danger grid. each bullet stamps a
-    // plus of cells its (half + PLAYER_HALF) disc reaches (mirror of obs.py).
+    // pass 2: march those bullets to stamp the danger grid. single cell per
+    // bullet, value scaled by strike/4.8 (big crystal marks harder) - mirror obs.py.
     const float inv_h = 1.0f / GRID_HORIZON;
     for (int k = 0; k < nb; ++k) {
         float bx = lbx[k], by = lby[k], vx = lvx[k], vy = lvy[k];
         float strike = lbh[k] + PLAYER_HALF; if (strike < 1.0f) strike = 1.0f;
-        float reach2 = strike + GRID_CELL * 0.5f; reach2 *= reach2;
+        float sz = strike * (1.0f / 4.8f);
+        if (sz < 0.7f) sz = 0.7f; else if (sz > 1.6f) sz = 1.6f;
         for (int it = 0; it <= 48; ++it) {                 // 24 frames @ 0.5f
             float t = it * 0.5f;
-            float bpx = bx + vx * t, bpy = by + vy * t;
-            float basex = floorf((bpx - px) / GRID_CELL + 0.5f);
-            float basey = floorf((bpy - py) / GRID_CELL + 0.5f);
-            float danger = 1.0f - t * inv_h;
-            for (int m = 0; m < 5; ++m) {
-                float cxf = basex + KOFF[m][0], cyf = basey + KOFF[m][1];
-                float ddx = bpx - (px + cxf * GRID_CELL);
-                float ddy = bpy - (py + cyf * GRID_CELL);
-                if (ddx * ddx + ddy * ddy >= reach2) continue;
-                int gx = (int)cxf + GRID_R, gy = (int)cyf + GRID_R;
-                if (gx < 0 || gx >= GRID || gy < 0 || gy >= GRID) continue;
-                float* c = &grid[gy * GRID + gx];
-                if (danger > *c) *c = danger;
-            }
+            int gx = (int)floorf((bx + vx * t - px) / GRID_CELL + 0.5f) + GRID_R;
+            int gy = (int)floorf((by + vy * t - py) / GRID_CELL + 0.5f) + GRID_R;
+            if (gx < 0 || gx >= GRID || gy < 0 || gy >= GRID) continue;
+            float danger = (1.0f - t * inv_h) * sz;
+            float* c = &grid[gy * GRID + gx];
+            if (danger > *c) *c = danger;
         }
     }
 

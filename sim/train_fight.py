@@ -253,7 +253,9 @@ def main():
             sim.phase_start_mix = ph_mix0 * (1.0 - frac)
 
         # streaming schedules: cycle fresh danmaku layouts into the pool so the
-        # policy never trains on the same N boss tracks for 800M steps
+        # policy never trains on the same N boss tracks for 800M steps. envs
+        # currently mid-episode on a swapped slot see one glitchy episode (their
+        # bullets jump) then reset naturally - ~6% of envs per swap, PPO noise.
         if stream_dir is not None and upd % args.swap_every == 0:
             ready = sorted(stream_dir.glob("[0-9]*.npz"))
             for p in ready[-args.stream_schedules:]:
@@ -262,13 +264,8 @@ def main():
                 except Exception:
                     p.unlink(missing_ok=True)
                     continue
-                slot = swap_cur % sim.n_rec
+                sim.swap_slot(swap_cur % sim.n_rec, rec)
                 swap_cur += 1
-                sim.swap_slot(slot, rec)
-                hit = (sim.rec_id == slot)                 # envs on the old layout
-                if hit.any():
-                    fresh = sim.reset(hit.nonzero(as_tuple=True)[0])
-                    obs[hit] = fresh[hit]
                 p.unlink(missing_ok=True)
             for p in ready[:-args.stream_schedules]:       # drop the backlog we skipped
                 p.unlink(missing_ok=True)
