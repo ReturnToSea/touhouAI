@@ -119,7 +119,7 @@ in `enemy.extra`.
   angles as `0, +2π/3, −2π/3` via `math_float_add` + `math_norm_angle`, and
   every arithmetic opcode reachable in the fight being handled.
 
-### 4 · The PRNG · **real algorithm found** (RE); KS test still outstanding
+### 4 · The PRNG · ✅ real algorithm (RE) + KS test
 
 The [th07.exe RE session](th07-re-notes.md) settled which generator the danmaku
 uses. It is **not** the EoSD-family LCG that `sim/ecl/rng.py` originally had —
@@ -134,8 +134,16 @@ rand_float(): rand_u32() / 2**32
 
 `sim/ecl/rng.py` now implements this, wired into every `set_*_rand_*` /
 `__math_rand*` opcode as before. Deterministic per seed and uniform
-(`vm_verify`). The KS test against recorded `bullet_random` spreads is still the
-remaining check — but the generator is now the right one.
+(`vm_verify`).
+
+**KS test** (`python -m sim.ecl.ks_test`): VM bullet-*heading* distributions
+match the recordings per phase — **KS D 0.014–0.13, all < 0.15** (NS2/TT nearly
+exact). The PRNG and its per-opcode consumption are faithful. Bullet *speeds*,
+though, run **~×1.2 of recorded in NS1 / NS2 / TT** (LC matches) — the recorded
+speeds run past the ECL's literal `!L` `spd1`, so there's a **Lunatic engine
+speed multiplier the VM misses**. Isolating it from the `!L` params needs a
+Normal-difficulty recording (Part 11's difficulty-coefficient work); it's not a
+PRNG bug.
 
 ### 5 · Spawn-event emission · ✅ done (Lingering Cold count loose, see below)
 
