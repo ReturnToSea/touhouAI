@@ -339,6 +339,32 @@ velocity — the recorded orbs fly straight off the bottom). `danmaku_check`
   move the bullet counts (Letty's orbs finish their shoot loop before drifting
   off) but it's correct and matters for Stages 2-6.
 
+### HP / damage model — Part 7 (2026-09-01)
+
+The shot-damage path is `FUN_00420620` (~13769–13851). A player shot reduces the
+boss's `+0x2bb8` (life) **only** when, on `+0x2e29`:
+
+- **bit 0** set (active), **bit 4** set (`enemy_flag_can_take_damage`, op 104,
+  default set — orbs clear it on themselves), **bit 2** set (`enemy_flag_
+  invulnerable`, op 103).
+
+**`enemy_flag_invulnerable` is a misnomer** — bit 2 is the gate the damage code
+*requires*, not one it blocks on. It means "engaged / accepts shot damage".
+Letty's subs set it `(1)` when a phase's attack starts and `(0)` in Sub31
+(intro) / Sub51 (defeat); the spell subs pair `(1)` with `enemy_flag_armored(N)`
+— the timed declaration grace. `+0x4f40 > 0` (armored) zeroes the damage
+(`/9` for a boss).
+
+**`enemy_flag_death(mode)`** (op 106, case 0x69 → `+0x2e2a & 7`): what HP ≤ 0
+does. The death handler (`FUN_00420620` ~13896: gated `life ≤ 0 && 0x2e29 bit0`)
+clears the 4 life-thresholds + timer + interrupt, then `switch(mode)`:
+`0/1` remove the enemy, `2` drop items + fire `death_callback` (`+0x2a84`, the
+enemy persists), `3` `life = 1` + fire `death_callback`. `death_callback` also
+zeroes the call stack. Letty: Sub38 sets mode 2 (LC capture → NS2), Sub39 sets
+mode 3 (TT capture → defeat). `enemy_life_set` (op 110) writes `+0x2bb8` and
+`+0x2bbc`; `boss_set` (op 99) sets/clears the is-boss bit 6, not the damage
+gates.
+
 ### The "Part 10 motion tail" was a method artefact (2026-09-01)
 
 `fit_motion.py`'s median-displacement-profile fit reported ~75 % within 5 px /

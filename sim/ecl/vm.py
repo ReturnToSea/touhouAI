@@ -157,7 +157,15 @@ class Enemy:
 
         self.spell: tuple[int, int] | None = None   # (group, number) while a spellcard is up
         self.armored_until = 0
-        self.invulnerable = False
+        # enemy_flag_invulnerable is misnamed: bit 2 of +0x2e29 is the gate the
+        # shot-damage path *requires* (th07.exe FUN_00420620 ~13816) — it means
+        # "engaged, accepts shot damage". Bosses set it (1) when a phase's attack
+        # starts, (0) during the intro / defeat. armored(N) is the timed grace on
+        # top (the spellcard-declaration window).
+        self.engaged = False
+        self.can_take_damage = True    # enemy_flag_can_take_damage — orbs clear it
+        self.death_mode = 0            # enemy_flag_death & 7: 2 = drop+callback,
+        #                                3 = revive to 1 HP + callback (final phase)
         self.interrupts: dict[int, int] = {}
         self.pending_interrupt: int | None = None
 
@@ -276,8 +284,14 @@ class Enemy:
         self.vm._emit("enter_sub", f"Sub{sub}  <{reason}>")
 
     def damage(self, amount: int):
-        """Part 7 will call this; a dodge-only run never does."""
-        if not self.alive or self.invulnerable or self.vm.frame < self.armored_until:
+        """Apply `amount` HP of damage. Part 12 / FightSim calls this each frame
+        the player's shot connects; a dodge-only run never does. Respects
+        `engaged` (enemy_flag_invulnerable — the shot-damage gate),
+        enemy_flag_armored (a timed grace at phase start) and
+        enemy_flag_can_take_damage. HP <= 0 triggers the death / spell-capture
+        callback via `_service_callbacks`."""
+        if (not self.alive or not self.engaged or not self.can_take_damage
+                or self.vm.frame < self.armored_until):
             return
         self.life = max(0, self.life - amount)
 
@@ -474,7 +488,16 @@ class VM:
             if iid in e.interrupts:
                 self._fire(e, e.interrupts[iid], f"interrupt {iid}")
                 return
-        if e.timer_thresh is not None and e.time >= e.timer_thresh:
+        if (e.max_life > 0 and e.life <= 0 and e.can_take_damage
+                and e.death_sub is not None):
+            # HP depleted -> death / spell-capture. enemy_flag_death mode 3
+            # (Letty's final phase) revives to 1 HP; mode 2 just drops + calls.
+            if e.spell is not None:
+                self._emit("spell_captured", str(e.spell))
+            if e.death_mode == 3:
+                e.life = 1
+            self._fire(e, e.death_sub, "HP 0 -> death_callback")
+        elif e.timer_thresh is not None and e.time >= e.timer_thresh:
             if e.spell is not None and e.timer_sub is None:
                 self._emit("spell_timeout", str(e.spell))
                 self._fire(e, e.death_sub, "spell timeout -> death_callback")
@@ -898,6 +921,16 @@ def _death_cb(vm, e, ins):
     e.death_sub = int(e.get(ins.args[0]))
 
 
+@_op(104)  # enemy_flag_can_take_damage(on)
+def _can_take_dmg(vm, e, ins):
+    e.can_take_damage = bool(int(e.get(ins.args[0])))
+
+
+@_op(106)  # enemy_flag_death(mode) — what HP<=0 does: &7, 2=drop+callback,
+def _flag_death(vm, e, ins):        #   3=revive to 1HP+callback (Letty's last phase)
+    e.death_mode = int(e.get(ins.args[0])) & 7
+
+
 @_op(108)  # enemy_interrupt_set(sub, id)
 def _int_set(vm, e, ins):
     e.interrupts[int(e.get(ins.args[1]))] = int(e.get(ins.args[0]))
@@ -977,9 +1010,9 @@ def _boss_set(vm, e, ins):
         e.is_boss = False
 
 
-@_op(103)  # enemy_flag_invulnerable
-def _invuln(vm, e, ins):
-    e.invulnerable = bool(int(e.get(ins.args[0])))
+@_op(103)  # enemy_flag_invulnerable(on) — misnomer: the shot-damage gate,
+def _engaged(vm, e, ins):           # "engaged / accepts damage" (see Enemy.engaged)
+    e.engaged = bool(int(e.get(ins.args[0])))
 
 
 @_op(142)  # enemy_flag_armored(frames)

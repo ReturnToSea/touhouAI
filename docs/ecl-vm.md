@@ -19,10 +19,11 @@ change. The VM replaces *where the bullet positions come from*, nothing else.
     counts.
 
     Partial: **Part 4** (the PRNG generator is built; the KS test against
-    recorded spreads isn't run yet), **Part 7** (HP thresholds — the callback
-    mechanism is wired into the phase machine, but nothing exercises it without
-    a damage model), and small boss-spell-loop timing residuals (Table-Turning
-    fires ~6 % hot; not cleanly validatable against the truncated recordings).
+    recorded spreads isn't run yet) and small boss-spell-loop timing residuals
+    (Table-Turning fires ~6 % hot; not cleanly validatable against the truncated
+    recordings). **Part 7 done** — Letty's real HP thresholds (NS1 15000 → 1700,
+    NS2 15000 → 2000, the two spells timer-or-capture) drive the phase graph
+    under damage and stay timer-driven with none.
 
     **Stage B essentially done.** Per-bullet traces reconstructed from the pool
     recordings with no hook (Part 9, bit-exact). The engine-faithful
@@ -210,17 +211,35 @@ too, so Part 8's opcodes came along with it:
       that exact instruction is about as strong a proof of correctness as this
       metric can give.
 
-### 7 · HP, life-callbacks & spellcard phases · ~1 day · autonomy 82%
+### 7 · HP, life-callbacks & spellcard phases · ✅ done
 
-`enemy_life_set` (110) gives real HP. `life_callback_ex` /
-`life_callback_threshold` register "when HP < N, jump to sub M".
-`spellcard_start/end` (90/91) bracket the spells. **This replaces the guessed
-`KILL_FRAC` with Letty's actual HP thresholds** — damage-phasing becomes exact.
+Letty's real HP structure, from the ECL:
 
-- **Concern:** `enemy_flag_armored` / `enemy_flag_invulnerable` windows — easy to
-  miss one when reading the decompile.
-- **Verify:** VM phase-transition frames match the recorded screen-clears; HP
-  values and timed-out-phase durations match the recordings.
+| phase | sub | HP | leaves when |
+|---|---|---|---|
+| NS1 | 38 | `enemy_life_set(15000)` | HP < **1700** (`life_callback_ex`) **or** t = 2400 → Sub42 |
+| Lingering Cold | 42 | inherits (~1700) | HP ≤ 0 (capture) **or** t = 3000 → Sub39 (`death_callback` / spell-timeout) |
+| NS2 | 39 | `enemy_life_set(15000)` | HP < **2000** (`life_callback_threshold`, `!L → 55`) **or** t = 2400 → Sub55 |
+| Table-Turning | 55 | inherits (~2000) | HP ≤ 0 (capture) **or** t = 3000 → Sub51 |
+| defeat | 51 | `enemy_life_set(0)` | — |
+
+- `enemy_life_set` (110), `life_callback_threshold` (112) / `_sub` (113) /
+  `_ex` (148), `spellcard_start/end` (90/91) — all wired. On a life-threshold
+  cross the engine (`FUN_0041fd70`) snaps HP up to the threshold; on HP ≤ 0 the
+  **`enemy_flag_death`** mode decides (`&7`): **2** = drop + fire `death_callback`
+  (LC → NS2), **3** = revive to 1 HP + fire `death_callback` (TT → defeat).
+- **`enemy_flag_invulnerable` is misnamed.** Bit 2 of `+0x2e29` is the gate the
+  shot-damage path *requires* (`FUN_00420620` ~13816) — it means "engaged,
+  accepts shot damage". Bosses set it (1) when a phase's attack starts, (0) in
+  the intro / defeat. `enemy_flag_armored(N)` is the timed grace layered on top
+  (the spellcard-declaration window). `enemy_flag_can_take_damage` (bit 4,
+  default set) is the hard gate the orbs clear on themselves.
+- **Verify** (`vm_verify._test_hp`): a **dodge-only run stays timer-driven**
+  (transitions at 2400 / 5400 / 7800 / 10800 — the recorded screen-clears);
+  under damage, **NS1 → LC fires exactly when HP crosses 1700** (frame ==
+  13300 / dps, checked at dps 10 & 30), NS2 → TT at 2000, and a heavy-damage run
+  **captures both spells** (no timeouts) and ends at Sub51. The `engaged` gate
+  is checked directly.
 
 ### 8 · Movement · ✅ done for Letty
 

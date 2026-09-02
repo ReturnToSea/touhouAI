@@ -412,6 +412,70 @@ def test_letty(path: Path) -> bool:
     tot_err = (sum(got) - sum(recorded)) / sum(recorded)
     ok &= _check("total spawn count within 12%", abs(tot_err) <= 0.12,
                  f"{sum(got)} vs {sum(recorded)} ({tot_err:+.0%})")
+
+    ok &= _test_hp(ecl)
+    return ok
+
+
+def _phase_seq(vm):
+    return [int(d.split("Sub", 1)[1].split()[0])
+            for _, ev, d in vm.trace if ev == "enter_sub"]
+
+
+def _test_hp(ecl) -> bool:
+    """Part 7 — Letty's real HP thresholds drive the phase graph when damage is
+    applied, and it stays timer-driven with none (matching the god-mode recs)."""
+    ok = True
+
+    # no damage -> pure timer transitions at the recorded screen-clears
+    vm = VM(ecl, difficulty=3, seed=0)
+    vm.start_boss(sub=31, interrupt=0)
+    vm.run(13000)
+    ok &= _check("HP: dodge-only run is timer-driven",
+                 _phase_seq(vm) == [38, 42, 39, 55, 51]
+                 and [f for f, e, _ in vm.trace if e == "enter_sub"][1] == 2400,
+                 f"{_phase_seq(vm)}")
+
+    # NS1 (15000 HP) -> Lingering Cold when HP crosses the life_callback_ex(1700)
+    for dps, want in ((10, 1330), (30, 444)):
+        vm = VM(ecl, difficulty=3, seed=0)
+        vm.start_boss(sub=31, interrupt=0)
+        for _ in range(13000):
+            vm.step()
+            b = vm.boss()
+            if b and b.alive:
+                b.damage(dps)
+        f_lc = next((f for f, e, d in vm.trace
+                     if e == "enter_sub" and "Sub42" in d), None)
+        # 15000 - dps*f == 1700  ->  f == 13300/dps
+        ok &= _check(f"HP: NS1->LC at HP 1700 (dps {dps})",
+                     f_lc is not None and abs(f_lc - want) <= 20,
+                     f"transitioned at {f_lc}, want ~{want}")
+
+    # full damage run -> both spells captured (not timed out), ends at Sub51
+    vm = VM(ecl, difficulty=3, seed=0)
+    vm.start_boss(sub=31, interrupt=0)
+    for _ in range(13000):
+        vm.step()
+        b = vm.boss()
+        if b and b.alive:
+            b.damage(40)
+    evs = [e for _, e, _ in vm.trace]
+    ok &= _check("HP: heavy damage captures both spells",
+                 evs.count("spell_captured") == 2 and "spell_timeout" not in evs
+                 and _phase_seq(vm)[-1] == 51,
+                 f"caps={evs.count('spell_captured')} "
+                 f"timeouts={evs.count('spell_timeout')} last={_phase_seq(vm)[-1]}")
+
+    # engaged gate: a boss that never sets enemy_flag_invulnerable(1) takes no damage
+    vm = VM(ecl, difficulty=3, seed=0)
+    e = Enemy(vm, 100, is_boss=True)
+    e.life = e.max_life = 1000
+    e.damage(500)
+    ok &= _check("HP: damage ignored while not engaged", e.life == 1000)
+    e.engaged = True
+    e.damage(500)
+    ok &= _check("HP: damage lands once engaged", e.life == 500)
     return ok
 
 
