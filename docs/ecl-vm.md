@@ -487,19 +487,18 @@ superseded by `bullet_sim.py`.
 - **Lingering Cold `Sub36`** — 57 % pure (RNG branch — expected). Birth count
   +18 %, all `Sub47`'s short-lived aimed bursts; on-screen density within ~8 %.
 
-**Then** the difficulty work:
-
-Lunatic scales counts, speeds, gaps. Some is in the ECL (`!L` params), some is an
-engine multiplier keyed off the difficulty global. Record Letty on **Normal**
-and **Lunatic**, run the VM for both, diff VM-vs-real per difficulty, add
-whatever scaling the VM misses.
-
-- **Concerns:** needs a human to record Normal + Lunatic runs (the recorder needs
-  a difficulty-select tweak first). Coefficients could be per-bullet-type or
-  nonlinear rather than one scalar.
-- **Verify:** VM-Lunatic bullet-density heatmap and bullet-count-over-time curve
-  match recorded-Lunatic within ~10%; side-by-side in the viz, the patterns read
-  as identical.
+**Difficulty coefficients** — the KS test (Part 4) chased down what looked like a
+Lunatic speed multiplier and it turned out to be a **VM bug, not an engine
+scale**: `FUN_00423730` sets a layered attack's per-layer speed as
+`spd1 − (spd1 − spd2)·layer/layers` (÷`layers`, not ÷`layers−1` — the last layer
+never reaches `spd2`). The VM had ÷`layers−1`, so every layered fan/circle ran
+~15–25 % slow. Fixed → NS1 bullet speed ×1.31 → ×1.04 of recorded; the NS2/TT
+residual is a bimodal-median artefact (per bullet-type the VM matches to
+<0.01 px/f — `simulate_batch` gives ring-1 1.80 / ring-2 0.73 at age 30, ==
+recorded). So on Lunatic, at least, there is **no separate engine speed
+multiplier** — the `!L` ECL params + the (now-correct) layer formula account for
+it. A Normal recording would still be the way to confirm nothing else scales
+(counts, gaps).
 
 ---
 
