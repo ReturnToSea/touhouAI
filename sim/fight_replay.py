@@ -122,6 +122,12 @@ SURV_REW = 0.004             # reward += this every frame alive
 DMG_REW = 0.012               # reward += this * boss-HP drained this frame
 HIT_PEN = 12.0                # reward -= this on death (bullet or enemy body)
 KILL_BONUS = 120.0           # reward += this on final-phase defeat
+# gentle nudge off the playfield floor: no penalty above y=380, ramping to
+# -CAMP_PEN at the bottom edge (432). The transfer handoff parks the player at
+# y~432 and it just camps there; the bottom is safe from bullets but kills your
+# downward escape in the dense phases. CAMP_PEN < SURV_REW so staying alive at
+# the bottom is still net-positive - it's "prefer to rise", not "never".
+CAMP_Y, CAMP_SPAN, CAMP_PEN = 380.0, 52.0, 0.003
 
 # --- anti-memorisation randomisation (per episode) ---
 # The whole danmaku field is rotated RIGIDLY about screen-centre by a random
@@ -558,7 +564,8 @@ class FightSim:
             hit = torch.zeros_like(hit)
 
         ended = (self.t0 + self.t) >= (self.rec_len_gpu[self.rec_id] - 2)
-        rew = SURV_REW - HIT_PEN * hit.float()
+        camp = ((self.py - CAMP_Y) / CAMP_SPAN).clamp(0.0, 1.0)
+        rew = SURV_REW - HIT_PEN * hit.float() - CAMP_PEN * camp
 
         # --- damage-phasing: holding shoot drains the CURRENT phase's synthetic
         # HP - at 20% rate anywhere (homing amulets), full rate only when lined

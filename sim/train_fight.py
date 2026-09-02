@@ -256,19 +256,29 @@ def main():
         # policy never trains on the same N boss tracks for 800M steps. envs
         # currently mid-episode on a swapped slot see one glitchy episode (their
         # bullets jump) then reset naturally - ~6% of envs per swap, PPO noise.
+        # Nothing here may crash training: workers stage to ".NNN.npz" (hidden
+        # from this glob), but wrap every fs op defensively regardless.
         if stream_dir is not None and upd % args.swap_every == 0:
-            ready = sorted(stream_dir.glob("[0-9]*.npz"))
+            def _rm(pp):
+                try:
+                    pp.unlink(missing_ok=True)
+                except OSError:
+                    pass
+            try:
+                ready = sorted(stream_dir.glob("[0-9]" * 9 + ".npz"))
+            except OSError:
+                ready = []
             for p in ready[-args.stream_schedules:]:
                 try:
                     rec = load_schedule(p)
                 except Exception:
-                    p.unlink(missing_ok=True)
+                    _rm(p)
                     continue
                 sim.swap_slot(swap_cur % sim.n_rec, rec)
                 swap_cur += 1
-                p.unlink(missing_ok=True)
+                _rm(p)
             for p in ready[:-args.stream_schedules]:       # drop the backlog we skipped
-                p.unlink(missing_ok=True)
+                _rm(p)
 
         with torch.no_grad():
             lastv = ac.critic(obs).squeeze(-1)

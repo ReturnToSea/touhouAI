@@ -264,21 +264,27 @@ def save_schedule(path, s: dict) -> None:
     if s.get("aimed"):
         for k in _AIM_KEYS:
             out[f"aim_{k}"] = s["aimed"][k]
-    tmp = str(path) + ".tmp"
-    np.savez_compressed(tmp, **out)            # pos is ~40% NaN -> compresses ~3x;
-    os.replace(tmp + ".npz", path)             # write-then-rename so readers never
-    #                                            see a half-written file
+    # stage to a dot-prefixed name so the consumer's "[0-9]*.npz" glob never
+    # sees it, then atomic rename. pos is ~40% NaN -> compresses ~3x.
+    path = Path(path)
+    tmp = path.parent / ("." + path.name)
+    with open(tmp, "wb") as fh:
+        np.savez_compressed(fh, **out)
+    os.replace(tmp, path)
 
 
 def load_schedule(path) -> dict:
-    d = np.load(path, allow_pickle=False)
-    aimed = ({k: d[f"aim_{k}"] for k in _AIM_KEYS}
-             if bool(d["has_aimed"]) else None)
-    return dict(pos=d["pos"], half=d["half"], boss=d["boss"], en=d["en"], trim=0,
+    # np.load returns a lazy NpzFile that holds the archive OPEN; copy everything
+    # out and close it, or the caller can't delete the file on Windows.
+    with np.load(path, allow_pickle=False) as d:
+        g = {k: np.array(d[k]) for k in d.files}
+    aimed = ({k: g[f"aim_{k}"] for k in _AIM_KEYS}
+             if bool(g["has_aimed"]) else None)
+    return dict(pos=g["pos"], half=g["half"], boss=g["boss"], en=g["en"], trim=0,
                name="letty_ecl_stream",
-               phases=[tuple(int(x) for x in row) for row in d["phases"]],
-               phase_hp=list(map(float, d["phase_hp"])),
-               phase_dmg_mult=list(map(float, d["phase_dmg_mult"])), aimed=aimed)
+               phases=[tuple(int(x) for x in row) for row in g["phases"]],
+               phase_hp=list(map(float, g["phase_hp"])),
+               phase_dmg_mult=list(map(float, g["phase_dmg_mult"])), aimed=aimed)
 
 
 def stream_worker(pooldir, seed0: int = 100_000, difficulty: int = 3,
@@ -292,7 +298,7 @@ def stream_worker(pooldir, seed0: int = 100_000, difficulty: int = 3,
     pooldir.mkdir(parents=True, exist_ok=True)
     ctr = seed0 + (os.getpid() % 997) * 100_000
     while True:
-        pend = list(pooldir.glob("[0-9]*.npz"))
+        pend = list(pooldir.glob("[0-9]" * 9 + ".npz"))
         if len(pend) >= max_pending:
             time.sleep(2.0)
             continue
