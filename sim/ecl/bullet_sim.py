@@ -150,17 +150,18 @@ def simulate(p: BulletParams, n_frames: int) -> np.ndarray:
                 vx, vy = math.cos(ang) * spd, math.sin(ang) * spd
                 fx_ctr += 1
         elif p.fx_flag in (FX_PAUSE_REDIR, FX_PAUSE_AIM):
-            if fx_ctr < p.fx_interval:                   # decelerate toward 0
-                # pytouhou: cur -> 0 over [t0, t0 + interval - 1]
-                f = max(0.0, 1.0 - fx_ctr / max(1, p.fx_interval - 1))
+            if fx_ctr < p.fx_interval:                   # decelerating
+                # th07 FUN_00425400: speed*(1 - ctr/interval)  (divisor = interval,
+                # NOT interval-1; the earlier pytouhou-based value was TH06's).
+                f = max(0.0, 1.0 - fx_ctr / max(1, p.fx_interval))
                 vx, vy = math.cos(ang) * spd * f, math.sin(ang) * spd * f
                 fx_ctr += 1
-            else:                                       # arrive: turn / re-aim
+            else:                                       # arrive: turn / re-aim, set speed
                 if p.fx_flag == FX_PAUSE_AIM:
                     ang = math.atan2(p.player_xy[1] - py, p.player_xy[0] - px) + p.fx_p1
                 else:
-                    ang = _norm(ang + p.fx_p1)
-                spd = spd if p.fx_p2 <= -999.0 else p.fx_p2
+                    ang = _norm(ang + p.fx_p1)          # +0xd20 angle delta
+                spd = spd if p.fx_p2 <= -999.0 else p.fx_p2   # +0xd1c redirect speed
                 vx, vy = math.cos(ang) * spd, math.sin(ang) * spd
                 fx_ctr = 0
                 cycles += 1
@@ -273,8 +274,8 @@ def simulate_batch(b: dict, n_frames: int) -> np.ndarray:
         pr = (flag == FX_PAUSE_REDIR) | (flag == FX_PAUSE_AIM)
         decel = live & pr & (fx_ctr < iv)
         arrive = live & pr & (fx_ctr >= iv)
-        # cur -> 0 over [t0, t0 + interval - 1]  (divisor interval-1, matches simulate)
-        f = np.maximum(0.0, 1.0 - np.where(iv > 1, fx_ctr / np.maximum(iv - 1, 1), 1.0))
+        # th07 FUN_00425400: speed*(1 - ctr/interval)  (divisor = interval)
+        f = np.maximum(0.0, 1.0 - np.where(iv > 0, fx_ctr / np.maximum(iv, 1), 1.0))
         vx = np.where(decel, np.cos(ang) * spd * f, vx)
         vy = np.where(decel, np.sin(ang) * spd * f, vy)
         fx_ctr += decel

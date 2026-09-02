@@ -197,10 +197,9 @@ class AimPool:
         pr = (self.fxf == FX_PAUSE_REDIR) | (self.fxf == FX_PAUSE_AIM)
         decel = sl & pr & (self.fxctr < self.fxiv)
         arrive = sl & pr & (self.fxctr >= self.fxiv)
-        # pytouhou: speed interpolates cur -> 0 over [t0, t0 + interval - 1],
-        # i.e. the divisor is interval-1, and f hits 0 on the last decel frame.
-        f = 1.0 - torch.where(self.fxiv > 1,
-                              self.fxctr / (self.fxiv - 1).clamp(min=1), 1.0)
+        # th07 FUN_00425400: speed * (1 - ctr/interval)  (divisor = interval)
+        f = 1.0 - torch.where(self.fxiv > 0,
+                              self.fxctr / self.fxiv.clamp(min=1), 1.0)
         f = f.clamp(min=0.0)
         self.vx = torch.where(decel, torch.cos(self.ang) * self.spd * f, self.vx)
         self.vy = torch.where(decel, torch.sin(self.ang) * self.spd * f, self.vy)
