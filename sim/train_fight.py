@@ -336,15 +336,18 @@ def main():
                   f"  [{tag}]", flush=True)
             hist.append((wall, total, m, mean if not np.isnan(mean) else m,
                          f30, ktime))            # 6-col fight schema
-            np.save(run / "history.npy", np.array(hist))
-            ac.export(run / "last_mlp.pt")
-            score = f30 + m / 1000.0
-            if score > best_score:
-                best_score = score
-                ac.export(run / "best_mlp.pt")
-                print(f"    ^ new best (kill {f30*100:.0f}%, surv {m:.0f}s)", flush=True)
-            if upd in (5, 20) or upd % 40 == 0:   # snapshots the transfer daemon keeps
-                ac.export(run / f"mlp_{int(total/1e6)}M.pt")
+            try:                                 # a full disk must not kill training
+                np.save(run / "history.npy", np.array(hist))
+                ac.export(run / "last_mlp.pt")
+                score = f30 + m / 1000.0
+                if score > best_score:
+                    best_score = score
+                    ac.export(run / "best_mlp.pt")
+                    print(f"    ^ new best (kill {f30*100:.0f}%, surv {m:.0f}s)", flush=True)
+                if upd in (5, 20) or upd % 40 == 0:   # snapshots the transfer daemon keeps
+                    ac.export(run / f"mlp_{int(total/1e6)}M.pt")
+            except OSError as e:
+                print(f"    [warn] checkpoint save failed: {e}", flush=True)
 
     ac.export(run / "final_mlp.pt")
 

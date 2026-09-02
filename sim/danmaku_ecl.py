@@ -288,7 +288,7 @@ def load_schedule(path) -> dict:
 
 
 def stream_worker(pooldir, seed0: int = 100_000, difficulty: int = 3,
-                  max_pending: int = 60) -> None:
+                  max_pending: int = 14) -> None:
     """Loop forever: build a schedule, drop it in `pooldir` as NNNNNNNNN.npz.
     Throttles when the consumer is behind (dir already has max_pending files).
     `seed0` is offset by the worker's pid so parallel workers don't collide."""
