@@ -176,9 +176,10 @@ def _record_one(env, pm, pol, boss, args, out, run):
                 gone += 1
             else:
                 gone = 0
-                bosslog.append((step, b[0], b[1]))
+                bosslog.append((step, b[0], b[1], b[2]))     # b[2] = boss HP (+0x2BB8)
             s = env.h.s
-            playerlog.append((step, s.player_x, s.player_y))
+            playerlog.append((step, s.player_x, s.player_y,
+                              getattr(s, "power", 0)))         # player power for DPS-vs-power
 
             blob = pm.read_bytes(BM_BASE, BM_STRIDE * BM_MAX)
             arr = np.frombuffer(blob, dtype=BULLET_DT, count=BM_MAX)

@@ -32,7 +32,7 @@ is fitted in the bullet's own frame, independent of the emitter position.
 Still loose: Lingering Cold `Sub36` (56 % pure — it fires several bullet types
 on an RNG branch, expected) and its orb chain over-fires ~+16 %.
 
-    python -m sim.ecl.align            # align + diagnostic on sim/fights/letty_*.npz
+    python -m sim.ecl.align            # align + diagnostic on sim/fights/letty_[0-9]*.npz
 """
 from __future__ import annotations
 
@@ -444,7 +444,7 @@ def refit_coverage(npz_paths: list[str]) -> None:
 
 def main(argv):
     import glob
-    paths = argv[1:] or sorted(glob.glob(str(_FIGHTS / "letty_*.npz")))
+    paths = argv[1:] or sorted(glob.glob(str(_FIGHTS / "letty_[0-9]*.npz")))
     ok = verify(paths)
     refit_coverage(paths)
     print("\nPASS" if ok else "\nFAIL")

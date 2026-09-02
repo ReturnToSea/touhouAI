@@ -52,7 +52,7 @@ def _type_hitboxes() -> dict[int, float]:
     import glob
     from collections import defaultdict
     acc: dict[int, list] = defaultdict(list)
-    for p in sorted(glob.glob(str(_FIGHTS / "letty_*.npz"))):
+    for p in sorted(glob.glob(str(_FIGHTS / "letty_[0-9]*.npz"))):
         b = np.load(p)["bullets"]
         if b.shape[1] < 19:
             continue
@@ -246,7 +246,7 @@ def _verify() -> bool:
     vm_curve = np.mean([(~np.isnan(x["pos"][:, :, 0])).sum(1)[:9000]
                         for x in recs], 0)
     rec_curves = [rec_density(p)[:9000]
-                  for p in sorted(glob.glob(str(_FIGHTS / "letty_*.npz")))[:3]]
+                  for p in sorted(glob.glob(str(_FIGHTS / "letty_[0-9]*.npz")))[:3]]
     L = min(len(vm_curve), min(len(c) for c in rec_curves))
     rec_mean = np.mean([c[:L] for c in rec_curves], 0)
     v0 = int(np.argmax(vm_curve > 0))

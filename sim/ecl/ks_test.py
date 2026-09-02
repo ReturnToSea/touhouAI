@@ -56,7 +56,7 @@ def _vm_dists(seeds=range(6)):
 def _rec_dists():
     ang = {i: [] for i in range(4)}
     spd = {i: [] for i in range(4)}
-    for p in sorted(glob.glob(str(_FIGHTS / "letty_*.npz"))):
+    for p in sorted(glob.glob(str(_FIGHTS / "letty_[0-9]*.npz"))):
         for t in load_traces(p):
             if t.life < W1 + 2:
                 continue

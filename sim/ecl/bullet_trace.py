@@ -214,7 +214,7 @@ if __name__ == "__main__":
     import sys
     import glob
 
-    paths = sys.argv[1:] or sorted(glob.glob("sim/fights/letty_*.npz"))
+    paths = sys.argv[1:] or sorted(glob.glob("sim/fights/letty_[0-9]*.npz"))
     for p in paths:
         s = verify(p)
         print(f"{s['recording']:16} {s['bullets']:6} bullets / {s['rows']:8} rows / "

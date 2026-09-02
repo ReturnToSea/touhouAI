@@ -55,7 +55,7 @@ def rec_density(npz_path: str | Path) -> np.ndarray:
 
 def main(argv) -> int:
     import glob
-    recs = argv[1:] or sorted(glob.glob(str(_FIGHTS / "letty_*.npz")))
+    recs = argv[1:] or sorted(glob.glob(str(_FIGHTS / "letty_[0-9]*.npz")))
 
     vm_c = vm_density()
     # align on the first bullet (VM frame ~60; recordings are f0-relative)

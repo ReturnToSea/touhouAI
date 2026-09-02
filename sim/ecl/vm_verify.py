@@ -278,7 +278,7 @@ def test_movement(ecl_path: Path) -> bool:
     ok &= _check("orbit sweeps its angle", swept > 90, f"{swept:.0f} deg over 180 f")
 
     # ...and the shape matches a recorded Table-Turning orb to within a few px
-    recs = sorted(FIGHTS.glob("letty_*.npz"))
+    recs = sorted(FIGHTS.glob("letty_[0-9]*.npz"))
     if recs:
         ok &= _check_orbit_vs_recording(ecl, recs[0])
 
@@ -316,9 +316,9 @@ def test_movement(ecl_path: Path) -> bool:
                  f"{len(long)}/{len(lifes)} lived >800 f")
 
     # boss track vs a recording, aligned on the first bullet frame
-    recs = sorted(FIGHTS.glob("letty_*.npz"))
+    recs = sorted(FIGHTS.glob("letty_[0-9]*.npz"))
     if not recs:
-        print("  --   boss track vs recording — skipped (sim/fights/letty_*.npz not present)")
+        print("  --   boss track vs recording — skipped (sim/fights/letty_[0-9]*.npz not present)")
         return ok
     import numpy as np
     vm = VM(ecl, difficulty=3, seed=1)

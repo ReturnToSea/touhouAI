@@ -182,7 +182,7 @@ def verify(npz_paths: list[str], models: dict[tuple, MotionModel],
 
 def main(argv):
     import glob
-    paths = argv[1:] or sorted(glob.glob("sim/fights/letty_*.npz"))
+    paths = argv[1:] or sorted(glob.glob("sim/fights/letty_[0-9]*.npz"))
     models = fit(paths)
     print(f"fit {len(models)} bullet-motion models from {len(paths)} recordings\n")
     r = verify(paths, models)

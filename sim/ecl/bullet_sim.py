@@ -474,5 +474,5 @@ def _verify_batch(npz_paths: list[str]) -> bool:
 if __name__ == "__main__":
     import sys
     import glob
-    paths = sys.argv[1:] or sorted(glob.glob("sim/fights/letty_*.npz"))
+    paths = sys.argv[1:] or sorted(glob.glob("sim/fights/letty_[0-9]*.npz"))
     raise SystemExit(0 if verify(paths) else 1)

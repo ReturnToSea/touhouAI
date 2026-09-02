@@ -102,5 +102,5 @@ def summary(npz_path: str | Path) -> None:
 if __name__ == "__main__":
     import sys
     import glob
-    for p in sys.argv[1:] or sorted(glob.glob("sim/fights/letty_*.npz")):
+    for p in sys.argv[1:] or sorted(glob.glob("sim/fights/letty_[0-9]*.npz")):
         summary(p)
