@@ -180,8 +180,8 @@ has to be exact.
 - **Episode length.** Right now every episode replays all of Stage 1 to reach
   Letty (~60 s of "already solved" game per episode). Later segments will want a
   [snapshot](env.md) taken deeper in, so a rollout starts at the stage being
-  trained — the [hard-reset](ref-th07-hard-reset.md) already reloads a stage;
-  snapshotting mid-stage is the extension.
+  trained — the [hard-reset](hook.md) already reloads a stage; snapshotting
+  mid-stage is the extension.
 - **Resource management** (bombs, lives, power routing) isn't in the reward yet.
   A 1cc tolerates losing lives; a *good* 1cc doesn't. That reward shaping comes
   after the policy can physically clear the stages.
