@@ -2,8 +2,9 @@
 
 Every boss is a bytecode program in the "old" TH06–09 ECL format. `thtk`
 (`thdat` + `thecl`) extracts and decompiles `ecldataN.ecl` from `th07.dat` into
-readable script. Today we read it for structure; [the plan](ecl-vm.md) is to
-run it.
+readable script. We read it for structure — phase timing, HP thresholds, which
+shots are aimed — and [an interpreter that ran it](de-generative-danmaku.md) was
+built and then shelved.
 
 ## What the script tells us
 
@@ -33,13 +34,13 @@ Lunatic:
 The fast `bullet_circle` stream in Table-Turning is what looks like a laser in
 gameplay footage — it's ordinary bullets, and we record it fine.
 
-!!! note "Reference then, runtime now"
-    The [first interpreter attempt](de-ecl-vm.md) got the control flow right but
-    failed on bullet *motion* — the undocumented `bullet_effects` system. The
-    [current VM](ecl-vm.md) runs these scripts for real: control flow, phase
-    transitions, arithmetic, sub-enemies, and boss/orb movement all execute
-    Letty's actual bytecode frame by frame (Parts 1–3, 5, 6, 8 of the plan).
-    What it still can't do is bullet *motion* — it gets that by
-    [hooking the engine and measuring it](ecl-vm.md#stage-b-measuring-the-engine)
-    — the same trick that made [recording](recording.md) work — rather than by
-    interpreting `bullet_effects` statically.
+!!! note "Two interpreters, both shelved"
+    The [first attempt](de-ecl-vm.md) got control flow right but failed on bullet
+    *motion* — the undocumented `bullet_effects` system. The
+    [second](de-generative-danmaku.md) ran the scripts for real — control flow,
+    phase transitions, arithmetic, sub-enemies, boss/orb movement, and bullet
+    motion measured from the engine — reaching ~2 px per-bullet fidelity. A
+    policy trained on it still transferred at 0 %, so the project
+    [stopped simulating Letty](plan.md). The parser and VM
+    (`sim/ecl/`) remain useful for reading structure and roughing out a boss
+    that hasn't been recorded yet.

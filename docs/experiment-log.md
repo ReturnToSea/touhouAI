@@ -140,12 +140,16 @@ lands 1/10 real.
 > kills where v5 got one in a billion steps. But over a full billion steps the
 > sim eval never predicts real performance, which means the policy is exploiting
 > structure that only exists in 20 recordings and their symmetries. This is
-> [the ceiling](ceiling.md), and the response is [generative danmaku](ecl-vm.md).
+> [the ceiling](ceiling.md). The response was
+> [generative danmaku](de-generative-danmaku.md) — which hit the same wall from
+> the other side — and then [real-game training](plan.md).
 
 ## Runs
 
 | Run | Date | What changed | Real transfer | Verdict |
 |---|---|---|---|---|
+| `ppo_real_letty` | 2026-09-02 | [real-game PPO](plan.md) on the Letty fight; `ST_ROLLOUT` × 12 hooked games; warm-start `ppo_v29` | *running* | the [current plan](plan.md) — accept ~15× slower for zero fidelity gap |
+| `fight_letty_ecl` run 1–8 | 2026-09-01/02 | [ECL VM](de-generative-danmaku.md) danmaku: real bytecode, measured bullet motion, ~2 px fidelity; streaming schedules; per-bullet hitboxes; full RE pass | flat **~50 s / 0% kill** every checkpoint; run 2 once reached Table-Turning (127 s) | [dead end](de-generative-danmaku.md) — reimplemented engine is still an artefact; x87 float error compounds |
 | `fight_letty_seg` v9 | 2026-08-31 | re-aim removed → rigid field rotation; stability fixes; ~20 recs; full 1 B steps | 60 s median / 7% kill-rate over 631 fights; best ckpt ~103 s / 33% | best recorded-boss run; hits the [ceiling](ceiling.md) |
 | `fight_letty_seg` v1–v8 | 2026-08-31 | phase detection + synthetic damage-phasing + kill-only reward + the [re-aim saga](de-reaim.md) | 1 → ~11 real kills; v7 peaked 88 s then thrashed | superseded by v9 |
 | `fight_letty` | 2026-08-31 | recorded-Letty FightSim + re-aiming + real hitboxes + lethal enemy bodies; from scratch | 150–190 s on real Letty | inconclusive — Letty too easy (baseline 6/6) |

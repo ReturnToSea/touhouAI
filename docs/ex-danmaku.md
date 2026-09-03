@@ -2,8 +2,10 @@
 
 The recurring problem: get a *specific* boss's patterns into the training sim —
 novel every episode (nothing to memorise) but still correct (so they transfer).
-Three attempts, in order. The third got furthest, and where it stopped is what
-[the plan](ecl-vm.md) responds to.
+Four attempts, in order. The last one — a near-complete reimplementation of
+Letty's engine — got closest to "correct" and still didn't transfer, which is
+why the current direction abandons simulating her for
+[real-game training](de-realgame.md#the-letty-fight-revisited).
 
 <div class="grid cards" markdown>
 
@@ -32,6 +34,16 @@ Three attempts, in order. The third got furthest, and where it stopped is what
     A detour within the replay pipeline: three implementations of "point replayed
     aimed bullets at the *live* policy", all abandoned. A re-aimed bullet's
     screen-lifetime stops matching the recording's slot bookkeeping.
+
+- __[Generative danmaku — the ECL VM](de-generative-danmaku.md)__
+
+    ---
+
+    Run Letty's actual bytecode in a reimplemented VM — parser, phase machine,
+    PRNG, movement, an engine-faithful bullet-motion model, ~2 px per-bullet
+    fidelity. Eight training runs, a flat 0 % real kill-rate. A 2003 x87-FPU
+    engine can't be reimplemented bit-exact, and the error compounds. **The
+    furthest and the hardest fall.**
 
 - __[Choosing a proof-of-concept boss](de-poc.md)__
 

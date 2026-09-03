@@ -1,8 +1,9 @@
 # The first ECL interpreter
 
 **Verdict:** the VM worked; bullet *motion* did not. Shelved in favour of
-[recording](recording.md). Being revisited now — see [the plan](ecl-vm.md) — with
-a different way of getting the motion.
+[recording](recording.md). Revisited later — [the ECL VM](de-generative-danmaku.md),
+with the motion measured from the engine instead of interpreted — which got
+built almost to completion and still didn't transfer.
 
 ## The idea
 
@@ -43,7 +44,10 @@ was visibly wrong:
 > interpretation.
 
 That lesson produced the [recording pipeline](recording.md), which works but
-[hits a ceiling](ceiling.md). The [new ECL VM plan](ecl-vm.md) keeps the VM for
-*control flow* (Stage A) and gets the per-type motion the same way recording did
-— by [hooking the engine and measuring](ecl-vm.md#stage-b-measuring-the-engine),
-not by static RE.
+[hits a ceiling](ceiling.md). The [second ECL VM](de-generative-danmaku.md) kept
+the VM for *control flow* and got the per-type motion the same way recording did
+— by [measuring the engine](de-generative-danmaku.md#stage-b-measuring-the-engine)
+rather than statically reversing it. It reached ~2 px per-bullet fidelity and
+still transferred at 0 %; [that postmortem](de-generative-danmaku.md) is why the
+project stopped simulating bosses and moved to
+[real-game training](plan.md).

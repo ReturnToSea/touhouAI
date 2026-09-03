@@ -11,10 +11,13 @@ lot of things that did not work.
 
 The handbook is a linear tour — start at Chapter 1 and go through. **Parts 1–3**
 build up the system: the game, the goal, and how the agent sees, decides, learns,
-and talks to the game. **Part 4** covers training in simulation and the ceiling
-it hits. **Part 5** is the current plan. **Results** is deliberately empty — the
-plan hasn't produced any yet. **Extras** holds every approach that didn't work,
-the lessons, and the engine-internals reference.
+and talks to the game. **Part 4** covers training in simulation, the boss's
+script format, and the ceiling the simulator hits. **Part 5** is the plan that
+came out of that ceiling: train on the real game and accept the slowdown.
+**Results** is deliberately thin — that plan is still running. **Extras** holds
+every approach that didn't work, the lessons, and the engine-internals reference
+— including the [ECL VM](de-generative-danmaku.md), the most complete attempt to
+get past the ceiling and the one that failed hardest.
 
 | | |
 |---|---|
@@ -33,7 +36,8 @@ no-bomb ([Chapter 2](ch-goal.md)). Perception is process-memory reads; control i
 an injected 32-bit DLL that also runs the game headless at ~80× real-time;
 training is a GPU danmaku simulator running ~1000 games in parallel, with the
 policy then transferred to the retail game. It works up to a point — and that
-point, and the plan to get past it, is what Parts 4 and 5 are about.
+point, what's been tried to get past it, and where the project goes next are what
+Parts 4 and 5 are about.
 
 ### Where it stands
 
@@ -48,15 +52,22 @@ point, and the plan to get past it, is what Parts 4 and 5 are about.
 Both simulator approaches — [procedural](sim.md) and
 [replayed recordings](recording.md) — plateau in the same place, and the failure
 mode says it's a [hard limit of transforming a fixed dataset](ceiling.md), not a
-tuning problem. The response ([the plan](ecl-vm.md)) is to **generate** the
-danmaku instead: run each boss's actual PCB bytecode, getting the bullet motion
-by hooking the engine and measuring it. Split into twelve verifiable parts —
-**five done and verified**: a byte-exact binary parser, a control-flow VM that
-runs Letty's real script (phase transitions, arithmetic, a PRNG), bullet
-spawn-event emission, and sub-enemy recursion. Movement (Part 8) is built —
-the boss track lands pixel-exact against a recording for 127 frames — but not
-yet its own verified pass. No bullet *motion* yet, and no trained policy — see
-[the plan](ecl-vm.md) for exactly where each part stands.
+tuning problem. The response was to **generate** the danmaku instead: run Letty's
+actual PCB bytecode in a reimplemented VM. That got built almost to completion —
+byte-exact parser, control-flow VM, PRNG, sub-enemy recursion, boss and orb
+movement, an engine-faithful bullet-motion model — and reproduces Letty's danmaku
+to a ~2 px per-bullet noise floor. **It still didn't transfer** — eight training
+runs produced a flat ~50 s / 0 %-kill real-game line, *worse* than either
+simulator it was meant to replace. A Python reimplementation of a 2003 x87-FPU
+engine can be made close but not exact, and the residual error compounds across a
+500-bullet screen. The full postmortem is
+[Generative danmaku — the ECL VM](de-generative-danmaku.md).
+
+The current direction ([Part 5](plan.md)) is to stop simulating Letty and **train
+the fight on the real game** — `ST_ROLLOUT` collecting whole PPO trajectories
+inside a dozen [hooked games](hook.md) in parallel, warm-started from the
+procedural-sim policy. ~15× slower per step than the GPU sim; no fidelity gap
+because there's no sim.
 
 !!! note "Constraints"
     The clear runs on vanilla `th07.exe` with the hook in observe-only mode.

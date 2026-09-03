@@ -1,3 +1,210 @@
+# Generative danmaku — the ECL VM
+
+**Verdict:** the most faithful reproduction of Letty the project has ever built,
+and the *worst* for transfer. Eight training runs on VM-generated danmaku; real
+survival was a flat line the whole time — **~50 s active-fight median, 0 % real
+kills**, against ~103 s / 33 % from the [replay baseline](de-letty-replay.md) it
+was meant to beat and ~225 s from the [procedural sim](sim.md). The VM's fidelity
+metrics kept improving while transfer never moved. A Python reimplementation of a
+2003 game engine can be made *close* — it cannot be made *exact*, and close
+doesn't transfer.
+
+This page is the postmortem. [The plan as it stood](#the-plan-verbatim) — twelve
+verifiable parts, most of them done — is preserved in full below.
+
+## What got built
+
+[The first interpreter](de-ecl-vm.md) died on bullet *motion*. This attempt was
+the answer to that: keep the VM for control flow (**Stage A**), and get the
+per-type motion the way [recording](recording.md) did — by measuring the engine,
+not statically reversing it (**Stage B**).
+
+By the end, `sim/ecl/` did all of this, each behind a passing verification gate:
+
+- **Parsed** every stage's ECL binary — 19,919 / 19,919 instructions match `thtk`.
+- **Ran** Letty's real script frame by frame — control flow, the phase machine,
+  arithmetic, the real PRNG (`FUN_00431870`, a 16-bit `rotl16` generator, not
+  the EoSD LCG), sub-enemy recursion.
+- **Moved** the boss and her satellite orbs — the boss track landed
+  **pixel-exact against a recording for 127 frames**, until the first RNG-driven
+  turn.
+- **Emitted** every bullet spawn (frame, type, position, angle, speed) within a
+  few percent of the recorded birth counts per phase.
+- **Propagated** each bullet with an engine-faithful per-frame model
+  (`bullet_sim.py`) — the hang, the launch kick, all five `bullet_effects`
+  flags — reproducing recorded trajectories to **p50 2.2 px / p90 7 px**, the
+  recorder's own noise floor.
+- **Wired** it end to end: a GPU danmaku layer, live re-aiming for aimed shots
+  (`aim_pool.py`), real HP thresholds, `train_fight.py --sim ecl`.
+
+`danmaku_check` — VM danmaku vs the recordings, on-screen bullet count per frame
+— ended at **ratio 1.03, curve correlation 0.98**.
+
+## What happened when a policy trained on it
+
+Eight runs (`fight_letty_ecl` run 1 – run 8, up to ~800 M steps each). The
+transfer daemon played real Letty against every checkpoint.
+
+| | Sim eval | Real game |
+|---|---|---|
+| survival | ~108 s median, reaching phase **3.58 / 4** (deep Table-Turning) | **~50 s** active-fight median — a flat line across every checkpoint |
+| kill-rate | 29–62 % | **0 %** |
+| where it dies | — | **Lingering Cold, 62 % of episodes**; NS1 the rest |
+
+The single best moment across all eight runs was run 2 at ~466 M steps: one real
+fight reached Table-Turning (127 s). It was never reproducible and the median
+never followed.
+
+This is worse than every prior approach. The procedural sim gets a policy to
+~225 s real (clears Stage 1, dies in Stage 2). The 20-recording replay pipeline
+gets ~103 s and lands real kills a third of the time at its best checkpoint. The
+faithful VM — the thing all of that was building toward — got **0 %**.
+
+## Why it didn't transfer
+
+### The tell is the same as every other dead end
+
+`fight_letty_ecl` improved its **sim** score run over run, and its fidelity
+metrics improved too — `danmaku_check` went 1.23 → 1.17 → 1.08 → 1.03 over the
+fix campaign, birth counts converged, the density curve correlation climbed. Real
+transfer never moved off the floor. When the sim eval — and every offline
+fidelity check — can't tell a policy that transfers from one that doesn't, the
+policy is optimising against structure that only exists in the sim. Here that
+structure is **the reimplementation's residual error**.
+
+### It compounds
+
+Individually, the VM's bullets are good — `bullet_sim` matches recorded
+trajectories to ~2 px, the recorder's noise floor. But a Lingering Cold screen
+has **~500 bullets**, and the errors are not independent noise — they are
+systematic, from the same handful of slightly-wrong constants. A ~40 px-wide safe
+lane between two bullet streams is the difference between "dodge left" and "die",
+and a 3-degree error in a fan's base angle plus a 4 % error in its per-layer
+speed moves that lane somewhere the real game doesn't have one. The policy learns
+the VM's lanes. They aren't Letty's.
+
+### Two errors we could not close
+
+1. **x87 80-bit floating point.** `th07.exe` (2003) does its bullet and movement
+   math in the x87 FPU, with 80-bit intermediates and x87 rounding. `numpy` /
+   `torch` are 32- or 64-bit IEEE. The decompiler shows `float10` all through
+   `FUN_00423730` (the emitter) and the movement ops. Bit-exact reproduction of
+   x87 arithmetic in Python is not practical without an x87 emulator in the hot
+   loop. Every bullet is off by a fraction of a pixel *at spawn*, before any
+   motion, and it grows.
+
+2. **Runtime-only constants.** Letty's Lingering Cold sweep is driven by
+   `move_dir_time [60, 4, __math_rand_rad, 0.7]`, and `__math_rand_rad` pulls the
+   boss toward `DAT_004be408`. That address is **zero-initialised BSS** — it
+   holds nothing in the executable on disk; the engine writes it during stage
+   setup. Static analysis can't give it. The VM's LC boss x-swing came out
+   **±42 px** against the real **±80 px** — the boss doesn't range far enough, so
+   the whole spell's geometry is narrower than reality. And `DAT_004be408` is one
+   of *dozens* of such globals.
+
+### The method hid it
+
+Every offline check was an **aggregate**: total bullet count, per-phase birth
+count, a density-map correlation, a KS test on heading distributions. All of them
+improved toward the recordings. None of them can see whether the *specific dodge
+lane the policy is standing in* exists in the real fight. `danmaku_check` at 1.03
+means the VM puts the right *number* of bullets on screen — not in the right
+*places*.
+
+## Everything we tried to make it work
+
+The VM side (each a real engine detail, each verified against recordings):
+
+- Rewrote the PRNG from the EoSD-family LCG to the real `rotl16` generator
+  (`FUN_00431870`), re-wired every `set_*_rand_*` opcode onto it, added a KS test.
+- Fixed the per-layer emitter speed formula: `spd1 − (spd1−spd2)·layer/layers`,
+  **÷layers not ÷(layers−1)** — the VM was running every layered fan ~15–25 %
+  slow (NS1 bullet speed ×1.31 → ×1.04 of recorded).
+- Implemented all **9 emitter modes** from `FUN_00423730` (fan / circle /
+  offset-ring / random-angle / random-speed, with layer rotation and count-parity
+  fan centring).
+- Rebuilt the `bullet_effects` model twice — from "arg0 = enable bit" to
+  "arg0 = staging-slot index 0..4, an overwrite" — after reading the VM backbone
+  in `fn410520.c`. This was silently stacking 5 redirect entries on looped orbs.
+- Added the **spellcard damage divisor** (`/7` while a spell is active,
+  `FUN_00420620`), the real HP thresholds (NS1 1700, NS2 2000, spells
+  timer-or-capture), the 70-HP/frame damage clamp.
+- Added the off-screen sub-enemy cull (`enemy_flag_oob_immune` + box test) —
+  orb lifetimes 2400 f → 420 f, engine-correct.
+- Fixed the orbit gvars: `CIRCLE_ANGLE` / `CIRCLE_SPEED` are the heading /
+  angular-velocity fields, not the `__move_circle_abs` sweep state — `Sub57`'s
+  `CIRCLE_SPEED /= 1.4` per burst had been collapsing the Table-Turning orbit.
+- Implemented the hang (spawn-state crawl), the launch kick
+  (`|vel| = speed + 5·(1−t/16)` for 17 f), the FX pause-redirect / re-aim /
+  wall-bounce handlers, and `move_point` / `move_dir_time` easing modes — all
+  from a Ghidra decompile session (`docs/th07-re-notes.md`).
+
+Live-game probes, for what static analysis couldn't give:
+
+- **Player hitbox: found it was 2.0 px half-extent in the sim vs 0.825 real** —
+  a 2.4× error that had been in the project since the start. Move speed and
+  playfield bounds probed and confirmed exact.
+- Probed for `DAT_004be408` and the other movement constants — **they're in BSS,
+  only readable from a running game**, and even with them the x87 math remains.
+
+Training side:
+
+- **Streaming fresh VM schedules** — a background worker generating new danmaku
+  layouts continuously, so the policy couldn't memorise a fixed pool of 48.
+- Live re-aiming (`aim_pool.py`) for the ~6 % aimed shots, sized up after it was
+  dropping ~12 % of aimed bullets and undersized for Lingering Cold.
+- **Per-bullet hitbox fed into the observation** — the danger grid and escape
+  scan now use each bullet's real AABB half-extent, C and Python at 0.0 parity.
+- Handoff spawn pose (start episodes at the real Stage-1→Letty handoff position),
+  a bottom-camp penalty, reward normalisation, LR annealing.
+
+The fidelity metrics responded to all of it. Transfer did not.
+
+## The decision
+
+Stop reimplementing the engine. Train the Letty fight on **the real game**, the
+way [Stage 1 fine-tuning](de-realgame.md) already runs: `ST_ROLLOUT` collects a
+whole PPO trajectory in C inside each [hooked game](hook.md), 12 instances in
+parallel at ~68× real-time each (~5–6 k steps/s aggregate), warm-started from
+`ppo_v29`. Every episode plays real Stage 1 into the real Letty fight; the
+boss-damage reward term does the rest. There is no fidelity gap because there is
+no sim — it *is* Letty's bytecode, running in Letty's engine, with Letty's x87
+FPU and Letty's RNG.
+
+[Real-game fine-tuning](de-realgame.md) was previously filed as "a wash on a
+solved stage." That verdict holds for *Stage 1 survival*, which the sim policy
+already maxes. It does **not** hold for *killing Letty fast*, which the sim policy
+can't do and which no simulator has been able to teach.
+
+## What it left us
+
+- The **VM is not deleted.** `sim/ecl/` parses and runs every PCB stage's
+  bytecode; it stays the fastest way to get a rough danmaku pattern for
+  pre-training, and the parser / phase machine / RE notes are reference for every
+  future stage.
+- The **RE work is banked** — the emitter modes, the bullet motion model, the
+  PRNG, the spellcard damage rules, the HP thresholds are all in
+  `docs/th07-re-notes.md` and correct regardless of whether the VM drives
+  training.
+- The **player-hitbox fix** (2.0 → 0.825) came out of this and applies
+  everywhere.
+- The lesson, in one line, joins the others in [the table](dead-ends.md):
+  **a reimplemented engine is still a fixed artefact** — closer to real than 20
+  recordings, but the policy finds the seam between it and reality just the same,
+  and here the seam was wide enough to swallow the whole transfer.
+
+---
+
+## The plan, verbatim
+
+*What follows is the former Chapter 13, "Generative danmaku" (`ecl-vm.md`),
+exactly as it stood when the approach was shelved. Most of the twelve parts were
+done and verified; the two verification gates in Part 12 — a human viz sign-off
+and a transfer test that beats the replay baseline — are the ones it never
+passed.*
+
+---
+
 # The ECL VM build plan
 
 Replace [recorded-replay](recording.md) danmaku with a VM that executes the

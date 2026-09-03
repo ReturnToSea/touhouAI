@@ -93,5 +93,7 @@ training from 94k to 136k env-frames/s.
 > and every fix for that reintroduces the flicker somewhere else. If you need
 > per-bullet player-tracking, you need **generative** bullets — the bullet is
 > created from `(spawn, angle, speed)`, so you just set the angle and integrate
-> forward. That's [the plan](ecl-vm.md), and re-aiming is one of the reasons for
-> it.
+> forward. The [ECL VM](de-generative-danmaku.md) did exactly that — re-aiming
+> was one of the reasons for building it — and it still didn't transfer, so
+> training moved to [the real game](plan.md), where aimed bullets aim
+> themselves.

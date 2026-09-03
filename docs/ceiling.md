@@ -37,9 +37,21 @@ The full replay-training postmortem — every step, and the
 checkpoint-by-checkpoint transfer numbers — is
 [Porting Letty into the sim](de-letty-replay.md).
 
-## The response
+## The response that didn't work either
 
-Generate the danmaku instead: run each boss's **actual PCB bytecode**, so every
-episode is a novel, correct pattern. The [first attempt](de-ecl-vm.md) at that
-failed on bullet motion; [the plan](ecl-vm.md) gets the motion by hooking the
-engine and measuring it, the same way recording did.
+Generate the danmaku instead: run Letty's **actual PCB bytecode** in a
+reimplemented VM, so every episode is a novel, correct pattern. The
+[first attempt](de-ecl-vm.md) failed on bullet motion; the
+[second](de-generative-danmaku.md) solved that by measuring the engine and got
+the VM to a ~2 px per-bullet fidelity — and **still didn't transfer**. Eight
+runs, a flat 0 % real kill-rate, worse than either simulator it replaced. A
+reimplemented engine is still a fixed artefact; the policy found the seam between
+it and reality just the same, and the seam — 80-bit x87 float error compounding
+across 500 bullets — was wide enough to swallow the whole transfer.
+
+## The response after that
+
+Stop simulating Letty. Train the fight directly on
+[the real game](de-realgame.md#the-letty-fight-revisited) — many hooked instances
+running whole PPO trajectories in parallel, warm-started from the procedural-sim
+policy. Slower per step, but there is no fidelity gap to fall through.

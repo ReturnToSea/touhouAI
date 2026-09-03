@@ -4,8 +4,10 @@
 boss — over a full 1 B-step run it killed real Letty **47 times in 631 fights**,
 where a memorisation-prone earlier run got one kill in a billion steps. It still
 didn't transfer *reliably* (7 % overall, wildly checkpoint-dependent), for a
-reason that turned out to be structural — and that reason is
-[the plan](ecl-vm.md)'s whole justification.
+reason that turned out to be structural: **a fixed dataset, however you transform
+it, is not the real boss.** The [ECL VM](de-generative-danmaku.md) was the
+attempt to fix that by generating the danmaku instead — and it failed the same
+way, which is what finally pushed training onto [the real game](plan.md).
 
 This is the end-to-end walkthrough: how ~20 recorded Letty fights became a GPU
 training environment, and why the policy it produced swings between "kills
@@ -91,8 +93,10 @@ screen-clears the bullets and jumps the recording to the next phase's
 
 !!! warning "The HP numbers are guessed"
     `KILL_FRAC` and `SHOT_DPS` were calibrated to produce plausible phase
-    lengths, not measured. The [ECL VM plan](ecl-vm.md) replaces them with
-    Letty's real `enemy_life_set` thresholds.
+    lengths, not measured. The [ECL VM](de-generative-danmaku.md) later read
+    Letty's real `enemy_life_set` thresholds straight from the script;
+    [real-game training](plan.md) sidesteps the question entirely — the boss has
+    whatever HP it has.
 
 ## FightSim
 
@@ -216,12 +220,17 @@ don't hurt the sim wreck the transfer.
 The dead end was productive:
 
 - The **recorder**, FightSim's **collision / observation / damage-phasing** code,
-  and the **transfer daemon** are all reused unchanged by [the plan](ecl-vm.md).
-- The 20 recordings become **validation ground truth** for the VM — its output is
-  checked against them at every stage.
+  and the **transfer daemon** carried straight over to the
+  [ECL VM](de-generative-danmaku.md) and then to
+  [real-game training](plan.md) — the daemon especially: it exists because the
+  sim score can't be trusted, and that's still true.
+- The 20 recordings became **validation ground truth** for the VM — its output
+  was checked against them at every stage.
 - The re-aim failure is a direct argument for **generative** bullets: a bullet
   created from `(spawn, angle, speed)` can just be aimed at this episode's policy
-  and integrated forward. Nothing to desync.
+  and integrated forward. Nothing to desync. (The VM did exactly this — and
+  still didn't transfer, for [an unrelated reason](de-generative-danmaku.md).)
 - "More recordings" (20 → 60–100) would widen the distribution for real, but only
-  at the margin. Running Letty's **actual bytecode** so every episode is a novel,
-  correct pattern is the real fix — [the plan](ecl-vm.md).
+  at the margin — and generating novel patterns from the real bytecode, the
+  obvious next step, turned out not to help either. The pattern only stops being
+  an artefact when it's [the real game](plan.md).

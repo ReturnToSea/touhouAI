@@ -7,9 +7,10 @@ and keep them.
 
 Those recordings did two jobs. They were the training data for the
 [replay experiment](de-letty-replay.md) — the run that landed the first real
-kills on a boss and then plateaued. And they are the **validation ground truth**
-for [the plan](ecl-vm.md): the VM's output is checked against them at every
-stage.
+kills on a boss and then plateaued. And they were the **validation ground truth**
+for the [ECL VM](de-generative-danmaku.md): the VM's output was checked against
+them at every stage — which is how we know it reached ~2 px fidelity and still
+didn't transfer.
 
 ## Why recording captures the motion
 
@@ -42,7 +43,7 @@ ending when the last spell times out. About 20 Letty fights were recorded.
 | Consumer | Use |
 |---|---|
 | [the replay experiment](de-letty-replay.md) | packed into a GPU tensor and replayed as a training environment — how, and why it didn't transfer, is that page |
-| [the ECL VM plan](ecl-vm.md) | ground truth — spawn counts and timing (Part 5), sub-enemy tracks (Part 6), phase-transition frames (Part 7), the boss track (Part 8), and per-type motion traces (Part 10) all validate against these arrays |
+| [the ECL VM](de-generative-danmaku.md) | ground truth — spawn counts and timing, sub-enemy tracks, phase-transition frames, the boss track, and per-type motion traces all validated against these arrays (the VM is now shelved; the recordings remain the reference for any future boss) |
 
 !!! note "Two things to know about using them"
     The non-bullet logs start ~42 s before the first bullet (the dialogue), so

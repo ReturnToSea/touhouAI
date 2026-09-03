@@ -72,4 +72,8 @@ Stage 1 at ~238 s by *outlasting* Letty — every phase timed out, no real damag
 dealt. That works on Letty but won't on later bosses, so the
 [recorded-Letty](recording.md) work added a damage model and landed the first
 real *kills* on a boss. Both approaches then hit
-[the same ceiling](ceiling.md), which is what [the plan](ecl-vm.md) responds to.
+[the same ceiling](ceiling.md) — as did a third, running Letty's
+[actual bytecode in a reimplemented VM](de-generative-danmaku.md). The current
+direction is to train the Letty fight on
+[the real game](de-realgame.md#the-letty-fight-revisited) instead of simulating
+it.

@@ -85,10 +85,10 @@ nav:
   - "Part 4 · Training in simulation":
       - "9 · The danmaku simulator": sim.md
       - "10 · Recording real bosses": recording.md
-      - "11 · The transfer ceiling": ceiling.md
+      - "11 · The ECL format": ecl.md
+      - "12 · The transfer ceiling": ceiling.md
   - "Part 5 · The plan":
-      - "12 · The ECL format": ecl.md
-      - "13 · Generative danmaku": ecl-vm.md
+      - "13 · Training on the real game": plan.md
   - "Results": results.md
   - "Extras":
       - dead-ends.md
@@ -103,6 +103,7 @@ nav:
           - "The first ECL interpreter": de-ecl-vm.md
           - "Porting Letty into the sim": de-letty-replay.md
           - "The re-aim saga": de-reaim.md
+          - "Generative danmaku — the ECL VM": de-generative-danmaku.md
           - "Choosing a proof-of-concept boss": de-poc.md
       - "Engine internals":
           - ex-internals.md
