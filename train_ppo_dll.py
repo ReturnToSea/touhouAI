@@ -11,6 +11,7 @@ the transfer daemon / deathcam / DLL.
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 import time
 from pathlib import Path
@@ -83,6 +84,9 @@ def main():
     ap.add_argument("--minibatch", type=int, default=1024)
     ap.add_argument("--ent-coef", type=float, default=0.01)
     ap.add_argument("--vf-coef", type=float, default=0.5)
+    ap.add_argument("--ckpt-every", type=int, default=40,
+                    help="export mlp_<steps>.pt every N updates (last_mlp.pt "
+                    "every update regardless) - the transfer daemon eats these")
     args = ap.parse_args()
 
     torch.set_num_threads(4)
@@ -97,6 +101,15 @@ def main():
     vec = RealRolloutVec(n_envs=args.n_envs, frame_skip=args.frame_skip,
                          max_ep_frames=int(args.max_ep_seconds * 60))
     ac.export_mlp(run / "mlp_0.pt")
+    ac.export_mlp(run / "last_mlp.pt")
+    (run / "meta.json").write_text(json.dumps({
+        "algo": "ppo_real_dll", "fight": "letty", "hidden": list(HID),
+        "n_envs": args.n_envs, "frame_skip": args.frame_skip,
+        "steps": args.steps, "warmstart": str(args.warmstart),
+        "history_cols": ["wall_s", "total_steps", "surv_s", "entropy",
+                         "value_expl", "boss_engaged_frac", "boss_hp_floor_med",
+                         "mean_return"],
+    }, indent=2))
 
     T, Nenv = args.rollout, args.n_envs
     total, upd = 0, 0
@@ -104,7 +117,10 @@ def main():
     hist = []
     ep_ret = np.zeros(Nenv, np.float32)
     ep_len = np.zeros(Nenv, np.float32)
+    ep_beng = np.zeros(Nenv, bool)          # boss HP bar seen this episode
+    ep_bfloor = np.ones(Nenv, np.float32)   # lowest boss-HP fraction reached
     recent_len, recent_ret = [], []
+    recent_eng, recent_floor = [], []       # per finished episode
 
     while total < args.steps:
         # ---- collect (all in the DLLs) ----
@@ -115,14 +131,23 @@ def main():
         total += T * Nenv
         upd += 1
 
-        # per-env episode return/length bookkeeping (for the survival metric)
+        # per-env episode bookkeeping: survival, boss engagement, boss-HP floor.
+        # obs[t,:,13] = boss_present, obs[t,:,14] = boss_hp / phase_hp_max.
         for t in range(T):
             ep_ret += rew[t]; ep_len += 1
+            bp = obs[t, :, 13] > 0.5
+            ep_beng |= bp
+            bf = obs[t, :, 14]
+            lower = bp & (bf < ep_bfloor)
+            ep_bfloor[lower] = bf[lower]
             d = done[t] > 0.5
             if d.any():
                 recent_ret += ep_ret[d].tolist()
                 recent_len += ep_len[d].tolist()
+                recent_eng += ep_beng[d].astype(np.float32).tolist()
+                recent_floor += ep_bfloor[d][ep_beng[d]].tolist()
                 ep_ret[d] = 0; ep_len[d] = 0
+                ep_beng[d] = False; ep_bfloor[d] = 1.0
 
         o = torch.from_numpy(obs).float()          # [T,N,OBS]
         a = torch.from_numpy(act).long()           # [T,N]
@@ -182,17 +207,24 @@ def main():
         ml = float(np.mean(recent_len[-200:])) if recent_len else 0.0
         surv_s = ml * args.frame_skip / 60.0
         sps = total / (time.perf_counter() - t0)
+        eng = float(np.mean(recent_eng[-200:])) if recent_eng else 0.0
+        bfloor = float(np.median(recent_floor[-120:])) if recent_floor else 1.0
+        mret = float(np.mean(recent_ret[-200:])) if recent_ret else 0.0
         tag = "critic-warmup " if warming else ""
         print(f"upd {upd:4d}  {total/1e6:6.2f}M  {sps:6.0f}/s  collect {collect_s:4.1f}s  "
-              f"{tag}surv {surv_s:6.1f}s  ep_ends {ep_ends:3d}  ent {float(ent):.2f}  "
-              f"ev {float(ev):+.2f}  ret {np.mean(recent_ret[-200:]) if recent_ret else 0:.0f}",
-              flush=True)
-        hist.append((time.perf_counter() - t0, total, surv_s, float(ent), float(ev)))
-        np.save(run / "history.npy", np.array(hist))
+              f"{tag}surv {surv_s:6.1f}s  boss {eng*100:3.0f}%eng HP{bfloor*100:3.0f}%  "
+              f"ep_ends {ep_ends:3d}  ent {float(ent):.2f}  ev {float(ev):+.2f}  "
+              f"ret {mret:.0f}", flush=True)
+        hist.append((time.perf_counter() - t0, total, surv_s, float(ent),
+                     float(ev), eng, bfloor, mret))
+        try:
+            np.save(run / "history.npy", np.array(hist))
+        except OSError as e:
+            print(f"    [warn] history save failed: {e}", flush=True)
 
-        if upd % 8 == 0:
+        ac.export_mlp(run / "last_mlp.pt")
+        if upd % args.ckpt_every == 0:
             ac.export_mlp(run / f"mlp_{total}.pt")
-            ac.export_mlp(run / "last_mlp.pt")
 
     ac.export_mlp(run / "final_mlp.pt")
     vec.close()

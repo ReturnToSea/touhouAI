@@ -54,15 +54,19 @@ def main():
     ap.add_argument("name")
     ap.add_argument("--which", type=int, default=2, help="1=Cirno, 2=Letty")
     ap.add_argument("--driver", type=Path,
-                    default=RUNS / "ppo_v29/snap_0092M.pt")
+                    default=RUNS / "ppo_v29/best.pt",
+                    help="policy that routes stage 1 -> Letty before the test "
+                    "policy takes over")
     ap.add_argument("--k", type=int, default=5, help="episodes per checkpoint")
     ap.add_argument("--poll", type=float, default=20.0)
     ap.add_argument("--tag", default="", help="suffix so N daemons can run in "
                     "parallel writing realtransfer_<tag>.npy (fight_hud merges "
                     "all realtransfer*.npy)")
+    ap.add_argument("--runsdir", default="runs_sim",
+                    help="runs_sim (sim trainers) or runs (train_ppo_dll.py)")
     args = ap.parse_args()
 
-    run = RUNS / args.name
+    run = (HERE.parent / args.runsdir) / args.name
     run.mkdir(parents=True, exist_ok=True)
     out = run / (f"realtransfer_{args.tag}.npy" if args.tag else "realtransfer.npy")
 

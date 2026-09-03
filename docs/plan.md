@@ -116,6 +116,24 @@ We are buying **accuracy with wall-clock time.** A warm-started policy needs far
 fewer than 200 M fresh steps to specialise on one fight, and the fight is ~90 s
 long, so in practice the runs are hours, not days.
 
+### Running it
+
+```
+.venv\Scripts\python native\run_letty_real.py
+```
+
+starts the trainer (`train_ppo_dll.py`, 12 hooked games), the greedy-eval daemon
+(`fight_transfer_daemon.py --runsdir runs`, one more game), and the live overview
+(`native/fight_dll_hud.py`) — two stacked charts:
+
+- **survival** — the training curve (stochastic policy, on the real game) and the
+  daemon's greedy median per checkpoint, against the 103 s baseline line;
+- **beating Letty** — the daemon's greedy kill-rate and the training run's
+  boss-HP-drained %, against the 33 % baseline line.
+
+`history.npy` columns: `wall_s, total_steps, surv_s, entropy, value_expl,
+boss_engaged_frac, boss_hp_floor_med, mean_return`.
+
 ### The simulator isn't gone
 
 The [GPU sim](sim.md) still earns its place as the **pre-trainer** — it takes a

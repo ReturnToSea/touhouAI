@@ -43,6 +43,9 @@ the sim policy can't do is kill her fast, and — after
 The [ECL VM postmortem](de-generative-danmaku.md) ends here: stop trying to
 simulate Letty faithfully, and train the fight on Letty's actual engine.
 
+`native/run_letty_real.py` starts the trainer, the greedy-eval daemon, and the
+live overview (`native/fight_dll_hud.py`) together.
+
 - `train_ppo_dll.py --n-envs 12`, warm-started from `ppo_v29` (the
   procedural-sim policy that already clears Stage 1 and outlasts Letty).
 - Each of the 12 [hooked games](hook.md) runs `ST_ROLLOUT` — a whole PPO
