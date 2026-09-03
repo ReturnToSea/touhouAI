@@ -4,8 +4,10 @@ The plan for the last year was: build a fast, faithful simulator, train in it,
 transfer the policy to the retail game. The "fast" happened. The "faithful"
 never did — not with procedurally generated danmaku, not with 20 recordings, and
 not with a near-complete reimplementation of the game's own engine. So the plan
-has changed: **train on the real game, and accept that it is ~15× slower for the
-accuracy of having no simulator at all.**
+has changed: **train on the real game, one segment at a time — Letty first, then
+all of Stage 1, then Stage 2, and on — and accept that it is ~15× slower for the
+accuracy of having no simulator at all.** The [roadmap](#the-roadmap) is at the
+bottom; this is a work in progress.
 
 ## Why there was a simulator
 
@@ -144,9 +146,42 @@ to get a *rough* pattern for a boss we haven't recorded yet. What changed is
 that the **final, transfer-critical training happens on the real game**, not in
 any sim.
 
-## The bar
+## The roadmap
 
-Beat the [replay baseline](de-letty-replay.md): **~103 s active-fight median and
-~33 % real kill-rate on Letty**, without the bimodal checkpoint swing that made
-that baseline unreliable. When a real-game-trained policy clears that bar, it
-goes in [Results](results.md), and the same machinery points at Stage 2.
+!!! note "Work in progress"
+    This is the plan being executed right now, not a finished result. Each step
+    below is the same loop — hooked games, `ST_ROLLOUT`, PPO, the greedy-eval
+    daemon — pointed one segment further into the game. Numbers land in
+    [Results](results.md) as each step clears its bar.
+
+The target is a full six-stage Lunatic 1cc. The path there is to extend the
+real-game-trained policy one segment at a time, always warm-starting from the
+last thing that worked.
+
+| # | Segment | Bar to clear | Status |
+|---|---|---|---|
+| 1 | **Letty** — the Stage 1 boss, from the fight handoff | beat the [replay baseline](de-letty-replay.md): ~103 s active-fight median, ~33 % kill-rate, no bimodal checkpoint swing | **in progress** — first real-game run training now |
+| 2 | **All of Stage 1** — stage portion + Cirno midboss + Letty, one episode | clear Stage 1 end-to-end, greedy, ≥90 % of runs, and *kill* Letty (not time her out) | queued behind #1 |
+| 3 | **Stage 2** — full stage + midboss + Chen | reach and clear the Chen fight, greedy, on the real game | the procedural-sim policy already dies here — the first genuinely new ground |
+| 4–7 | **Stages 3, 4, 5, 6** — one at a time | clear each stage's boss; Stages 5–6 add lasers (a separate bullet type the obs and collision don't model yet) | not started |
+| 8 | **The 1cc** — all six, one credit | six stages, no continue, on vanilla `th07.exe` Lunatic | the goal |
+
+Each step's policy is the next step's warm-start, so the run never restarts from
+random — Stage 2 training begins from a policy that already clears Stage 1. The
+GPU [procedural sim](sim.md) still does the cheap first pass (random → "survives
+the stage") for any segment where it helps; the real-game loop does the part that
+has to be exact.
+
+### Known gaps to close along the way
+
+- **Lasers** (Stages 5–6) are a distinct engine object the [observation
+  builder](obs.md) and [collision](collision.md) don't handle. That work is
+  deferred until Stage 5.
+- **Episode length.** Right now every episode replays all of Stage 1 to reach
+  Letty (~60 s of "already solved" game per episode). Later segments will want a
+  [snapshot](env.md) taken deeper in, so a rollout starts at the stage being
+  trained — the [hard-reset](ref-th07-hard-reset.md) already reloads a stage;
+  snapshotting mid-stage is the extension.
+- **Resource management** (bombs, lives, power routing) isn't in the reward yet.
+  A 1cc tolerates losing lives; a *good* 1cc doesn't. That reward shaping comes
+  after the policy can physically clear the stages.

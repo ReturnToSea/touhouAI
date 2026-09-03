@@ -143,8 +143,8 @@ class Hud:
         try:
             r = load(self.name)
             self._text(r)
-            self._chart(self.c1, r, "survival  (seconds active fight)", "surv")
-            self._chart(self.c2, r, "beating Letty  (%)", "kill")
+            self._chart(self.c1, r, "survival  (seconds)   — all real game", "surv")
+            self._chart(self.c2, r, "boss kill  (%)   — all real game", "kill")
         except Exception as e:                       # never let the HUD die
             self.txt.config(text=f"{self.name}\n(hud error: {e})")
         self.root.after(2000, self._tick)
@@ -235,7 +235,8 @@ class Hud:
             if "surv" in r:
                 line(sm, r["surv"], TRAIN, 2)
                 cv.create_text(X(sm[-1]), Y(r["surv"][-1]) - 8, anchor="e",
-                               fill=TRAIN, font=("Consolas", 8), text="train (stochastic)")
+                               fill=TRAIN, font=("Consolas", 8),
+                               text="live  (training policy, every update)")
             if "rt_surv" in r:
                 for a, b in zip(r["rt_x"], r["rt_surv"]):
                     cv.create_oval(X(a) - 1.5, Y(b) - 1.5, X(a) + 1.5, Y(b) + 1.5,
@@ -243,12 +244,13 @@ class Hud:
                 line(r["rt_x"], r["rt_sv_roll"], REAL, 2)
                 cv.create_text(X(r["rt_x"][-1]), Y(r["rt_sv_roll"][-1]) - 8,
                                anchor="e", fill=REAL, font=("Consolas", 8),
-                               text=f"greedy {r['rt_sv_roll'][-1]:.0f}s")
+                               text=f"eval  (greedy, per checkpoint)  {r['rt_sv_roll'][-1]:.0f}s")
         else:
             if "dmg" in r:
                 line(sm, r["dmg"], DMG, 1, (4, 3))
                 cv.create_text(X(sm[-1]), Y(r["dmg"][-1]) - 8, anchor="e",
-                               fill=DMG, font=("Consolas", 8), text="train HP drained %")
+                               fill=DMG, font=("Consolas", 8),
+                               text="live: boss HP drained %")
             if "rt_kl_roll" in r:
                 for a, b in zip(r["rt_x"], r["rt_kill"] * 100.0):
                     cv.create_oval(X(a) - 1.5, Y(b) - 1.5, X(a) + 1.5, Y(b) + 1.5,
@@ -256,7 +258,7 @@ class Hud:
                 line(r["rt_x"], r["rt_kl_roll"], KILL, 2)
                 cv.create_text(X(r["rt_x"][-1]), Y(r["rt_kl_roll"][-1]) - 8,
                                anchor="e", fill=KILL, font=("Consolas", 8),
-                               text=f"greedy kill {r['rt_kl_roll'][-1]:.0f}%")
+                               text=f"eval: kill-rate  {r['rt_kl_roll'][-1]:.0f}%")
 
 
 def main():
